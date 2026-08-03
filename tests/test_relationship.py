@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 import unittest
@@ -81,7 +82,7 @@ class RelationshipStateTests(unittest.TestCase):
             )
             self.assertEqual(updated.inner_voice, "")
 
-    def test_state_persistence_round_trip(self):
+    def test_persistent_relationship_resets_session_only_emotion_and_voice(self):
         state = RelationshipState(
             score=47,
             mood="shy",
@@ -93,9 +94,17 @@ class RelationshipStateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "relationships" / "serena.json"
             save_state(path, state)
+            raw = json.loads(path.read_text(encoding="utf-8"))
             restored = load_state(path)
 
-        self.assertEqual(restored, state)
+        self.assertEqual(restored.score, state.score)
+        self.assertEqual(restored.session_count, state.session_count)
+        self.assertEqual(restored.event, state.event)
+        self.assertEqual(restored.updated_at, state.updated_at)
+        self.assertEqual(restored.mood, "calm")
+        self.assertEqual(restored.inner_voice, "")
+        self.assertNotIn("mood", raw)
+        self.assertNotIn("inner_voice", raw)
 
 
 class RelationshipServiceTests(unittest.TestCase):
@@ -154,7 +163,7 @@ class RelationshipServiceTests(unittest.TestCase):
             persisted.score,
             config.RELATIONSHIP_INITIAL_SCORE + 2,
         )
-        self.assertEqual(persisted.mood, "warm")
+        self.assertEqual(persisted.mood, "calm")
 
     def test_evaluator_failure_is_silently_ignored(self):
         called = threading.Event()

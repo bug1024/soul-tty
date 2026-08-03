@@ -66,7 +66,15 @@ def _clean_greeting(text: str, display_name: str | None = None) -> str | None:
     return text
 
 
-def generate_greeting(model: str, display_name: str, period: str) -> str | None:
+def generate_greeting(
+    model: str,
+    display_name: str,
+    period: str,
+    *,
+    relationship_tier: str = "",
+    repeat_launch: bool = False,
+    special: bool = False,
+) -> str | None:
     """生成不进入对话历史的短欢迎语；失败时 UI 继续使用本地时间兜底。"""
     payload = {
         "model": model,
@@ -76,14 +84,19 @@ def generate_greeting(model: str, display_name: str, period: str) -> str | None:
                 "content": (
                     config.SYSTEM_PROMPT
                     + "\n只生成一句自然的中文开场欢迎语，不超过十五个汉字。"
-                    "不要自报姓名，不要提问，不要解释，不要使用 Markdown。"
+                    "可以轻轻提问，但不要要求用户回答。不要自报姓名，不要解释，"
+                    "不要使用 Markdown，不要声称记得具体往事或离线时真的做过什么。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"现在是{period}，你是{display_name}。"
-                    "请用符合当前时段和人格的口吻欢迎用户。只输出欢迎语。"
+                    f"现在是{period}，你是{display_name}，"
+                    f"羁绊阶段是{relationship_tier or '未建立'}，"
+                    f"短时间重复启动={'是' if repeat_launch else '否'}，"
+                    f"低频特殊开场={'是' if special else '否'}。"
+                    "请让熟悉程度、当前时段和启动节奏自然影响语气；"
+                    "特殊开场为是时可以更有个性，但仍要克制。只输出欢迎语。"
                 ),
             },
         ],
@@ -110,6 +123,9 @@ def generate_idle_emotion(
     model: str,
     display_name: str,
     period: str,
+    *,
+    relationship_tier: str = "",
+    mood: str = "calm",
 ) -> str | None:
     """生成独立于聊天历史的等待短句，供安静陪伴状态使用。"""
     payload = {
@@ -127,7 +143,9 @@ def generate_idle_emotion(
             {
                 "role": "user",
                 "content": (
-                    f"现在是{period}，你是{display_name}，用户已经安静了一会儿。"
+                    f"现在是{period}，你是{display_name}，"
+                    f"羁绊阶段是{relationship_tier or '未建立'}，"
+                    f"本次会话情绪是{mood}，用户已经安静了一会儿。"
                     "请轻轻表达一种情绪，可以邀请用户说话。只输出短句。"
                 ),
             },

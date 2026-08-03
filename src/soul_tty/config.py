@@ -68,6 +68,13 @@ LLM_GREETING_ENABLED = os.environ.get("LLM_GREETING_ENABLED", "1") not in (
     "False",
 )
 LLM_GREETING_TIMEOUT = float(os.environ.get("LLM_GREETING_TIMEOUT", "5"))
+# 启动节奏只用于表现层，不包含任何对话记忆。
+PRESENCE_REPEAT_LAUNCH_WINDOW_S = float(
+    os.environ.get("PRESENCE_REPEAT_LAUNCH_WINDOW_S", "600")
+)
+PRESENCE_SPECIAL_GREETING_RATE = float(
+    os.environ.get("PRESENCE_SPECIAL_GREETING_RATE", "0.05")
+)
 # Dashboard 长时间没有收到语音识别文本时，轮换一句克制的情绪短句。
 IDLE_EMOTION_ENABLED = os.environ.get("IDLE_EMOTION_ENABLED", "1") not in (
     "0",

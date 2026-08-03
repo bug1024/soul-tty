@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from . import config, conversation, relationship
+from . import config, conversation, presence, relationship
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
 from .ui import terminal
@@ -59,7 +59,15 @@ def main() -> None:
         print(f"LLM 服务不可用: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
+    launch_context = (
+        presence.LaunchContext()
+        if args.text or args.file
+        else presence.record_launch(persona.id)
+    )
+    terminal.configure_presence(launch_context)
+
     relationship_state = None
+    relationship_service = None
     if config.RELATIONSHIP_ENABLED:
 
         def evaluate(
@@ -100,7 +108,6 @@ def main() -> None:
     if (
         dashboard_started
         and config.LLM_GREETING_ENABLED
-        and not (relationship_state and relationship_state.inner_voice)
     ):
         period = terminal.day_period()
 
@@ -110,6 +117,11 @@ def main() -> None:
                     model,
                     persona.display_name,
                     period,
+                    relationship_tier=(
+                        relationship_state.tier if relationship_state else ""
+                    ),
+                    repeat_launch=launch_context.repeat_launch,
+                    special=launch_context.special_greeting,
                 )
             except Exception:
                 return
@@ -135,6 +147,16 @@ def main() -> None:
                     model,
                     persona.display_name,
                     terminal.day_period(),
+                    relationship_tier=(
+                        relationship_service.state.tier
+                        if relationship_service is not None
+                        else ""
+                    ),
+                    mood=(
+                        relationship_service.state.mood
+                        if relationship_service is not None
+                        else "calm"
+                    ),
                 )
 
         terminal.start_idle_emotions(idle_generator)

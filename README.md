@@ -58,7 +58,11 @@ SOUL_TTY_PERSONA_DIR=/path/to/personas uv run soul-tty --persona my-agent
 
 欢迎区默认只显示当前人格的羁绊阶段，例如 `♡ 羁绊  亲近`，避免把陪伴关系表现成游戏进度条；按 `Tab` 后才显示精确分值。每轮完整回答结束后，主流程只向一个有界内存队列投递问答；后台单线程再调用 LLM 判断关心、信任、共同玩笑、冒犯等关系事件，并生成受限分值变化、情绪和一句第一人称的当下感受。机制化或第三人称的画外音会被丢弃。
 
-这条链路是完全可降级的旁路：投递不等待 LLM，队列满时淘汰旧事件，请求失败或低置信度结果不会改变状态。画外音也不会打断思考或播报，只会在安全的聆听状态刷新。状态按人格保存到 `~/.local/state/soul-tty/relationships/`，与正式对话历史相互独立。
+欢迎语会结合当前时段、羁绊阶段和启动间隔：短时间再次启动时会自然地表达“欢迎回来”，约 5% 的启动使用一次克制的特殊开场。启动表现只在 `~/.local/state/soul-tty/presence/` 保存时间与次数，不包含任何对话内容；`--text` 和 `--file` 调试运行不会计入启动节奏。
+
+这条链路是完全可降级的旁路：投递不等待 LLM，队列满时淘汰旧事件，请求失败或低置信度结果不会改变状态。画外音也不会打断思考或播报，只会在安全的聆听状态刷新。羁绊按人格保存到 `~/.local/state/soul-tty/relationships/`，与正式对话历史相互独立；本次会话的情绪和画外音不会写入磁盘，退出后恢复为平静状态。
+
+长时间没有语音输入时，欢迎区会在原有位置切换为“安静陪伴”，并依据本次会话情绪选择一句行为化提示；用户再次开口后立即恢复正常聆听状态。这些变化使用定时事件而非持续动画，不增加空闲刷新负担。
 
 默认在主回答结束并持续空闲 3 秒后复用当前 LLM 服务，并限制为每分钟最多一次；冷却窗口内的多轮会合并评估。若要隔离模型算力竞争，可把 `RELATIONSHIP_LLM_URL` 和 `RELATIONSHIP_LLM_MODEL` 指向单独常驻的小模型服务。不要把同一个 `--models-max 1` 路由器切换到另一模型，否则反复换模会增加延迟和功耗。
 
@@ -92,6 +96,7 @@ src/soul_tty/
 ├── config.py          # 环境变量配置
 ├── conversation.py    # 对话流程与打断策略
 ├── relationship.py    # 非阻塞亲密成长旁路与状态持久化
+├── presence.py        # 时间、启动节奏与低频特殊开场
 ├── audio/             # 录音、sherpa-onnx ASR、TTS 播放
 ├── clients/           # llama.cpp 客户端
 ├── personas/          # 人格加载、校验与运行时应用
@@ -176,6 +181,8 @@ BARGE_IN_ENABLED=1 svc start soul-tty
 | `LLM_REPEAT_LAST_N` | `128` | 重复惩罚回看 token 数 |
 | `LLM_GREETING_ENABLED` | `1` | 后台生成符合早中晚时段的简短欢迎语；失败时使用本地时间兜底，不阻塞启动 |
 | `LLM_GREETING_TIMEOUT` | `5` | 动态欢迎语请求超时（秒） |
+| `PRESENCE_REPEAT_LAUNCH_WINDOW_S` | `600` | 在此秒数内再次启动时使用“欢迎回来”语气 |
+| `PRESENCE_SPECIAL_GREETING_RATE` | `0.05` | 每次正常启动采用低频特殊开场的概率 |
 | `IDLE_EMOTION_ENABLED` | `1` | Dashboard 长时间未识别到语音时，主动切换一条情绪短句 |
 | `IDLE_EMOTION_AFTER_S` | `60` | 进入聆听后首次触发安静陪伴的等待时间（秒） |
 | `IDLE_EMOTION_INTERVAL_S` | `120` | 持续安静时后续情绪短句的最小间隔（秒） |

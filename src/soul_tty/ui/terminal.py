@@ -21,6 +21,7 @@ from rich.text import Text
 
 from .. import config
 from ..personas.models import Persona
+from ..presence import LaunchContext
 from . import avatar as avatar_ui
 
 _console = Console(highlight=False)
@@ -29,6 +30,7 @@ _answer_pending = False
 _answer_has_content = False
 _dashboard: "Dashboard | None" = None
 _relationship_profile: tuple[int, str, str, str] | None = None
+_launch_context = LaunchContext()
 _AVATAR_ROW = 3
 _AVATAR_COLUMN = 7
 _USER_COLOR = "#67B7D1"
@@ -47,6 +49,12 @@ _IDLE_EMOTION_LINES = (
     "这里静悄悄的，我在等你。",
     "有点想听听你的声音了。",
     "我还在这里，别把我忘啦。",
+)
+_IDLE_PRESENCE_HINTS = (
+    "她安静地等你开口",
+    "似乎并不急着说话",
+    "今天更想听你说",
+    "等你先打破沉默",
 )
 
 
@@ -150,10 +158,15 @@ class Dashboard:
         relationship_voice = (
             _relationship_profile[3] if _relationship_profile is not None else ""
         )
-        self.greeting = relationship_voice or _fallback_greeting()
+        self.greeting = relationship_voice or _fallback_greeting(
+            tier=self.relationship_tier,
+            repeat_launch=_launch_context.repeat_launch,
+            special=_launch_context.special_greeting,
+        )
         self.base_greeting = self.greeting
         self._pending_relationship_voice = ""
         self.partial_text = ""
+        self.presence_hint = ""
         self.messages: list[tuple[str, str]] = []
         self.answer_index: int | None = None
         self.scroll_offset = 0
@@ -215,10 +228,11 @@ class Dashboard:
             avatar,
             state=self.state,
             greeting=self.greeting,
-            status_hint=self.partial_text or None,
+            status_hint=self.partial_text or self.presence_hint or None,
             relationship_score=self.relationship_score,
             relationship_tier=self.relationship_tier,
             show_details=self.show_details,
+            quiet_presence=self._idle_emotion_active,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -482,6 +496,11 @@ class Dashboard:
             self.relationship_score = score
             self.relationship_tier = tier
             self.relationship_mood = mood
+            if self._idle_emotion_active:
+                self.presence_hint = _idle_presence_hint(
+                    mood,
+                    self._idle_emotion_index - 1,
+                )
             safe_to_refresh = self.state == "listening" and not self.partial_text
             if inner_voice:
                 if safe_to_refresh:
@@ -501,6 +520,7 @@ class Dashboard:
         if not self._idle_emotion_active:
             return False
         self._idle_emotion_active = False
+        self.presence_hint = ""
         self.greeting = self.base_greeting
         return True
 
@@ -523,9 +543,9 @@ class Dashboard:
             if self.state != "listening" or now < self._next_idle_emotion_at:
                 return False
             activity_token = self._last_voice_activity
-            self.greeting = _IDLE_EMOTION_LINES[
-                self._idle_emotion_index % len(_IDLE_EMOTION_LINES)
-            ]
+            index = self._idle_emotion_index
+            self.greeting = _idle_emotion_line(self.relationship_mood, index)
+            self.presence_hint = _idle_presence_hint(self.relationship_mood, index)
             self._idle_emotion_index += 1
             self._idle_emotion_active = True
             self._next_idle_emotion_at = now + config.IDLE_EMOTION_INTERVAL_S
@@ -621,6 +641,11 @@ def configure_relationship(
     _relationship_profile = (
         (score, tier, mood, inner_voice) if score is not None else None
     )
+
+
+def configure_presence(context: LaunchContext | None = None) -> None:
+    global _launch_context
+    _launch_context = context or LaunchContext()
 
 
 def update_relationship(state) -> None:
@@ -748,15 +773,64 @@ def day_period(hour: int | None = None) -> str:
     return "夜深"
 
 
-def _fallback_greeting(hour: int | None = None) -> str:
+def _is_close_tier(tier: str) -> bool:
+    return tier in {"亲近", "默契", "灵魂共鸣"}
+
+
+def _fallback_greeting(
+    hour: int | None = None,
+    *,
+    tier: str = "",
+    repeat_launch: bool = False,
+    special: bool = False,
+) -> str:
     period = day_period(hour)
-    return {
-        "早上": "早上好，今天也请多关照。",
-        "中午": "中午好，记得好好吃饭。",
-        "下午": "下午好，我一直在这里。",
-        "晚上": "晚上好，我一直在这里。",
-        "夜深": "夜深了，我还陪着你。",
-    }[period]
+    close = _is_close_tier(tier)
+    if special:
+        return (
+            "先别急，安静一会儿也可以。"
+            if close
+            else "今天让我先问一个问题，好吗？"
+        )
+    if repeat_launch:
+        return "这么快就回来了？" if close else "欢迎回来。"
+    greetings = {
+        "早上": (
+            "早上好，今天开始得很早。",
+            "这么早？看来今天有事要做。",
+        ),
+        "中午": ("你好，想聊些什么？", "来了，今天想从哪里开始？"),
+        "下午": ("你好，想聊些什么？", "来了，今天想从哪里开始？"),
+        "晚上": ("晚上好。", "晚上好，今天过得怎么样？"),
+        "夜深": ("已经很晚了。", "我就知道，这个时间你还没睡。"),
+    }
+    return greetings[period][1 if close else 0]
+
+
+def _idle_emotion_line(mood: str, index: int) -> str:
+    mood_lines = {
+        "happy": ("刚才聊得挺开心的。", "我还在等你继续呢。"),
+        "shy": ("安静一下也挺好的。", "我还在这里哦。"),
+        "warm": ("有点想再听听你的声音。", "陪你安静一会儿也好。"),
+        "concerned": ("不用着急，我在这里。", "慢慢来就好。"),
+        "upset": ("让我先安静一会儿。", "等你想说的时候再说吧。"),
+    }
+    lines = mood_lines.get(mood, _IDLE_EMOTION_LINES)
+    return lines[index % len(lines)]
+
+
+def _idle_presence_hint(mood: str, index: int) -> str:
+    mood_hints = {
+        "happy": "她似乎还带着一点笑意",
+        "shy": "她安静地移开了视线",
+        "warm": "她并不急着让你开口",
+        "concerned": "她耐心地等你整理心情",
+        "upset": "她暂时安静了下来",
+    }
+    return mood_hints.get(
+        mood,
+        _IDLE_PRESENCE_HINTS[index % len(_IDLE_PRESENCE_HINTS)],
+    )
 
 
 def _splash_panel(
@@ -771,6 +845,7 @@ def _splash_panel(
     relationship_score: int | None = None,
     relationship_tier: str = "",
     show_details: bool = False,
+    quiet_presence: bool = False,
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -795,7 +870,12 @@ def _splash_panel(
             "speaking": "≋",
         }
         status.append(f"{symbols.get(state, '○')} ", style=f"bold {primary}")
-        status.append(_STATE_LABELS.get(state, "角色已就绪"), style="bold")
+        status_label = (
+            "安静陪伴"
+            if quiet_presence and state == "listening"
+            else _STATE_LABELS.get(state, "角色已就绪")
+        )
+        status.append(status_label, style="bold")
         hints = {
             "idle": "随时可以开始",
             "listening": "直接说话即可",

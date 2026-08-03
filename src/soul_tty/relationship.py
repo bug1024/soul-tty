@@ -79,12 +79,12 @@ def load_state(path: Path) -> RelationshipState:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         score = min(100, max(0, int(data.get("score", 10))))
-        mood = str(data.get("mood", "calm"))
         return RelationshipState(
             score=score,
-            mood=mood if mood in _MOODS else "calm",
+            # 情绪与画外音只属于本次会话；关系分数和阶段才跨启动保存。
+            mood="calm",
             event=str(data.get("event", ""))[:80],
-            inner_voice=_clean_inner_voice(data.get("inner_voice", "")),
+            inner_voice="",
             session_count=max(0, int(data.get("session_count", 0))),
             updated_at=str(data.get("updated_at", "")),
         )
@@ -95,8 +95,11 @@ def load_state(path: Path) -> RelationshipState:
 def save_state(path: Path, state: RelationshipState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
+    durable = asdict(state)
+    durable.pop("mood", None)
+    durable.pop("inner_voice", None)
     temporary.write_text(
-        json.dumps(asdict(state), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(durable, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)

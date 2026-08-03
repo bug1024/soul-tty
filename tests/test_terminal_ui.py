@@ -6,6 +6,7 @@ from rich.cells import cell_len
 from rich.console import Console
 
 from soul_tty.personas import load_persona
+from soul_tty.presence import LaunchContext
 from soul_tty.ui import terminal
 
 
@@ -13,6 +14,7 @@ class TerminalUITests(unittest.TestCase):
     def tearDown(self):
         terminal._dashboard = None
         terminal._relationship_profile = None
+        terminal._launch_context = LaunchContext()
 
     def test_splash_has_emotion_status_and_lightweight_technical_layers(self):
         output = io.StringIO()
@@ -55,7 +57,38 @@ class TerminalUITests(unittest.TestCase):
         self.assertEqual(terminal.day_period(21), "晚上")
         self.assertEqual(terminal.day_period(2), "夜深")
         self.assertIn("早上", terminal._fallback_greeting(8))
-        self.assertIn("夜深", terminal._fallback_greeting(2))
+        self.assertEqual(terminal._fallback_greeting(2), "已经很晚了。")
+
+    def test_greeting_fallback_combines_time_bond_and_launch_rhythm(self):
+        self.assertEqual(
+            terminal._fallback_greeting(7, tier="灵魂共鸣"),
+            "这么早？看来今天有事要做。",
+        )
+        self.assertEqual(
+            terminal._fallback_greeting(
+                15,
+                tier="灵魂共鸣",
+                repeat_launch=True,
+            ),
+            "这么快就回来了？",
+        )
+        self.assertEqual(
+            terminal._fallback_greeting(15, tier="初识", special=True),
+            "今天让我先问一个问题，好吗？",
+        )
+
+    def test_dashboard_uses_configured_launch_context_without_waiting_for_llm(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        terminal.configure_relationship(90, "灵魂共鸣", "calm")
+        terminal.configure_presence(LaunchContext(repeat_launch=True))
+
+        with patch.object(terminal, "_console", console):
+            dashboard = terminal.Dashboard(persona, runtime)
+
+        self.assertEqual(dashboard.greeting, "这么快就回来了？")
 
     def test_idle_emotion_appears_and_voice_activity_restores_greeting(self):
         output = io.StringIO()
@@ -83,11 +116,15 @@ class TerminalUITests(unittest.TestCase):
             self.assertTrue(triggered)
             self.assertEqual(dashboard.greeting, "有点想听听你的声音了。")
             self.assertTrue(dashboard._idle_emotion_active)
+            self.assertTrue(dashboard.presence_hint)
+            console.print(dashboard.render())
+            self.assertIn("安静陪伴", output.getvalue())
 
             dashboard.mark_voice_activity()
 
         self.assertEqual(dashboard.greeting, "晚上好，我一直在这里。")
         self.assertFalse(dashboard._idle_emotion_active)
+        self.assertEqual(dashboard.presence_hint, "")
 
     def test_idle_llm_result_is_discarded_if_user_speaks_while_generating(self):
         output = io.StringIO()

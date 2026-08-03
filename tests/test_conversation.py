@@ -156,12 +156,23 @@ class ChatCancellationTests(unittest.TestCase):
 class GreetingGenerationTests(unittest.TestCase):
     @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
     def test_generates_a_short_time_aware_greeting_without_chat_history(self):
-        greeting = llm_client.generate_greeting("test", "Serena", "晚上")
+        greeting = llm_client.generate_greeting(
+            "test",
+            "Serena",
+            "晚上",
+            relationship_tier="默契",
+            repeat_launch=True,
+            special=True,
+        )
         payload = GreetingClient.request[1]["json"]
 
         self.assertEqual(greeting, "晚上好，我把月光留给你。")
         self.assertFalse(payload["stream"])
         self.assertIn("晚上", payload["messages"][1]["content"])
+        self.assertIn("羁绊阶段是默契", payload["messages"][1]["content"])
+        self.assertIn("短时间重复启动=是", payload["messages"][1]["content"])
+        self.assertIn("低频特殊开场=是", payload["messages"][1]["content"])
+        self.assertIn("不要声称记得具体往事", payload["messages"][0]["content"])
         self.assertEqual(payload["max_tokens"], 32)
 
     def test_removes_self_introduction_and_rejects_wide_terminal_text(self):
@@ -179,12 +190,20 @@ class GreetingGenerationTests(unittest.TestCase):
 
     @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
     def test_idle_emotion_is_generated_without_chat_history(self):
-        phrase = llm_client.generate_idle_emotion("test", "Serena", "下午")
+        phrase = llm_client.generate_idle_emotion(
+            "test",
+            "Serena",
+            "下午",
+            relationship_tier="亲近",
+            mood="happy",
+        )
         payload = GreetingClient.request[1]["json"]
 
         self.assertEqual(phrase, "晚上好，我把月光留给你。")
         self.assertFalse(payload["stream"])
         self.assertIn("已经安静了一会儿", payload["messages"][1]["content"])
+        self.assertIn("羁绊阶段是亲近", payload["messages"][1]["content"])
+        self.assertIn("本次会话情绪是happy", payload["messages"][1]["content"])
         self.assertIn("不超过十五个汉字", payload["messages"][0]["content"])
 
 
