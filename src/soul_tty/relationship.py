@@ -18,6 +18,9 @@ from . import config
 _STOP = object()
 _SAFE_ID = re.compile(r"[^0-9A-Za-z_.-]+")
 _MOODS = {"calm", "happy", "shy", "concerned", "upset", "warm"}
+_MECHANISM_VOICE = re.compile(
+    r"(?:亲密度|关系|好感度|加分|扣分|分数|等级|阶段|事件|提升|下降|进度|她)"
+)
 
 
 def tier_for(score: int) -> str:
@@ -62,6 +65,8 @@ def _clean_inner_voice(value: Any) -> str:
     text = re.sub(r"<think>.*?</think>", "", value, flags=re.DOTALL).strip()
     text = text.splitlines()[0].strip() if text else ""
     text = re.sub(r"^[#>*\-\d.、\s]+", "", text).strip("“”\"' ")
+    if _MECHANISM_VOICE.search(text):
+        return ""
     return text if 2 <= len(text) <= 18 else ""
 
 
@@ -142,6 +147,7 @@ class RelationshipService:
         state_dir: Path | None = None,
         queue_size: int | None = None,
         idle_delay_s: float | None = None,
+        min_interval_s: float | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.on_update = on_update
@@ -158,7 +164,13 @@ class RelationshipService:
             if idle_delay_s is None
             else idle_delay_s
         )
+        self.min_interval_s = (
+            config.RELATIONSHIP_MIN_INTERVAL_S
+            if min_interval_s is None
+            else min_interval_s
+        )
         self._last_activity = time.monotonic()
+        self._last_evaluation = 0.0
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
@@ -211,19 +223,55 @@ class RelationshipService:
                 return False
         return False
 
+    def _wait_for_evaluation_slot(self) -> bool:
+        """限制旁路推理频率，并在等待后重新确认用户仍处于空闲。"""
+        remaining = self.min_interval_s - (
+            time.monotonic() - self._last_evaluation
+        )
+        if remaining > 0 and self._stop.wait(remaining):
+            return False
+        return self._wait_for_idle()
+
+    def _coalesce_pending(self, first: CompletedTurn) -> CompletedTurn:
+        """把冷却窗口内积累的多轮合并成一次 LLM 关系评估。"""
+        turns = [first]
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if isinstance(item, CompletedTurn):
+                    turns.append(item)
+            finally:
+                self.queue.task_done()
+        if len(turns) == 1:
+            return first
+        return CompletedTurn(
+            "\n".join(
+                f"第{index}轮：{turn.user_text}"
+                for index, turn in enumerate(turns, 1)
+            ),
+            "\n".join(
+                f"第{index}轮：{turn.agent_text}"
+                for index, turn in enumerate(turns, 1)
+            ),
+        )
+
     def _run(self) -> None:
         while not self._stop.is_set():
-            try:
-                item = self.queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
+            item = self.queue.get()
             try:
                 if item is _STOP or not isinstance(item, CompletedTurn):
                     return
                 if not self._wait_for_idle():
                     return
+                if not self._wait_for_evaluation_slot():
+                    return
+                item = self._coalesce_pending(item)
                 with self._lock:
                     current = self.state
+                self._last_evaluation = time.monotonic()
                 try:
                     result = self.evaluator(current, item)
                 except Exception:

@@ -1,7 +1,7 @@
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from soul_tty import config
 from soul_tty import conversation as main_module
@@ -9,6 +9,7 @@ from soul_tty.audio import asr
 from soul_tty.audio.tts import (
     PlaybackLevelMeter,
     StreamingSpeaker,
+    _write_metered_pcm,
     _trim_trailing_silence,
     speak,
     synthesize_mlx_stream,
@@ -209,6 +210,8 @@ class RelationshipEvaluationTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertIn("不可信数据", payload["messages"][0]["content"])
+        self.assertIn("第一人称", payload["messages"][0]["content"])
+        self.assertIn("禁止出现亲密度", payload["messages"][0]["content"])
         self.assertIn("我今天一直在想你", payload["messages"][1]["content"])
         self.assertEqual(result["delta"], 1)
         self.assertEqual(result["mood"], "warm")
@@ -233,9 +236,10 @@ class FakePCMResponse:
 class RecordingPCMClient:
     request = None
     requests = []
+    created = 0
 
     def __init__(self, *args, **kwargs):
-        pass
+        type(self).created += 1
 
     def __enter__(self):
         return self
@@ -252,6 +256,7 @@ class RecordingPCMClient:
 class MLXTTSClientTests(unittest.TestCase):
     def setUp(self):
         RecordingPCMClient.requests = []
+        RecordingPCMClient.created = 0
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_sends_builtin_voice_stream_request_and_aligns_pcm(self):
@@ -275,6 +280,7 @@ class MLXTTSClientTests(unittest.TestCase):
         list(synthesize_mlx_stream("第一句。第二句！"))
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(inputs, ["第一句。", "第二句！"])
+        self.assertEqual(RecordingPCMClient.created, 1)
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_strips_markdown_and_never_sends_symbol_only_segments(self):
@@ -290,6 +296,15 @@ class MLXTTSClientTests(unittest.TestCase):
         list(synthesize_mlx_stream(text))
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(inputs, ["会啊，我喊一声嗯。", "这就来个响亮的嗯！"])
+
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
+    def test_splits_a_short_trailing_clause_that_qwen_may_swallow(self):
+        list(synthesize_mlx_stream("不过小心哦，里面可是全是水，别滑倒了。"))
+        inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
+        self.assertEqual(
+            inputs,
+            ["不过小心哦，里面可是全是水，", "别滑倒了。"],
+        )
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_skips_a_symbol_only_answer(self):
@@ -316,6 +331,28 @@ class MLXTTSClientTests(unittest.TestCase):
         meter.close()
         self.assertGreater(levels[0], 0.55)
         self.assertEqual(levels[-1], 0.0)
+
+    def test_pcm_playback_updates_mouth_on_short_audio_windows(self):
+        class RecordingStream:
+            def __init__(self):
+                self.frames = []
+
+            def write(self, frame):
+                self.frames.append(frame)
+
+        levels = []
+        meter = PlaybackLevelMeter(levels.append)
+        stream = RecordingStream()
+        samples_per_frame = config.TTS_SAMPLE_RATE // 20
+        voiced = (12000).to_bytes(2, "little", signed=True) * samples_per_frame
+        silence = b"\x00\x00" * samples_per_frame
+
+        _write_metered_pcm(stream, voiced + silence + voiced, meter)
+
+        self.assertEqual(len(stream.frames), 3)
+        self.assertGreater(levels[0], 0.55)
+        self.assertLess(levels[1], 0.16)
+        self.assertGreater(levels[2], 0.55)
 
 class FinishedProcess:
     def poll(self):
@@ -455,6 +492,25 @@ class AvatarStateRegressionTests(unittest.TestCase):
 
         record.assert_not_called()
 
+    def test_whole_answer_tts_receives_live_audio_level_callback(self):
+        with (
+            patch.object(config, "TTS_ENABLED", True),
+            patch.object(config, "TTS_WHOLE_ANSWER", True),
+            patch.object(main_module.terminal, "answer_start"),
+            patch.object(main_module.terminal, "answer_chunk"),
+            patch.object(main_module.terminal, "answer_end"),
+            patch.object(main_module.terminal, "speaking"),
+            patch.object(main_module.tts, "speak") as speak_mock,
+            patch.object(main_module.relationship, "record_turn"),
+        ):
+            main_module._answer(FakeStreamingChat(), "你好")
+
+        speak_mock.assert_called_once_with(
+            "第一句。第二句！",
+            ANY,
+            main_module.terminal.audio_level,
+        )
+
 
 class FakeOnlineStream:
     def __init__(self):
@@ -514,6 +570,47 @@ class SherpaStreamingTests(unittest.TestCase):
         samples = asr._pcm_samples(b"\x00\x80\xff\x7f")
         self.assertAlmostEqual(float(samples[0]), -1.0)
         self.assertAlmostEqual(float(samples[1]), 32767 / 32768)
+
+    def test_vad_gate_skips_idle_silence_and_preserves_pre_roll(self):
+        class FakeVad:
+            decisions = iter([False, True, True, False])
+
+            def is_speech(self, pcm, sample_rate):
+                return next(self.decisions)
+
+        class FakeSession:
+            def __init__(self):
+                self.received = []
+                self.last_endpoint = False
+
+            def accept(self, pcm):
+                self.received.append(pcm)
+                self.last_endpoint = len(self.received) == 2
+                return []
+
+            def reset(self):
+                self.last_endpoint = False
+
+        frame = b"\x00\x00" * 480
+        session = FakeSession()
+        gate = asr.VadGatedSherpaStream(
+            session,
+            FakeVad(),
+            pre_roll_ms=90,
+            trigger_ms=60,
+        )
+
+        gate.accept(frame)
+        gate.accept(frame)
+        self.assertEqual(session.received, [])
+
+        gate.accept(frame)
+        self.assertTrue(gate.active)
+        self.assertEqual(session.received, [frame * 3])
+
+        gate.accept(frame)
+        self.assertFalse(gate.active)
+        self.assertEqual(session.received[-1], frame)
 
 
 if __name__ == "__main__":

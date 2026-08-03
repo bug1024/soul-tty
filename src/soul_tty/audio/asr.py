@@ -1,10 +1,12 @@
 """进程内 sherpa-onnx 流式语音识别。"""
 
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import webrtcvad
 
 from .. import config
 
@@ -76,13 +78,16 @@ class SherpaStream:
         self.recognizer = recognizer or get_sherpa_recognizer()
         self.stream = self.recognizer.create_stream()
         self._last_partial = ""
+        self.last_endpoint = False
 
     def reset(self) -> None:
         # 新建流比保留前一句 encoder 状态更稳妥，也能彻底丢掉播放尾音。
         self.stream = self.recognizer.create_stream()
         self._last_partial = ""
+        self.last_endpoint = False
 
     def accept(self, pcm: bytes) -> list[TranscriptUpdate]:
+        self.last_endpoint = False
         samples = _pcm_samples(pcm)
         if samples.size == 0:
             return []
@@ -101,6 +106,7 @@ class SherpaStream:
             if text:
                 updates.append(TranscriptUpdate(text, final=True))
             self.reset()
+        self.last_endpoint = endpoint
         return updates
 
     def finish(self) -> str:
@@ -113,6 +119,69 @@ class SherpaStream:
         text = self.recognizer.get_result(self.stream).strip()
         self.reset()
         return text
+
+
+class VadGatedSherpaStream:
+    """只在检测到人声后唤醒 Sherpa，同时保留句首与 endpoint 静音。"""
+
+    def __init__(
+        self,
+        session: SherpaStream | None = None,
+        vad=None,
+        *,
+        pre_roll_ms: int | None = None,
+        trigger_ms: int | None = None,
+    ) -> None:
+        self.session = session or SherpaStream()
+        self.vad = vad or webrtcvad.Vad(config.VAD_AGGRESSIVENESS)
+        pre_roll_ms = (
+            config.SHERPA_VAD_PRE_ROLL_MS
+            if pre_roll_ms is None
+            else pre_roll_ms
+        )
+        trigger_ms = (
+            config.SHERPA_VAD_TRIGGER_MS if trigger_ms is None else trigger_ms
+        )
+        self._pre_roll: deque[bytes] = deque(
+            maxlen=max(1, pre_roll_ms // config.FRAME_MS)
+        )
+        self._trigger_frames = max(1, trigger_ms // config.FRAME_MS)
+        self._speech_frames = 0
+        self.active = False
+
+    def reset(self) -> None:
+        self.session.reset()
+        self._pre_roll.clear()
+        self._speech_frames = 0
+        self.active = False
+
+    def accept(self, pcm: bytes) -> list[TranscriptUpdate]:
+        if self.active:
+            updates = self.session.accept(pcm)
+            if self.session.last_endpoint:
+                self._pre_roll.clear()
+                self._speech_frames = 0
+                self.active = False
+            return updates
+
+        self._pre_roll.append(pcm)
+        try:
+            speech = self.vad.is_speech(pcm, config.SAMPLE_RATE)
+        except ValueError:
+            # 非标准尾帧只会出现在固定文件输入；实时流应始终是 30ms。
+            speech = False
+        self._speech_frames = self._speech_frames + 1 if speech else 0
+        if self._speech_frames < self._trigger_frames:
+            return []
+
+        self.active = True
+        buffered = b"".join(self._pre_roll)
+        self._pre_roll.clear()
+        updates = self.session.accept(buffered)
+        if self.session.last_endpoint:
+            self.active = False
+            self._speech_frames = 0
+        return updates
 
 
 def transcribe(pcm: bytes) -> str:

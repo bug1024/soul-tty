@@ -174,7 +174,11 @@ def evaluate_relationship(
                     "沉默和离开不扣分。只输出一个 JSON 对象，字段必须是："
                     "event 字符串；delta 为 -2 到 2 的整数；"
                     "mood 为 calm/happy/shy/concerned/upset/warm 之一；"
-                    "inner_voice 为符合当前关系和情绪、不超过十五个汉字的中文画外音；"
+                    "inner_voice 为角色此刻亲口说出的第一人称中文短句，"
+                    "要含蓄表达当下感受，不超过十五个汉字；"
+                    "不要使用第三人称旁白，不要解释判断原因，"
+                    "禁止出现亲密度、关系、加分、扣分、分数、等级、阶段、事件、"
+                    "提升、下降、进度等机制词；"
                     "confidence 为 0 到 1 的数字。不要输出 Markdown。"
                 ),
             },
@@ -191,7 +195,7 @@ def evaluate_relationship(
         "stream": False,
         "temperature": 0.2,
         "top_p": 0.8,
-        "max_tokens": 160,
+        "max_tokens": config.RELATIONSHIP_LLM_MAX_TOKENS,
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False},
     }

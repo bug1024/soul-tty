@@ -21,6 +21,15 @@ SHERPA_PARTIAL_ENABLED = os.environ.get("SHERPA_PARTIAL_ENABLED", "1") not in (
     "false",
     "False",
 )
+# 空闲时先用极轻量 WebRTC VAD 门控，避免把无限静音持续送进 Paraformer。
+# 触发时连同 pre-roll 一起送入，防止吞掉句首；触发后保留静音给 Sherpa endpoint。
+SHERPA_VAD_GATE_ENABLED = os.environ.get("SHERPA_VAD_GATE_ENABLED", "1") not in (
+    "0",
+    "false",
+    "False",
+)
+SHERPA_VAD_PRE_ROLL_MS = int(os.environ.get("SHERPA_VAD_PRE_ROLL_MS", "300"))
+SHERPA_VAD_TRIGGER_MS = int(os.environ.get("SHERPA_VAD_TRIGGER_MS", "120"))
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8180")
 LLM_MODEL = os.environ.get(
     "LLM_MODEL", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
@@ -72,6 +81,9 @@ IDLE_EMOTION_INTERVAL_S = float(
 LLM_IDLE_EMOTION_ENABLED = os.environ.get(
     "LLM_IDLE_EMOTION_ENABLED", "1"
 ) not in ("0", "false", "False")
+LLM_IDLE_EMOTION_MIN_INTERVAL_S = float(
+    os.environ.get("LLM_IDLE_EMOTION_MIN_INTERVAL_S", "600")
+)
 
 # 亲密成长旁路。默认可共用主 LLM；若追求完全隔离延迟，指向独立小模型服务。
 RELATIONSHIP_ENABLED = os.environ.get("RELATIONSHIP_ENABLED", "1") not in (
@@ -86,7 +98,10 @@ RELATIONSHIP_LLM_TIMEOUT = float(
 )
 RELATIONSHIP_QUEUE_SIZE = int(os.environ.get("RELATIONSHIP_QUEUE_SIZE", "4"))
 RELATIONSHIP_IDLE_DELAY_S = float(
-    os.environ.get("RELATIONSHIP_IDLE_DELAY_S", "1.5")
+    os.environ.get("RELATIONSHIP_IDLE_DELAY_S", "3")
+)
+RELATIONSHIP_MIN_INTERVAL_S = float(
+    os.environ.get("RELATIONSHIP_MIN_INTERVAL_S", "60")
 )
 RELATIONSHIP_INITIAL_SCORE = int(
     os.environ.get("RELATIONSHIP_INITIAL_SCORE", "10")
@@ -95,12 +110,24 @@ RELATIONSHIP_MAX_DELTA = int(os.environ.get("RELATIONSHIP_MAX_DELTA", "2"))
 RELATIONSHIP_MIN_CONFIDENCE = float(
     os.environ.get("RELATIONSHIP_MIN_CONFIDENCE", "0.65")
 )
+RELATIONSHIP_LLM_MAX_TOKENS = int(
+    os.environ.get("RELATIONSHIP_LLM_MAX_TOKENS", "96")
+)
 SOUL_TTY_STATE_DIR = Path(
     os.environ.get(
         "SOUL_TTY_STATE_DIR",
         str(Path.home() / ".local" / "state" / "soul-tty"),
     )
 ).expanduser()
+
+# 固定 Dashboard 只保留有限滚动历史；长期记忆由未来的会话记忆层负责。
+DASHBOARD_MAX_MESSAGES = int(os.environ.get("DASHBOARD_MAX_MESSAGES", "300"))
+# 欢迎区默认以角色信息为主；诊断模式展开精确羁绊值与完整技术栈。
+DASHBOARD_DETAILS = os.environ.get("DASHBOARD_DETAILS", "0") not in (
+    "0",
+    "false",
+    "False",
+)
 
 # TTS
 TTS_ENABLED = os.environ.get("TTS_ENABLED", "1") not in ("0", "false", "False")
@@ -141,7 +168,7 @@ MLX_TTS_AUDIO_PADDING_S = float(
     os.environ.get("MLX_TTS_AUDIO_PADDING_S", "1.5")
 )
 TTS_SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "24000"))
-# 使用实际播放 PCM 的平滑音量驱动三段口型。
+# 使用实际播放 PCM 的平滑音量驱动缓存口型；不会运行固定帧率动画。
 AVATAR_LIP_SYNC_ENABLED = os.environ.get("AVATAR_LIP_SYNC_ENABLED", "1") not in (
     "0", "false", "False"
 )

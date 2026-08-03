@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from rich.align import Align
-from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -32,6 +31,9 @@ _dashboard: "Dashboard | None" = None
 _relationship_profile: tuple[int, str, str, str] | None = None
 _AVATAR_ROW = 3
 _AVATAR_COLUMN = 7
+_USER_COLOR = "#67B7D1"
+_DIALOGUE_TEXT_COLOR = "#D1D5DB"
+_MUTED_TEXT_COLOR = "#6B7280"
 
 _STATE_LABELS = {
     "idle": "待机中",
@@ -59,8 +61,9 @@ class TerminalInput:
 
     _MOUSE_EVENT = re.compile(rb"\033\[<(64|65);\d+;\d+[mM]")
 
-    def __init__(self, on_scroll) -> None:
+    def __init__(self, on_scroll, on_toggle_details=None) -> None:
         self.on_scroll = on_scroll
+        self.on_toggle_details = on_toggle_details
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
@@ -91,6 +94,10 @@ class TerminalInput:
             directions.append(1 if match.group(1) == b"64" else -1)
         return directions
 
+    @staticmethod
+    def detail_toggles(data: bytes) -> int:
+        return data.count(b"\t")
+
     def _read(self) -> None:
         assert self.fd is not None
         while not self.closed.is_set():
@@ -101,6 +108,9 @@ class TerminalInput:
                 data = os.read(self.fd, 1024)
                 for direction in self.navigation(data):
                     self.on_scroll(direction)
+                if self.on_toggle_details is not None:
+                    for _ in range(self.detail_toggles(data)):
+                        self.on_toggle_details()
             except OSError:
                 return
 
@@ -147,10 +157,9 @@ class Dashboard:
         self.messages: list[tuple[str, str]] = []
         self.answer_index: int | None = None
         self.scroll_offset = 0
+        self.show_details = config.DASHBOARD_DETAILS
         self.mouth_frame = 1
         self._native_frames_ready = False
-        self._mouth_animation_stop: threading.Event | None = None
-        self._mouth_animation_thread: threading.Thread | None = None
         self._lock = threading.RLock()
         now = time.monotonic()
         self._last_voice_activity = now
@@ -159,7 +168,7 @@ class Dashboard:
         self._idle_emotion_active = False
         self._idle_emotion_stop = threading.Event()
         self._idle_emotion_thread: threading.Thread | None = None
-        self.input = TerminalInput(self.scroll)
+        self.input = TerminalInput(self.scroll, self.toggle_details)
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
             persona.appearance.avatar.renderer
@@ -209,6 +218,7 @@ class Dashboard:
             status_hint=self.partial_text or None,
             relationship_score=self.relationship_score,
             relationship_tier=self.relationship_tier,
+            show_details=self.show_details,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -239,15 +249,25 @@ class Dashboard:
     def _message_text(self, role: str, content: str) -> Text:
         text = Text()
         if role == "you":
-            text.append("YOU", style="bold")
+            text.append("│ ", style=_USER_COLOR)
+            text.append("YOU", style=f"bold {_USER_COLOR}")
         elif role == "agent":
+            text.append("│ ", style=self.persona.appearance.primary_color)
             text.append(
                 self.persona.display_name.upper(),
                 style=f"bold {self.persona.appearance.primary_color}",
             )
         else:
-            text.append("·", style="dim")
-        text.append(f"  {content}", style="dim" if role == "notice" else None)
+            text.append("·", style=_MUTED_TEXT_COLOR)
+        text.append("  ")
+        text.append(
+            content,
+            style=(
+                _MUTED_TEXT_COLOR
+                if role == "notice"
+                else _DIALOGUE_TEXT_COLOR
+            ),
+        )
         return text
 
     def _truncated_message_tail(
@@ -271,11 +291,14 @@ class Dashboard:
         end = max(1, len(self.messages) - self.scroll_offset)
         blocks: list[list[Text]] = []
         remaining = rows
-        for role, content in reversed(self.messages[:end]):
+        # 用倒序索引避免每次刷新都复制从开头到 end 的全部历史。
+        for message_index in range(end - 1, -1, -1):
+            role, content = self.messages[message_index]
+            message_width = min(width, 84) if role == "agent" else width
             lines = list(
                 self._message_text(role, content).wrap(
                     _console,
-                    width,
+                    message_width,
                     overflow="fold",
                 )
             )
@@ -318,32 +341,7 @@ class Dashboard:
                 )
             self._paint_native()
 
-    def _animate_mouth(self, stopped: threading.Event) -> None:
-        if stopped.wait(0.09):
-            return
-        sequence = ((1, 0.08), (0, 0.09))
-        while not stopped.is_set():
-            for frame, delay in sequence:
-                with self._lock:
-                    if stopped.is_set() or self.state != "speaking":
-                        return
-                    width = self.persona.appearance.avatar.width
-                    avatar_ui.show_native_frame_at(
-                        _console.file,
-                        frame,
-                        row=_AVATAR_ROW,
-                        column=_AVATAR_COLUMN,
-                        width=width,
-                    )
-                if stopped.wait(delay):
-                    return
-
     def _start_mouth_animation(self) -> bool:
-        if (
-            self._mouth_animation_thread is not None
-            and self._mouth_animation_thread.is_alive()
-        ):
-            return True
         width = self.persona.appearance.avatar.width
         # 旧状态图与口型图都是不透明 placement；先隐藏旧图，避免同层
         # 叠放时由图片编号决定遮挡顺序，形成底部接缝。
@@ -356,22 +354,34 @@ class Dashboard:
             width=width,
         ):
             return False
-        stopped = threading.Event()
-        self._mouth_animation_stop = stopped
-        self._mouth_animation_thread = threading.Thread(
-            target=self._animate_mouth,
-            args=(stopped,),
-            daemon=True,
-        )
-        self._mouth_animation_thread.start()
         return True
 
     def _stop_mouth_animation(self) -> None:
-        if self._mouth_animation_stop is not None:
-            self._mouth_animation_stop.set()
-        self._mouth_animation_stop = None
-        self._mouth_animation_thread = None
         avatar_ui.hide_native_frames(_console.file)
+
+    def set_audio_level(self, level: float) -> None:
+        """按实际播放音量切换缓存口型；相同帧不重复写终端协议。"""
+        if not config.AVATAR_LIP_SYNC_ENABLED:
+            return
+        with self._lock:
+            if self.state != "speaking" or not self._native_frames_ready:
+                return
+            # 迟滞避免临界音量下抖动；较高开口阈值让自然语音的强弱
+            # 真正形成张合，而不是一有声音就整句停在半开帧。
+            if self.mouth_frame == 1:
+                target = 2 if level >= 0.28 else 1
+            else:
+                target = 1 if level <= 0.16 else 2
+            if target == self.mouth_frame:
+                return
+            self.mouth_frame = target
+            avatar_ui.show_native_frame_at(
+                _console.file,
+                target - 1,
+                row=_AVATAR_ROW,
+                column=_AVATAR_COLUMN,
+                width=self.persona.appearance.avatar.width,
+            )
 
     def _paint_native(self) -> None:
         if _console.width < 82:
@@ -432,6 +442,20 @@ class Dashboard:
         if self.scroll_offset:
             self.scroll_offset += 1
         self.messages.append((role, text))
+        maximum = max(1, config.DASHBOARD_MAX_MESSAGES)
+        overflow = len(self.messages) - maximum
+        if overflow > 0:
+            del self.messages[:overflow]
+            if self.answer_index is not None:
+                self.answer_index = (
+                    self.answer_index - overflow
+                    if self.answer_index >= overflow
+                    else None
+                )
+            self.scroll_offset = min(
+                self.scroll_offset,
+                max(0, len(self.messages) - 1),
+            )
         return len(self.messages) - 1
 
     def remove(self, index: int) -> None:
@@ -536,7 +560,15 @@ class Dashboard:
             return
 
         def monitor() -> None:
-            while not self._idle_emotion_stop.wait(0.5):
+            while not self._idle_emotion_stop.is_set():
+                with self._lock:
+                    delay = (
+                        max(0.05, self._next_idle_emotion_at - time.monotonic())
+                        if self.state == "listening"
+                        else 1.0
+                    )
+                if self._idle_emotion_stop.wait(delay):
+                    return
                 self._idle_emotion_tick(generator)
 
         self._idle_emotion_thread = threading.Thread(
@@ -552,6 +584,12 @@ class Dashboard:
             if new_offset == self.scroll_offset:
                 return
             self.scroll_offset = new_offset
+            self.live.update(self.render(), refresh=True)
+
+    def toggle_details(self) -> None:
+        """按需展开诊断信息；只在用户操作时重绘一次。"""
+        with self._lock:
+            self.show_details = not self.show_details
             self.live.update(self.render(), refresh=True)
 
     def update(self, index: int, text: str) -> None:
@@ -594,6 +632,11 @@ def update_relationship(state) -> None:
             state.mood,
             state.inner_voice,
         )
+
+
+def audio_level(level: float) -> None:
+    if _dashboard is not None:
+        _dashboard.set_audio_level(level)
 
 
 def _current() -> Persona:
@@ -657,25 +700,35 @@ def _technical_profile(
     persona: Persona,
     runtime: RuntimeDetails,
     stage: int,
+    *,
+    expanded: bool = False,
 ) -> Align:
+    if stage < 3:
+        return Align.center(Text(""))
+    if not expanded:
+        summary = Text(style="dim")
+        summary.append("LOCAL")
+        summary.append(f" · {_short_model(runtime.model)}")
+        summary.append(f" · {_tts_name(runtime)}")
+        summary.append(" · Sherpa-ONNX")
+        return Align.center(summary)
+
     capabilities = (
         ("人格", persona.display_name),
         ("大脑", _short_model(runtime.model)),
         ("声音", _tts_name(runtime)),
         ("听觉", "Sherpa-ONNX"),
     )
-    visible = len(capabilities) if stage >= 3 else 0
     table = Table.grid(padding=0)
     table.add_column(justify="right", no_wrap=True)
     table.add_column(justify="left", no_wrap=True)
     for index, (label, value) in enumerate(capabilities):
-        shown = index < visible
         label_text = Text(
-            f"{label}：" if shown else " " * cell_len(f"{label}："),
+            f"{label}：",
             style="dim",
         )
         value_text = Text(
-            value if shown else " " * cell_len(value),
+            value,
             style="dim" if index else f"dim {persona.appearance.primary_color}",
         )
         table.add_row(label_text, value_text)
@@ -717,6 +770,7 @@ def _splash_panel(
     status_hint: str | None = None,
     relationship_score: int | None = None,
     relationship_tier: str = "",
+    show_details: bool = False,
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -734,7 +788,13 @@ def _splash_panel(
     status = Text()
     hint = Text()
     if stage >= 3:
-        status.append("● ", style=f"bold {persona.appearance.accent_color}")
+        symbols = {
+            "idle": "○",
+            "listening": "◉",
+            "thinking": "◇",
+            "speaking": "≋",
+        }
+        status.append(f"{symbols.get(state, '○')} ", style=f"bold {primary}")
         status.append(_STATE_LABELS.get(state, "角色已就绪"), style="bold")
         hints = {
             "idle": "随时可以开始",
@@ -748,10 +808,9 @@ def _splash_panel(
     if stage >= 3 and relationship_score is not None:
         relationship.append("♡ ", style=primary)
         relationship.append("羁绊  ", style="dim")
-        relationship.append(
-            f"{relationship_tier} · {relationship_score}",
-            style=primary,
-        )
+        relationship.append(relationship_tier, style=primary)
+        if show_details:
+            relationship.append(f"  {relationship_score}/100", style="dim")
 
     details = Group(
         Align.center(title),
@@ -762,7 +821,7 @@ def _splash_panel(
         Text(""),
         Align.center(relationship),
         Text(""),
-        _technical_profile(persona, runtime, stage),
+        _technical_profile(persona, runtime, stage, expanded=show_details),
     )
     wide_avatar = avatar is not None and _console.width >= 82
     if wide_avatar:
@@ -797,7 +856,7 @@ def _splash_panel(
         content,
         border_style=primary,
         padding=(1, 4),
-        subtitle="[dim]直接说话 · Ctrl+C 退出[/dim]",
+        subtitle="[dim]直接说话 · Tab 详情 · Ctrl+C 退出[/dim]",
         width=panel_width,
         height=panel_height,
     )
@@ -929,7 +988,12 @@ def user_text(text: str) -> None:
         return
     if sys.stdout.isatty():
         _clear_current_line()
-    _console.print(f"\n  [bold]YOU[/bold]  {text}")
+    line = Text("\n  ")
+    line.append("│ ", style=_USER_COLOR)
+    line.append("YOU", style=f"bold {_USER_COLOR}")
+    line.append("  ")
+    line.append(text, style=_DIALOGUE_TEXT_COLOR)
+    _console.print(line)
 
 
 def answer_start() -> None:
@@ -971,13 +1035,21 @@ def answer_chunk(text: str) -> None:
         else:
             _console.print()
         _console.print(
-            f"  [bold {persona.appearance.primary_color}]"
+            f"  [{persona.appearance.primary_color}]│ "
+            f"[/{persona.appearance.primary_color}]"
+            f"[bold {persona.appearance.primary_color}]"
             f"{persona.display_name.upper()}[/bold {persona.appearance.primary_color}]\n  ",
             end="",
         )
         _answer_pending = False
     _answer_has_content = True
-    _console.print(text, end="", markup=False, soft_wrap=True)
+    _console.print(
+        text,
+        end="",
+        markup=False,
+        soft_wrap=True,
+        style=_DIALOGUE_TEXT_COLOR,
+    )
 
 
 def answer_end() -> None:

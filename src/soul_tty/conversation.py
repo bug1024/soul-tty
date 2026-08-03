@@ -69,14 +69,14 @@ def _answer(
 ) -> str:
     cancel = cancel or threading.Event()
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
-        with tts.StreamingSpeaker(cancel) as speaker:
+        with tts.StreamingSpeaker(cancel, terminal.audio_level) as speaker:
             answer = _print_answer(chat, text, speaker, cancel, on_token)
     else:
         answer = _print_answer(chat, text, cancel=cancel, on_token=on_token)
         if config.TTS_ENABLED and answer and not cancel.is_set():
             try:
                 terminal.speaking()
-                tts.speak(answer, cancel)
+                tts.speak(answer, cancel, terminal.audio_level)
             except Exception as e:
                 if not cancel.is_set():
                     terminal.notice(f"TTS 失败: {e}")
@@ -194,7 +194,11 @@ def _answer_half_duplex(chat: llm.Chat, mic, text: str) -> None:
 def _run_sherpa_half_duplex_mic(chat: llm.Chat, audio) -> None:
     """PCM 持续送入在线模型；partial 只展示，endpoint final 才触发回答。"""
     terminal.model_loading(True)
-    session = asr.SherpaStream()
+    session = (
+        asr.VadGatedSherpaStream()
+        if config.SHERPA_VAD_GATE_ENABLED
+        else asr.SherpaStream()
+    )
     terminal.model_loading(False)
     mic = audio.Mic()
     mic.start()

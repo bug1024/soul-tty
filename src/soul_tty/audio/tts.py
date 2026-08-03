@@ -23,6 +23,9 @@ _MARKDOWN_LINK = re.compile(r"!?\[([^]]*)\]\([^)]+\)")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _MARKDOWN_PREFIX = re.compile(r"(?m)^\s{0,3}(?:#{1,6}|[-+>]\s+)\s*")
 _ELONGATED_INTERJECTION = re.compile(r"([嗯啊呀哦噢唔哎诶哈])\s*[—–-]{2,}")
+_SHORT_TAIL_MAX_CHARS = 8
+_SHORT_TAIL_MIN_PREFIX_CHARS = 8
+_PLAYBACK_LEVEL_FRAME_MS = 50
 
 
 class PlaybackLevelMeter:
@@ -40,7 +43,8 @@ class PlaybackLevelMeter:
             return
         rms = float(np.sqrt(np.mean(samples * samples))) / 32768.0
         target = min(1.0, max(0.0, (rms - 0.003) / 0.10))
-        alpha = 0.72 if target > self.value else 0.38
+        # 张口快速跟随人声，闭口也要能捕捉到字词间的短暂停顿。
+        alpha = 0.72 if target > self.value else 0.85
         self.value += (target - self.value) * alpha
         try:
             self.callback(self.value)
@@ -54,6 +58,21 @@ class PlaybackLevelMeter:
                 self.callback(0.0)
             except Exception:
                 pass
+
+
+def _write_metered_pcm(stream, pcm: bytes, meter: PlaybackLevelMeter) -> None:
+    """按接近口型刷新周期的小窗播放，避免一个 HTTP 大块只更新一次。"""
+    samples_per_frame = max(
+        1,
+        int(config.TTS_SAMPLE_RATE * _PLAYBACK_LEVEL_FRAME_MS / 1000),
+    )
+    frame_bytes = samples_per_frame * 2
+    for offset in range(0, len(pcm), frame_bytes):
+        frame = pcm[offset : offset + frame_bytes]
+        if not frame:
+            continue
+        meter.update(frame)
+        stream.write(frame)
 
 
 def _aligned_pcm(chunks: Iterator[bytes], cancel: threading.Event | None):
@@ -79,11 +98,30 @@ def _split_mlx_text(text: str) -> list[str]:
     # 引号本身没有朗读价值；拟声词后的长破折号会诱导模型持续发同一个音。
     text = _ELONGATED_INTERJECTION.sub(r"\1", text)
     text = re.sub(r"[“”‘’\"']", "", text)
-    return [
+    sentences = [
         match.group().strip()
         for match in _MLX_SENTENCE.finditer(text)
         if _SPEAKABLE.search(match.group())
     ]
+    segments: list[str] = []
+    for sentence in sentences:
+        # Qwen3-TTS 偶尔会把长句末尾的短逗号分句说得极快甚至近似吞掉。
+        # 只拆这种“长前缀 + 很短句尾”，避免恢复成所有逗号都切请求的顿挫感。
+        comma = max(sentence.rfind("，"), sentence.rfind(","))
+        if comma >= 0:
+            prefix = sentence[: comma + 1].strip()
+            tail = sentence[comma + 1 :].strip()
+            prefix_chars = len(re.sub(r"\s", "", prefix))
+            tail_chars = len(re.sub(r"\s", "", tail))
+            if (
+                prefix_chars >= _SHORT_TAIL_MIN_PREFIX_CHARS
+                and 1 <= tail_chars <= _SHORT_TAIL_MAX_CHARS
+                and _SPEAKABLE.search(tail)
+            ):
+                segments.extend((prefix, tail))
+                continue
+        segments.append(sentence)
+    return segments
 
 
 def _trim_trailing_silence(
@@ -130,7 +168,9 @@ def _trim_trailing_silence(
 
 
 def _synthesize_mlx_segment(
-    text: str, cancel: threading.Event | None
+    text: str,
+    cancel: threading.Event | None,
+    client: httpx.Client,
 ) -> Iterator[bytes]:
     """合成一个完整句，并为随机采样退化设置硬上限。"""
     payload = {
@@ -152,32 +192,36 @@ def _synthesize_mlx_segment(
             payload["instruct"] = config.MLX_TTS_INSTRUCT
     else:
         raise RuntimeError("MLX_TTS_VOICE 不能为空；音色克隆后端已移除")
-    with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
-        with client.stream(
-            "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
-        ) as resp:
-            resp.raise_for_status()
-            aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
-            char_count = len(re.sub(r"\s", "", text))
-            max_audio_s = min(
-                config.MLX_TTS_MAX_AUDIO_S,
-                max(
-                    config.MLX_TTS_MIN_AUDIO_S,
-                    char_count * config.MLX_TTS_AUDIO_S_PER_CHAR
-                    + config.MLX_TTS_AUDIO_PADDING_S,
-                ),
-            )
-            yield from _trim_trailing_silence(aligned, max_audio_s)
+    with client.stream(
+        "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
+    ) as resp:
+        resp.raise_for_status()
+        aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
+        char_count = len(re.sub(r"\s", "", text))
+        max_audio_s = min(
+            config.MLX_TTS_MAX_AUDIO_S,
+            max(
+                config.MLX_TTS_MIN_AUDIO_S,
+                char_count * config.MLX_TTS_AUDIO_S_PER_CHAR
+                + config.MLX_TTS_AUDIO_PADDING_S,
+            ),
+        )
+        yield from _trim_trailing_silence(aligned, max_audio_s)
 
 
 def synthesize_mlx_stream(
     text: str, cancel: threading.Event | None = None
 ) -> Iterator[bytes]:
     """调用常驻 MLX Qwen3-TTS，返回 24kHz int16 裸 PCM。"""
-    for segment in _split_mlx_text(text):
-        if cancel is not None and cancel.is_set():
-            return
-        yield from _synthesize_mlx_segment(segment, cancel)
+    segments = _split_mlx_text(text)
+    if not segments:
+        return
+    # 一轮播报内复用本地 HTTP 连接，同时保留逐句模型请求和异常隔离。
+    with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+        for segment in segments:
+            if cancel is not None and cancel.is_set():
+                return
+            yield from _synthesize_mlx_segment(segment, cancel, client)
 
 
 def synthesize_stream(
@@ -211,8 +255,7 @@ def speak(
         try:
             for pcm in synthesize_stream(text, cancel):
                 if pcm:
-                    meter.update(pcm)
-                    stream.write(pcm)
+                    _write_metered_pcm(stream, pcm, meter)
         finally:
             meter.close()
 
@@ -331,8 +374,7 @@ class StreamingSpeaker:
                     if pcm is _SENTINEL:
                         break
                     if pcm:
-                        meter.update(pcm)
-                        stream.write(pcm)
+                        _write_metered_pcm(stream, pcm, meter)
         except Exception as e:
             if not self._cancel.is_set():
                 print(f"(TTS 播放失败: {e})")

@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import threading
+import time
 
 from . import config, conversation, relationship
 from .clients import llm
@@ -119,8 +120,17 @@ def main() -> None:
     if dashboard_started:
         idle_generator = None
         if config.LLM_IDLE_EMOTION_ENABLED:
+            last_idle_llm_at = 0.0
 
             def idle_generator() -> str | None:
+                nonlocal last_idle_llm_at
+                now = time.monotonic()
+                if (
+                    now - last_idle_llm_at
+                    < config.LLM_IDLE_EMOTION_MIN_INTERVAL_S
+                ):
+                    return None
+                last_idle_llm_at = now
                 return llm.generate_idle_emotion(
                     model,
                     persona.display_name,

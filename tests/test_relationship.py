@@ -67,6 +67,20 @@ class RelationshipStateTests(unittest.TestCase):
         )
         self.assertEqual(updated.inner_voice, "")
 
+    def test_rejects_mechanism_language_and_third_person_narration(self):
+        state = RelationshipState(score=20)
+        for voice in ("关系更甜蜜了。", "亲密度提升了。", "她似乎很开心。"):
+            updated = apply_evaluation(
+                state,
+                {
+                    "delta": 0,
+                    "mood": "warm",
+                    "inner_voice": voice,
+                    "confidence": 0.9,
+                },
+            )
+            self.assertEqual(updated.inner_voice, "")
+
     def test_state_persistence_round_trip(self):
         state = RelationshipState(
             score=47,
@@ -109,6 +123,7 @@ class RelationshipServiceTests(unittest.TestCase):
                 state_dir=Path(directory),
                 queue_size=2,
                 idle_delay_s=0,
+                min_interval_s=0,
             )
             service.start()
             started_at = time.perf_counter()
@@ -154,6 +169,7 @@ class RelationshipServiceTests(unittest.TestCase):
                 evaluate,
                 state_dir=Path(directory),
                 idle_delay_s=0,
+                min_interval_s=0,
             )
             service.start()
             self.assertTrue(service.submit("你好", "你好呀"))
@@ -161,6 +177,39 @@ class RelationshipServiceTests(unittest.TestCase):
             service.stop()
 
         self.assertEqual(service.state.score, config.RELATIONSHIP_INITIAL_SCORE)
+
+    def test_pending_turns_are_coalesced_into_one_llm_evaluation(self):
+        evaluated = []
+        completed = threading.Event()
+
+        def evaluate(state, turn):
+            evaluated.append(turn)
+            completed.set()
+            return {
+                "event": "连续交流",
+                "delta": 1,
+                "mood": "happy",
+                "inner_voice": "和你聊得很开心。",
+                "confidence": 0.9,
+            }
+
+        with TemporaryDirectory() as directory:
+            service = RelationshipService(
+                "serena",
+                evaluate,
+                state_dir=Path(directory),
+                idle_delay_s=0,
+                min_interval_s=0,
+            )
+            service.submit("第一问", "第一答")
+            service.submit("第二问", "第二答")
+            service.start()
+            self.assertTrue(completed.wait(timeout=1))
+            service.stop()
+
+        self.assertEqual(len(evaluated), 1)
+        self.assertIn("第1轮：第一问", evaluated[0].user_text)
+        self.assertIn("第2轮：第二答", evaluated[0].agent_text)
 
 
 if __name__ == "__main__":
