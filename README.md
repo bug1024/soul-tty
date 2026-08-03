@@ -54,6 +54,14 @@ SOUL_TTY_PERSONA_DIR=/path/to/personas uv run soul-tty --persona my-agent
 
 配置优先级：命令行名字 > 环境变量 > persona YAML > 程序默认值。`--name` 不仅修改终端标题，也会把新名字注入 LLM 人格。
 
+### 羁绊成长
+
+欢迎区会显示当前人格的羁绊阶段与分数，例如 `♡ 羁绊  亲近 · 47`。每轮完整回答结束后，主流程只向一个有界内存队列投递问答；后台单线程再调用 LLM 判断关心、信任、共同玩笑、冒犯等关系事件，并生成受限分值变化、情绪和一句简短画外音。
+
+这条链路是完全可降级的旁路：投递不等待 LLM，队列满时淘汰旧事件，请求失败或低置信度结果不会改变状态。画外音也不会打断思考或播报，只会在安全的聆听状态刷新。状态按人格保存到 `~/.local/state/soul-tty/relationships/`，与正式对话历史相互独立。
+
+默认在主回答结束并空闲 1.5 秒后复用当前 LLM 服务。若要隔离模型算力竞争，可把 `RELATIONSHIP_LLM_URL` 和 `RELATIONSHIP_LLM_MODEL` 指向单独常驻的小模型服务。
+
 ### 角色图像
 
 Serena 自带待机、聆听、思考和说话四张 768×768 原创像素风角色图，位于 `assets/avatars/serena/`。交互模式使用固定全屏 Dashboard，在同一角色卡中原位切换四种表情，并在下方保留最近的对话。
@@ -83,6 +91,7 @@ src/soul_tty/
 ├── cli.py             # 命令行入口与启动信息
 ├── config.py          # 环境变量配置
 ├── conversation.py    # 对话流程与打断策略
+├── relationship.py    # 非阻塞亲密成长旁路与状态持久化
 ├── audio/             # 录音、sherpa-onnx ASR、TTS 播放
 ├── clients/           # llama.cpp 客户端
 ├── personas/          # 人格加载、校验与运行时应用
@@ -90,6 +99,7 @@ src/soul_tty/
 
 personas/                 # 用户可直接编辑的 YAML 人格
 assets/avatars/           # 人格角色图资产
+TODO.md                   # 会话记忆、稳定语音打断等后续核心能力
 ```
 
 ## TTS 后端
@@ -165,6 +175,16 @@ BARGE_IN_ENABLED=1 svc start soul-tty
 | `IDLE_EMOTION_AFTER_S` | `60` | 进入聆听后首次触发安静陪伴的等待时间（秒） |
 | `IDLE_EMOTION_INTERVAL_S` | `120` | 持续安静时后续情绪短句的最小间隔（秒） |
 | `LLM_IDLE_EMOTION_ENABLED` | `1` | 后台使用 LLM 润色安静陪伴短句；失败时保留本地短句 |
+| `RELATIONSHIP_ENABLED` | `1` | 启用非阻塞亲密成长旁路；设为 `0` 完全关闭 |
+| `RELATIONSHIP_LLM_URL` | `LLM_URL` | 关系评估服务；可指向独立小模型以隔离算力竞争 |
+| `RELATIONSHIP_LLM_MODEL` | `LLM_MODEL` | 关系评估使用的模型 id |
+| `RELATIONSHIP_LLM_TIMEOUT` | `5` | 单次旁路评估超时（秒）；失败不影响对话 |
+| `RELATIONSHIP_QUEUE_SIZE` | `4` | 待评估完整问答的有界队列长度 |
+| `RELATIONSHIP_IDLE_DELAY_S` | `1.5` | 回答结束后等待用户空闲多久再评估 |
+| `RELATIONSHIP_INITIAL_SCORE` | `10` | 新人格的初始羁绊值 |
+| `RELATIONSHIP_MAX_DELTA` | `2` | LLM 单轮允许增减的绝对上限 |
+| `RELATIONSHIP_MIN_CONFIDENCE` | `0.65` | 低于该置信度时忽略本轮评估 |
+| `SOUL_TTY_STATE_DIR` | `~/.local/state/soul-tty` | 羁绊等本地运行状态目录 |
 | `VAD_AGGRESSIVENESS` | `2` | VAD 严格度 0-3,误触发多就调大 |
 | `SILENCE_MS` | `700` | 插话 VAD 的连续静音阈值 |
 | `MAX_UTTERANCE_S` | `15` | 单句最长秒数,超出强制切段 |

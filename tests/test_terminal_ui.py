@@ -12,6 +12,7 @@ from soul_tty.ui import terminal
 class TerminalUITests(unittest.TestCase):
     def tearDown(self):
         terminal._dashboard = None
+        terminal._relationship_profile = None
 
     def test_splash_has_emotion_status_and_lightweight_technical_layers(self):
         output = io.StringIO()
@@ -151,6 +152,61 @@ class TerminalUITests(unittest.TestCase):
         colon_columns = [cell_len(line.split("：", 1)[0]) for line in lines]
         self.assertEqual(len(lines), 4)
         self.assertEqual(len(set(colon_columns)), 1)
+
+    def test_splash_displays_relationship_below_status(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        with patch.object(terminal, "_console", console):
+            console.print(
+                terminal._splash_panel(
+                    persona,
+                    runtime,
+                    3,
+                    relationship_score=47,
+                    relationship_tier="亲近",
+                )
+            )
+
+        self.assertIn("♡ 羁绊  亲近 · 47", output.getvalue())
+
+    def test_relationship_voice_waits_until_dashboard_returns_to_listening(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+
+        def render(persona, state, terminal_enabled, renderer_override=None):
+            return terminal.avatar_ui.AvatarRender(symbols=terminal.Text(state))
+
+        with (
+            patch.object(terminal, "_console", console),
+            patch.object(terminal.avatar_ui, "render_avatar", side_effect=render),
+        ):
+            dashboard = terminal.Dashboard(persona, runtime)
+            dashboard.live.update = lambda *args, **kwargs: None
+            dashboard.state = "thinking"
+            original = dashboard.greeting
+
+            dashboard.set_relationship(
+                47,
+                "亲近",
+                "warm",
+                "被你惦记着真好。",
+            )
+
+            self.assertEqual(dashboard.greeting, original)
+            self.assertEqual(
+                dashboard._pending_relationship_voice,
+                "被你惦记着真好。",
+            )
+
+            dashboard.set_state("listening")
+
+        self.assertEqual(dashboard.greeting, "被你惦记着真好。")
+        self.assertEqual(dashboard.relationship_score, 47)
+        self.assertEqual(dashboard._pending_relationship_voice, "")
 
     def test_answer_header_returns_to_fixed_left_indent(self):
         output = io.StringIO()

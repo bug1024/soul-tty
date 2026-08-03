@@ -29,6 +29,7 @@ _persona: Persona | None = None
 _answer_pending = False
 _answer_has_content = False
 _dashboard: "Dashboard | None" = None
+_relationship_profile: tuple[int, str, str, str] | None = None
 _AVATAR_ROW = 3
 _AVATAR_COLUMN = 7
 
@@ -127,8 +128,21 @@ class Dashboard:
         self.persona = persona
         self.runtime = runtime
         self.state = "idle"
-        self.greeting = _fallback_greeting()
+        self.relationship_score = (
+            _relationship_profile[0] if _relationship_profile is not None else None
+        )
+        self.relationship_tier = (
+            _relationship_profile[1] if _relationship_profile is not None else ""
+        )
+        self.relationship_mood = (
+            _relationship_profile[2] if _relationship_profile is not None else "calm"
+        )
+        relationship_voice = (
+            _relationship_profile[3] if _relationship_profile is not None else ""
+        )
+        self.greeting = relationship_voice or _fallback_greeting()
         self.base_greeting = self.greeting
+        self._pending_relationship_voice = ""
         self.partial_text = ""
         self.messages: list[tuple[str, str]] = []
         self.answer_index: int | None = None
@@ -193,6 +207,8 @@ class Dashboard:
             state=self.state,
             greeting=self.greeting,
             status_hint=self.partial_text or None,
+            relationship_score=self.relationship_score,
+            relationship_tier=self.relationship_tier,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -397,6 +413,11 @@ class Dashboard:
             self.mouth_frame = 1
             if state == "listening" and previous != "listening":
                 self._mark_voice_activity_locked(time.monotonic())
+                if self._pending_relationship_voice:
+                    self.base_greeting = self._pending_relationship_voice
+                    if not self._idle_emotion_active:
+                        self.greeting = self._pending_relationship_voice
+                    self._pending_relationship_voice = ""
             if state != "listening":
                 self.partial_text = ""
             self.refresh(paint_avatar=True)
@@ -423,6 +444,31 @@ class Dashboard:
             self.base_greeting = greeting
             if not self._idle_emotion_active:
                 self.greeting = greeting
+                self.refresh()
+
+    def set_relationship(
+        self,
+        score: int,
+        tier: str,
+        mood: str,
+        inner_voice: str = "",
+    ) -> None:
+        """保存旁路结果；画外音只在空闲聆听状态安全切换。"""
+        with self._lock:
+            self.relationship_score = score
+            self.relationship_tier = tier
+            self.relationship_mood = mood
+            safe_to_refresh = self.state == "listening" and not self.partial_text
+            if inner_voice:
+                if safe_to_refresh:
+                    self.base_greeting = inner_voice
+                    if not self._idle_emotion_active:
+                        self.greeting = inner_voice
+                else:
+                    self._pending_relationship_voice = inner_voice
+            # Worker 不能在思考、播报或识别 partial 时触发全屏重绘；下一次
+            # 状态切回 listening 时，常规刷新会把新数值与画外音一起显示。
+            if safe_to_refresh:
                 self.refresh()
 
     def _mark_voice_activity_locked(self, now: float) -> bool:
@@ -525,6 +571,29 @@ class Dashboard:
 def configure(persona: Persona) -> None:
     global _persona
     _persona = persona
+
+
+def configure_relationship(
+    score: int | None = None,
+    tier: str = "",
+    mood: str = "calm",
+    inner_voice: str = "",
+) -> None:
+    global _relationship_profile
+    _relationship_profile = (
+        (score, tier, mood, inner_voice) if score is not None else None
+    )
+
+
+def update_relationship(state) -> None:
+    """接收关系 Worker 的鸭子类型状态，避免 UI 依赖旁路实现。"""
+    if _dashboard is not None:
+        _dashboard.set_relationship(
+            state.score,
+            state.tier,
+            state.mood,
+            state.inner_voice,
+        )
 
 
 def _current() -> Persona:
@@ -646,6 +715,8 @@ def _splash_panel(
     state: str = "idle",
     greeting: str | None = None,
     status_hint: str | None = None,
+    relationship_score: int | None = None,
+    relationship_tier: str = "",
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -673,12 +744,23 @@ def _splash_panel(
         }
         hint.append(status_hint or hints.get(state, "随时可以开始"), style="dim")
 
+    relationship = Text()
+    if stage >= 3 and relationship_score is not None:
+        relationship.append("♡ ", style=primary)
+        relationship.append("羁绊  ", style="dim")
+        relationship.append(
+            f"{relationship_tier} · {relationship_score}",
+            style=primary,
+        )
+
     details = Group(
         Align.center(title),
         Align.center(greeting_text),
         Text(""),
         Align.center(status),
         Align.center(hint),
+        Text(""),
+        Align.center(relationship),
         Text(""),
         _technical_profile(persona, runtime, stage),
     )

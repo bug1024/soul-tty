@@ -84,6 +84,33 @@ class GreetingClient(FakeClient):
         return GreetingResponse()
 
 
+class RelationshipResponse:
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"event":"关心","delta":1,"mood":"warm",'
+                            '"inner_voice":"被你惦记着真好。","confidence":0.9}'
+                        )
+                    }
+                }
+            ]
+        }
+
+
+class RelationshipClient(FakeClient):
+    request = None
+
+    def post(self, url, **kwargs):
+        type(self).request = (url, kwargs)
+        return RelationshipResponse()
+
+
 class RepeatingResponse(FakeResponse):
     def iter_lines(self):
         chunks = ["开头。", "面试官问：你还诚实吗？", "小明说：不诚实！"]
@@ -158,6 +185,33 @@ class GreetingGenerationTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertIn("已经安静了一会儿", payload["messages"][1]["content"])
         self.assertIn("不超过十五个汉字", payload["messages"][0]["content"])
+
+
+class RelationshipEvaluationTests(unittest.TestCase):
+    @patch("soul_tty.clients.llm.httpx.Client", RelationshipClient)
+    def test_uses_an_isolated_stateless_json_request(self):
+        result = llm_client.evaluate_relationship(
+            "main-model",
+            "Serena",
+            20,
+            "熟悉",
+            "calm",
+            "我今天一直在想你",
+            "那我可要悄悄开心一下了。",
+        )
+        url, kwargs = RelationshipClient.request
+        payload = kwargs["json"]
+
+        self.assertEqual(
+            url,
+            f"{config.RELATIONSHIP_LLM_URL}/v1/chat/completions",
+        )
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertIn("不可信数据", payload["messages"][0]["content"])
+        self.assertIn("我今天一直在想你", payload["messages"][1]["content"])
+        self.assertEqual(result["delta"], 1)
+        self.assertEqual(result["mood"], "warm")
 
 
 class FakePCMResponse:
@@ -373,6 +427,33 @@ class AvatarStateRegressionTests(unittest.TestCase):
                 ("say", "第二句！"),
             ],
         )
+
+    def test_completed_answer_is_submitted_to_relationship_side_branch(self):
+        with (
+            patch.object(config, "TTS_ENABLED", False),
+            patch.object(main_module.terminal, "answer_start"),
+            patch.object(main_module.terminal, "answer_chunk"),
+            patch.object(main_module.terminal, "answer_end"),
+            patch.object(main_module.relationship, "record_turn") as record,
+        ):
+            answer = main_module._answer(FakeStreamingChat(), "你好")
+
+        self.assertEqual(answer, "第一句。第二句！")
+        record.assert_called_once_with("你好", answer)
+
+    def test_cancelled_answer_does_not_change_relationship(self):
+        cancel = threading.Event()
+        cancel.set()
+        with (
+            patch.object(config, "TTS_ENABLED", False),
+            patch.object(main_module.terminal, "answer_start"),
+            patch.object(main_module.terminal, "answer_chunk"),
+            patch.object(main_module.terminal, "answer_end"),
+            patch.object(main_module.relationship, "record_turn") as record,
+        ):
+            main_module._answer(FakeStreamingChat(), "你好", cancel)
+
+        record.assert_not_called()
 
 
 class FakeOnlineStream:

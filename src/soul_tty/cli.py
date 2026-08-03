@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 
-from . import config, conversation
+from . import config, conversation, relationship
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
 from .ui import terminal
@@ -57,11 +57,50 @@ def main() -> None:
     except Exception as exc:
         print(f"LLM 服务不可用: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    relationship_state = None
+    if config.RELATIONSHIP_ENABLED:
+
+        def evaluate(
+            state: relationship.RelationshipState,
+            turn: relationship.CompletedTurn,
+        ) -> dict | None:
+            return llm.evaluate_relationship(
+                model,
+                persona.display_name,
+                state.score,
+                state.tier,
+                state.mood,
+                turn.user_text,
+                turn.agent_text,
+            )
+
+        relationship_service = relationship.RelationshipService(
+            persona.id,
+            evaluate,
+            terminal.update_relationship,
+        )
+        relationship_state = relationship_service.state
+        terminal.configure_relationship(
+            relationship_state.score,
+            relationship_state.tier,
+            relationship_state.mood,
+            relationship_state.inner_voice,
+        )
+        relationship.install(relationship_service)
+        relationship_service.start()
+    else:
+        terminal.configure_relationship()
+
     dashboard_started = terminal.splash(
         model=model,
         tts=_tts_description(),
     )
-    if dashboard_started and config.LLM_GREETING_ENABLED:
+    if (
+        dashboard_started
+        and config.LLM_GREETING_ENABLED
+        and not (relationship_state and relationship_state.inner_voice)
+    ):
         period = terminal.day_period()
 
         def refresh_greeting() -> None:
@@ -100,4 +139,5 @@ def main() -> None:
     except KeyboardInterrupt:
         terminal.goodbye()
     finally:
+        relationship.close()
         terminal.close()

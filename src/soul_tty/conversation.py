@@ -8,7 +8,7 @@ import threading
 import wave
 from collections.abc import Callable
 
-from . import config
+from . import config, relationship
 from .audio import asr, capture, tts
 from .clients import llm
 from .ui import terminal
@@ -70,15 +70,18 @@ def _answer(
     cancel = cancel or threading.Event()
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
         with tts.StreamingSpeaker(cancel) as speaker:
-            return _print_answer(chat, text, speaker, cancel, on_token)
-    answer = _print_answer(chat, text, cancel=cancel, on_token=on_token)
-    if config.TTS_ENABLED and answer and not cancel.is_set():
-        try:
-            terminal.speaking()
-            tts.speak(answer, cancel)
-        except Exception as e:
-            if not cancel.is_set():
-                terminal.notice(f"TTS 失败: {e}")
+            answer = _print_answer(chat, text, speaker, cancel, on_token)
+    else:
+        answer = _print_answer(chat, text, cancel=cancel, on_token=on_token)
+        if config.TTS_ENABLED and answer and not cancel.is_set():
+            try:
+                terminal.speaking()
+                tts.speak(answer, cancel)
+            except Exception as e:
+                if not cancel.is_set():
+                    terminal.notice(f"TTS 失败: {e}")
+    if answer and not cancel.is_set():
+        relationship.record_turn(text, answer)
     return answer
 
 
@@ -164,11 +167,14 @@ def _run_file(chat: llm.Chat, path: str) -> None:
 
 
 def _show_partial(text: str) -> None:
+    if text:
+        relationship.user_activity()
     if config.SHERPA_PARTIAL_ENABLED:
         terminal.partial(text)
 
 
 def _show_final(text: str) -> None:
+    relationship.user_activity()
     terminal.user_text(text)
 
 
@@ -229,6 +235,7 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
                 text, pending_text = pending_text, None
             if not text:
                 continue
+            relationship.user_activity()
             terminal.user_text(text)
             try:
                 pending_text = _answer_interruptibly(chat, text, listener)

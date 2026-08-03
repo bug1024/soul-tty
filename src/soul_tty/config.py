@@ -73,6 +73,35 @@ LLM_IDLE_EMOTION_ENABLED = os.environ.get(
     "LLM_IDLE_EMOTION_ENABLED", "1"
 ) not in ("0", "false", "False")
 
+# 亲密成长旁路。默认可共用主 LLM；若追求完全隔离延迟，指向独立小模型服务。
+RELATIONSHIP_ENABLED = os.environ.get("RELATIONSHIP_ENABLED", "1") not in (
+    "0",
+    "false",
+    "False",
+)
+RELATIONSHIP_LLM_URL = os.environ.get("RELATIONSHIP_LLM_URL", LLM_URL)
+RELATIONSHIP_LLM_MODEL = os.environ.get("RELATIONSHIP_LLM_MODEL", LLM_MODEL)
+RELATIONSHIP_LLM_TIMEOUT = float(
+    os.environ.get("RELATIONSHIP_LLM_TIMEOUT", "5")
+)
+RELATIONSHIP_QUEUE_SIZE = int(os.environ.get("RELATIONSHIP_QUEUE_SIZE", "4"))
+RELATIONSHIP_IDLE_DELAY_S = float(
+    os.environ.get("RELATIONSHIP_IDLE_DELAY_S", "1.5")
+)
+RELATIONSHIP_INITIAL_SCORE = int(
+    os.environ.get("RELATIONSHIP_INITIAL_SCORE", "10")
+)
+RELATIONSHIP_MAX_DELTA = int(os.environ.get("RELATIONSHIP_MAX_DELTA", "2"))
+RELATIONSHIP_MIN_CONFIDENCE = float(
+    os.environ.get("RELATIONSHIP_MIN_CONFIDENCE", "0.65")
+)
+SOUL_TTY_STATE_DIR = Path(
+    os.environ.get(
+        "SOUL_TTY_STATE_DIR",
+        str(Path.home() / ".local" / "state" / "soul-tty"),
+    )
+).expanduser()
+
 # TTS
 TTS_ENABLED = os.environ.get("TTS_ENABLED", "1") not in ("0", "false", "False")
 TTS_BACKEND = os.environ.get("TTS_BACKEND", "mlx")  # mlx(默认)/macos
