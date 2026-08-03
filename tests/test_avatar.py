@@ -1,3 +1,4 @@
+import base64
 import os
 import unittest
 from unittest.mock import patch
@@ -7,6 +8,19 @@ from voice_agent.ui import avatar
 
 
 class AvatarRendererTests(unittest.TestCase):
+    @staticmethod
+    def _rgba_render(pixels: bytes, *, width: int = 2, height: int = 2):
+        encoded = base64.b64encode(pixels)
+        return avatar.AvatarRender(
+            native=(
+                f"\x1b_Ga=T,f=32,s={width},v={height},c=26,r=13,m=0,q=2;".encode()
+                + encoded
+                + b"\x1b\\\n"
+            ),
+            mode="pixels",
+            protocol="kitty",
+        )
+
     def test_non_terminal_does_not_emit_avatar_protocols(self):
         render = avatar.render_avatar(load_persona("serena"), "idle", False)
         self.assertEqual(render.mode, "off")
@@ -54,12 +68,10 @@ class AvatarRendererTests(unittest.TestCase):
         )
         self.assertEqual(
             output.buffer.getvalue(),
-            b"\x1b7\x1b[3;7H"
-            + f"\x1b_Ga=d,d=N,I={avatar._KITTY_IMAGE_NUMBER},q=2\x1b\\".encode()
-            + b"\x1b_Gpayload\x1b\\\x1b8",
+            b"\x1b7\x1b[3;7H\x1b_Gpayload\x1b\\\x1b8",
         )
 
-    def test_chafa_kitty_transmission_gets_a_stable_image_number(self):
+    def test_chafa_kitty_transmission_uses_the_same_fixed_placement(self):
         class Output:
             def __init__(self):
                 import io
@@ -68,33 +80,75 @@ class AvatarRendererTests(unittest.TestCase):
 
         output = Output()
         render = avatar.AvatarRender(
-            native=b"\x1b_Ga=T,f=32,m=0;payload\x1b\\\n",
+            native=b"\x1b_Ga=T,f=32,s=260,v=260,c=26,r=13,m=0;payload\x1b\\\n",
             mode="pixels",
             protocol="kitty",
         )
         avatar.write_native_at(render, output, row=3, column=7)
+        payload = output.buffer.getvalue()
         self.assertIn(
-            f"a=T,I={avatar._KITTY_IMAGE_NUMBER},f=32".encode(),
-            output.buffer.getvalue(),
-        )
-
-    def test_chafa_transmission_can_be_rewritten_as_animation_frame(self):
-        render = avatar.AvatarRender(
-            native=(
-                b"\x1b_Ga=T,f=32,s=260,v=260,c=26,r=13,m=1,q=2;part1\x1b\\"
-                b"\x1b_Gm=0;part2\x1b\\\n"
-            ),
-            mode="pixels",
-            protocol="kitty",
-        )
-        payload = avatar._kitty_frame_payload(render)
-        self.assertIn(
-            f"a=f,I={avatar._KITTY_IMAGE_NUMBER},f=32,s=260,v=260,m=1,q=2".encode(),
+            f"a=t,I={avatar._KITTY_IMAGE_NUMBER},f=32".encode(),
             payload,
         )
-        self.assertNotIn(b"c=26", payload)
-        self.assertNotIn(b"r=13", payload)
+        self.assertIn(
+            f"a=p,I={avatar._KITTY_IMAGE_NUMBER},p=1,c=26,C=1".encode(),
+            payload,
+        )
+        self.assertNotIn(b"p=1,c=26,r=13", payload)
 
+    def test_cached_mouth_frames_use_normal_fixed_placements(self):
+        class Output:
+            def __init__(self):
+                import io
+
+                self.buffer = io.BytesIO()
+
+        output = Output()
+        pixels = bytes((0, 0, 0, 255)) * 4
+        frames = (
+            self._rgba_render(pixels),
+            self._rgba_render(pixels[:12] + bytes((255, 0, 0, 255))),
+        )
+        self.assertTrue(avatar.prepare_native_frames(frames, output))
+        self.assertTrue(
+            avatar.show_native_frame_at(
+                output,
+                1,
+                row=3,
+                column=7,
+                width=26,
+            )
+        )
+        self.assertTrue(avatar.hide_native_frames(output))
+
+        payload = output.buffer.getvalue()
+        for number in avatar._KITTY_SPEAKING_FRAME_NUMBERS:
+            self.assertIn(f"a=t,I={number},f=32".encode(), payload)
+        selected = avatar._KITTY_SPEAKING_FRAME_NUMBERS[1]
+        self.assertIn(
+            f"a=p,I={selected},p=1,c=26,C=1".encode(),
+            payload,
+        )
+        self.assertNotIn(b"p=1,c=26,r=13", payload)
+        self.assertNotIn(b"a=f", payload)
+        self.assertNotIn(b"a=a", payload)
+
+    def test_static_avatar_can_be_hidden_before_showing_mouth_frames(self):
+        class Output:
+            def __init__(self):
+                import io
+
+                self.buffer = io.BytesIO()
+
+        output = Output()
+        self.assertTrue(avatar.hide_native_avatar(output))
+        self.assertEqual(
+            output.buffer.getvalue(),
+            (
+                f"\x1b_Ga=d,d=n,I={avatar._KITTY_IMAGE_NUMBER},"
+                f"p={avatar._KITTY_IMAGE_PLACEMENT_ID},q=2\x1b\\"
+            ).encode(),
+        )
 
 if __name__ == "__main__":
     unittest.main()

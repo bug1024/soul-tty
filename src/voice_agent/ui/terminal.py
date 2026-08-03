@@ -2,12 +2,18 @@
 
 import os
 import re
+import select
 import sys
+import termios
 import threading
 import time
+import tty
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from rich.align import Align
+from rich.cells import cell_len
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -23,6 +29,8 @@ _persona: Persona | None = None
 _answer_pending = False
 _answer_has_content = False
 _dashboard: "Dashboard | None" = None
+_AVATAR_ROW = 3
+_AVATAR_COLUMN = 7
 
 _STATE_LABELS = {
     "idle": "待机中",
@@ -31,11 +39,85 @@ _STATE_LABELS = {
     "speaking": "正在说话",
 }
 
+_IDLE_EMOTION_LINES = (
+    "好无聊呀，谁能和我说说话。",
+    "这里静悄悄的，我在等你。",
+    "有点想听听你的声音了。",
+    "我还在这里，别把我忘啦。",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeDetails:
     model: str
     tts: str | None
+
+
+class TerminalInput:
+    """接管 alternate screen 输入，防止滚轮被回显成 ^[[A。"""
+
+    _MOUSE_EVENT = re.compile(rb"\033\[<(64|65);\d+;\d+[mM]")
+
+    def __init__(self, on_scroll) -> None:
+        self.on_scroll = on_scroll
+        self.fd: int | None = None
+        self.original = None
+        self.closed = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not sys.stdin.isatty() or not _console.is_terminal:
+            return
+        try:
+            self.fd = sys.stdin.fileno()
+            self.original = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+            _console.file.write("\033[?1000h\033[?1006h")
+            _console.file.flush()
+            self.thread = threading.Thread(target=self._read, daemon=True)
+            self.thread.start()
+        except (OSError, termios.error):
+            self.fd = None
+            self.original = None
+
+    @classmethod
+    def navigation(cls, data: bytes) -> list[int]:
+        """返回滚动方向：+1 查看更早内容，-1 回到较新内容。"""
+        directions = []
+        directions.extend(1 for _ in re.finditer(rb"\033\[A", data))
+        directions.extend(-1 for _ in re.finditer(rb"\033\[B", data))
+        for match in cls._MOUSE_EVENT.finditer(data):
+            directions.append(1 if match.group(1) == b"64" else -1)
+        return directions
+
+    def _read(self) -> None:
+        assert self.fd is not None
+        while not self.closed.is_set():
+            try:
+                ready, _, _ = select.select([self.fd], [], [], 0.1)
+                if not ready:
+                    continue
+                data = os.read(self.fd, 1024)
+                for direction in self.navigation(data):
+                    self.on_scroll(direction)
+            except OSError:
+                return
+
+    def stop(self) -> None:
+        if self.fd is None:
+            return
+        self.closed.set()
+        _console.file.write("\033[?1006l\033[?1000l")
+        _console.file.flush()
+        if self.thread is not None:
+            self.thread.join(timeout=0.3)
+        try:
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+            if self.original is not None:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.original)
+        except (OSError, termios.error):
+            pass
+        self.fd = None
 
 
 class Dashboard:
@@ -45,13 +127,25 @@ class Dashboard:
         self.persona = persona
         self.runtime = runtime
         self.state = "idle"
+        self.greeting = _fallback_greeting()
+        self.base_greeting = self.greeting
         self.partial_text = ""
         self.messages: list[tuple[str, str]] = []
         self.answer_index: int | None = None
+        self.scroll_offset = 0
         self.mouth_frame = 1
-        self._lip_animation_ready = False
-        self._last_mouth_update = 0.0
+        self._native_frames_ready = False
+        self._mouth_animation_stop: threading.Event | None = None
+        self._mouth_animation_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        now = time.monotonic()
+        self._last_voice_activity = now
+        self._next_idle_emotion_at = now + config.IDLE_EMOTION_AFTER_S
+        self._idle_emotion_index = 0
+        self._idle_emotion_active = False
+        self._idle_emotion_stop = threading.Event()
+        self._idle_emotion_thread: threading.Thread | None = None
+        self.input = TerminalInput(self.scroll)
         configured_renderer = os.environ.get(
             "VOICE_AGENT_AVATAR_RENDERER",
             persona.appearance.avatar.renderer
@@ -74,7 +168,6 @@ class Dashboard:
             for state in (
                 "speaking_closed",
                 "speaking_half",
-                "speaking_open",
             )
         )
         self.live = Live(
@@ -98,49 +191,101 @@ class Dashboard:
             3,
             avatar,
             state=self.state,
+            greeting=self.greeting,
+            status_hint=self.partial_text or None,
         )
-        accent = self.persona.appearance.accent_color
-        status = Text()
-        status.append("  ◉ ", style=f"bold {accent}")
-        status.append(_STATE_LABELS[self.state], style="bold")
-        if self.partial_text:
-            status.append(f"  {self.partial_text}", style="dim")
-        elif self.state == "listening":
-            status.append("  说话即可", style="dim")
-
-        transcript = Text()
-        visible = self.messages[-10:]
-        for index, (role, content) in enumerate(visible):
-            if role == "you":
-                transcript.append("YOU", style="bold")
-            elif role == "agent":
-                transcript.append(
-                    self.persona.display_name.upper(),
-                    style=f"bold {self.persona.appearance.primary_color}",
-                )
-            else:
-                transcript.append("·", style="dim")
-            transcript.append(f"  {content}", style="dim" if role == "notice" else None)
-            if index < len(visible) - 1:
-                transcript.append("\n\n")
-        if not visible:
-            transcript.append("等待你的第一句话…", style="dim italic")
 
         body_width = min(110, max(44, _console.width - 4))
+        header_height = header.height or 20
+        body_height = max(7, _console.height - header_height - 1)
+        content_width = max(20, body_width - 6)
+        content_rows = max(1, body_height - 4)
+        transcript = self._transcript_view(content_width, content_rows)
+        history_hint = ""
+        maximum_offset = max(0, len(self.messages) - 1)
+        if maximum_offset:
+            history_hint = (
+                f"  ↑ 历史 {self.scroll_offset}/{maximum_offset}"
+                if self.scroll_offset
+                else "  滚轮查看历史"
+            )
         body = Panel(
             transcript,
             border_style="dim",
             padding=(1, 2),
             width=body_width,
-            title="[dim]对话[/dim]",
+            height=body_height,
+            title=f"[dim]对话{history_hint}[/dim]",
             title_align="left",
         )
-        return Group(Align.left(header), Text(""), status, Text(""), Align.left(body))
+        return Group(Align.left(header), Text(""), Align.left(body))
+
+    def _message_text(self, role: str, content: str) -> Text:
+        text = Text()
+        if role == "you":
+            text.append("YOU", style="bold")
+        elif role == "agent":
+            text.append(
+                self.persona.display_name.upper(),
+                style=f"bold {self.persona.appearance.primary_color}",
+            )
+        else:
+            text.append("·", style="dim")
+        text.append(f"  {content}", style="dim" if role == "notice" else None)
+        return text
+
+    def _truncated_message_tail(
+        self,
+        role: str,
+        lines: list[Text],
+        rows: int,
+    ) -> list[Text]:
+        if len(lines) <= rows:
+            return lines
+        if rows == 1:
+            return [Text("…", style="dim")]
+        marker = self._message_text(role, "…")
+        return [marker, *lines[-(rows - 1) :]]
+
+    def _transcript_view(self, width: int, rows: int) -> Text:
+        """按实际换行后的行数，从当前锚点向历史方向填满视口。"""
+        if not self.messages:
+            return Text("等待你的第一句话…", style="dim italic")
+
+        end = max(1, len(self.messages) - self.scroll_offset)
+        blocks: list[list[Text]] = []
+        remaining = rows
+        for role, content in reversed(self.messages[:end]):
+            lines = list(
+                self._message_text(role, content).wrap(
+                    _console,
+                    width,
+                    overflow="fold",
+                )
+            )
+            separator = 1 if blocks else 0
+            if len(lines) + separator <= remaining:
+                blocks.insert(0, lines)
+                remaining -= len(lines) + separator
+                continue
+            if not blocks:
+                blocks = [self._truncated_message_tail(role, lines, remaining)]
+            break
+
+        transcript = Text()
+        for index, block in enumerate(blocks):
+            if index:
+                transcript.append("\n\n")
+            for line_index, line in enumerate(block):
+                if line_index:
+                    transcript.append("\n")
+                transcript.append_text(line)
+        return transcript
 
     def _active_avatar(self) -> avatar_ui.AvatarRender:
         if (
             self.state == "speaking"
-            and len(self.mouth_avatars) == 3
+            and len(self.mouth_avatars) == 2
             and self.mouth_avatars[self.mouth_frame - 1].mode != "off"
         ):
             return self.mouth_avatars[self.mouth_frame - 1]
@@ -149,20 +294,76 @@ class Dashboard:
     def start(self) -> None:
         with self._lock:
             self.live.start(refresh=True)
+            self.input.start()
+            if config.AVATAR_LIP_SYNC_ENABLED:
+                self._native_frames_ready = avatar_ui.prepare_native_frames(
+                    self.mouth_avatars,
+                    _console.file,
+                )
             self._paint_native()
+
+    def _animate_mouth(self, stopped: threading.Event) -> None:
+        if stopped.wait(0.09):
+            return
+        sequence = ((1, 0.08), (0, 0.09))
+        while not stopped.is_set():
+            for frame, delay in sequence:
+                with self._lock:
+                    if stopped.is_set() or self.state != "speaking":
+                        return
+                    width = self.persona.appearance.avatar.width
+                    avatar_ui.show_native_frame_at(
+                        _console.file,
+                        frame,
+                        row=_AVATAR_ROW,
+                        column=_AVATAR_COLUMN,
+                        width=width,
+                    )
+                if stopped.wait(delay):
+                    return
+
+    def _start_mouth_animation(self) -> bool:
+        if (
+            self._mouth_animation_thread is not None
+            and self._mouth_animation_thread.is_alive()
+        ):
+            return True
+        width = self.persona.appearance.avatar.width
+        # 旧状态图与口型图都是不透明 placement；先隐藏旧图，避免同层
+        # 叠放时由图片编号决定遮挡顺序，形成底部接缝。
+        avatar_ui.hide_native_avatar(_console.file)
+        if not avatar_ui.show_native_frame_at(
+            _console.file,
+            0,
+            row=_AVATAR_ROW,
+            column=_AVATAR_COLUMN,
+            width=width,
+        ):
+            return False
+        stopped = threading.Event()
+        self._mouth_animation_stop = stopped
+        self._mouth_animation_thread = threading.Thread(
+            target=self._animate_mouth,
+            args=(stopped,),
+            daemon=True,
+        )
+        self._mouth_animation_thread.start()
+        return True
+
+    def _stop_mouth_animation(self) -> None:
+        if self._mouth_animation_stop is not None:
+            self._mouth_animation_stop.set()
+        self._mouth_animation_stop = None
+        self._mouth_animation_thread = None
+        avatar_ui.hide_native_frames(_console.file)
 
     def _paint_native(self) -> None:
         if _console.width < 82:
             return
-        if self.state == "speaking" and avatar_ui.write_native_animation_at(
-            self.mouth_avatars,
-            _console.file,
-            row=3,
-            column=7,
-        ):
-            self._lip_animation_ready = True
-            return
-        self._lip_animation_ready = False
+        if self.state == "speaking" and self._native_frames_ready:
+            if self._start_mouth_animation():
+                return
+        # 非 Kitty 终端保持闭嘴完整帧，避免高频整图重传造成闪烁。
         render = self._active_avatar()
         if render is None or render.native is None:
             return
@@ -171,8 +372,8 @@ class Dashboard:
         avatar_ui.write_native_at(
             render,
             _console.file,
-            row=3,
-            column=7,
+            row=_AVATAR_ROW,
+            column=_AVATAR_COLUMN,
         )
 
     def refresh(self, *, paint_avatar: bool = False) -> None:
@@ -184,42 +385,128 @@ class Dashboard:
     def set_state(self, state: str) -> None:
         if state not in _STATE_LABELS:
             return
-        self.state = state
-        self.mouth_frame = 1
-        if state != "speaking":
-            self._lip_animation_ready = False
-        if state != "listening":
-            self.partial_text = ""
-        self.refresh(paint_avatar=True)
-
-    def set_mouth_level(self, level: float) -> None:
-        """将平滑播放音量映射为三段口型，并限制终端刷新频率。"""
-        if self.state != "speaking" or not config.AVATAR_LIP_SYNC_ENABLED:
-            return
-        frame = 1 if level < 0.12 else 2 if level < 0.55 else 3
-        if frame == self.mouth_frame:
-            return
-        now = time.monotonic()
-        if frame != 1 and now - self._last_mouth_update < 0.075:
-            return
-        self.mouth_frame = frame
-        self._last_mouth_update = now
         with self._lock:
-            if self._lip_animation_ready:
-                avatar_ui.select_native_animation_frame(_console.file, frame)
-                return
-            render = self._active_avatar()
-            if render.native is not None and _console.width >= 82:
-                avatar_ui.write_native_at(
-                    render, _console.file, row=3, column=7
-                )
-            else:
-                self.live.update(self.render(), refresh=True)
+            previous = self.state
+            if (
+                previous == "speaking"
+                and state != "speaking"
+                and self._native_frames_ready
+            ):
+                self._stop_mouth_animation()
+            self.state = state
+            self.mouth_frame = 1
+            if state == "listening" and previous != "listening":
+                self._mark_voice_activity_locked(time.monotonic())
+            if state != "listening":
+                self.partial_text = ""
+            self.refresh(paint_avatar=True)
 
     def add(self, role: str, text: str) -> int:
-        self.messages.append((role, text))
+        index = self.append(role, text)
         self.refresh()
+        return index
+
+    def append(self, role: str, text: str) -> int:
+        """追加消息；查看历史时维持当前锚点，而不是跳回最新位置。"""
+        if self.scroll_offset:
+            self.scroll_offset += 1
+        self.messages.append((role, text))
         return len(self.messages) - 1
+
+    def remove(self, index: int) -> None:
+        self.messages.pop(index)
+        if self.scroll_offset:
+            self.scroll_offset = max(0, self.scroll_offset - 1)
+
+    def set_greeting(self, greeting: str) -> None:
+        with self._lock:
+            self.base_greeting = greeting
+            if not self._idle_emotion_active:
+                self.greeting = greeting
+                self.refresh()
+
+    def _mark_voice_activity_locked(self, now: float) -> bool:
+        self._last_voice_activity = now
+        self._next_idle_emotion_at = now + config.IDLE_EMOTION_AFTER_S
+        if not self._idle_emotion_active:
+            return False
+        self._idle_emotion_active = False
+        self.greeting = self.base_greeting
+        return True
+
+    def mark_voice_activity(self, *, refresh: bool = True) -> None:
+        """记录识别到的用户语音，并退出安静陪伴状态。"""
+        with self._lock:
+            changed = self._mark_voice_activity_locked(time.monotonic())
+            if changed and refresh:
+                self.refresh()
+
+    def _idle_emotion_tick(
+        self,
+        generator: Callable[[], str | None] | None,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """若已到触发时间，立即显示本地短句，再尝试用 LLM 替换。"""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self.state != "listening" or now < self._next_idle_emotion_at:
+                return False
+            activity_token = self._last_voice_activity
+            self.greeting = _IDLE_EMOTION_LINES[
+                self._idle_emotion_index % len(_IDLE_EMOTION_LINES)
+            ]
+            self._idle_emotion_index += 1
+            self._idle_emotion_active = True
+            self._next_idle_emotion_at = now + config.IDLE_EMOTION_INTERVAL_S
+            self.refresh()
+
+        if generator is None:
+            return True
+        try:
+            generated = generator()
+        except Exception:
+            return True
+        if not generated:
+            return True
+        with self._lock:
+            # 生成期间若用户开口或状态发生变化，丢弃过期结果。
+            if (
+                self._idle_emotion_stop.is_set()
+                or self.state != "listening"
+                or not self._idle_emotion_active
+                or self._last_voice_activity != activity_token
+            ):
+                return True
+            self.greeting = generated
+            self.refresh()
+        return True
+
+    def start_idle_emotions(
+        self,
+        generator: Callable[[], str | None] | None = None,
+    ) -> None:
+        if self._idle_emotion_thread is not None:
+            return
+
+        def monitor() -> None:
+            while not self._idle_emotion_stop.wait(0.5):
+                self._idle_emotion_tick(generator)
+
+        self._idle_emotion_thread = threading.Thread(
+            target=monitor,
+            daemon=True,
+        )
+        self._idle_emotion_thread.start()
+
+    def scroll(self, direction: int) -> None:
+        with self._lock:
+            maximum = max(0, len(self.messages) - 1)
+            new_offset = min(maximum, max(0, self.scroll_offset + direction))
+            if new_offset == self.scroll_offset:
+                return
+            self.scroll_offset = new_offset
+            self.live.update(self.render(), refresh=True)
 
     def update(self, index: int, text: str) -> None:
         role, _ = self.messages[index]
@@ -227,7 +514,11 @@ class Dashboard:
         self.refresh()
 
     def stop(self) -> None:
+        self._idle_emotion_stop.set()
+        self.input.stop()
         with self._lock:
+            if self._native_frames_ready:
+                self._stop_mouth_animation()
             self.live.stop()
 
 
@@ -283,6 +574,69 @@ def _logo(persona: Persona, stage: int) -> Text:
     return text
 
 
+def _tts_name(runtime: RuntimeDetails) -> str:
+    return (
+        "Qwen3-TTS"
+        if runtime.tts and "MLX" in runtime.tts
+        else "macOS TTS"
+        if runtime.tts
+        else "文字模式"
+    )
+
+
+def _technical_profile(
+    persona: Persona,
+    runtime: RuntimeDetails,
+    stage: int,
+) -> Align:
+    capabilities = (
+        ("人格", persona.display_name),
+        ("大脑", _short_model(runtime.model)),
+        ("声音", _tts_name(runtime)),
+        ("听觉", "Sherpa-ONNX"),
+    )
+    visible = len(capabilities) if stage >= 3 else 0
+    table = Table.grid(padding=0)
+    table.add_column(justify="right", no_wrap=True)
+    table.add_column(justify="left", no_wrap=True)
+    for index, (label, value) in enumerate(capabilities):
+        shown = index < visible
+        label_text = Text(
+            f"{label}：" if shown else " " * cell_len(f"{label}："),
+            style="dim",
+        )
+        value_text = Text(
+            value if shown else " " * cell_len(value),
+            style="dim" if index else f"dim {persona.appearance.primary_color}",
+        )
+        table.add_row(label_text, value_text)
+    return Align.center(table)
+
+
+def day_period(hour: int | None = None) -> str:
+    hour = datetime.now().hour if hour is None else hour
+    if 5 <= hour < 11:
+        return "早上"
+    if 11 <= hour < 14:
+        return "中午"
+    if 14 <= hour < 18:
+        return "下午"
+    if 18 <= hour < 24:
+        return "晚上"
+    return "夜深"
+
+
+def _fallback_greeting(hour: int | None = None) -> str:
+    period = day_period(hour)
+    return {
+        "早上": "早上好，今天也请多关照。",
+        "中午": "中午好，记得好好吃饭。",
+        "下午": "下午好，我一直在这里。",
+        "晚上": "晚上好，我一直在这里。",
+        "夜深": "夜深了，我还陪着你。",
+    }[period]
+
+
 def _splash_panel(
     persona: Persona,
     runtime: RuntimeDetails,
@@ -290,54 +644,53 @@ def _splash_panel(
     avatar: Text | None = None,
     native_avatar: bool = False,
     state: str = "idle",
+    greeting: str | None = None,
+    status_hint: str | None = None,
 ) -> Panel:
     primary = persona.appearance.primary_color
-    secondary = persona.appearance.secondary_color
-    accent = persona.appearance.accent_color
 
     title = Text(
         persona.display_name.upper() if stage >= 2 else "",
         style=f"bold {primary}",
     )
-    tagline = Text(persona.tagline if stage >= 2 else "", style="dim")
-
-    greeting = Text()
-    if stage >= 3 and persona.personality.greeting:
-        greeting.append(f"“{persona.personality.greeting}”", style="italic")
+    greeting_text = Text(no_wrap=True, overflow="ellipsis")
+    if stage >= 2:
+        greeting_text.append(
+            f"“{greeting or _fallback_greeting()}”",
+            style="italic",
+        )
 
     status = Text()
-    technology = Text()
+    hint = Text()
     if stage >= 3:
-        status.append("● ", style=f"bold {accent}")
+        status.append("● ", style=f"bold {persona.appearance.accent_color}")
         status.append(_STATE_LABELS.get(state, "角色已就绪"), style="bold")
-        status.append(f"    {persona.voice.voice}    中文", style="dim")
-        tts_name = (
-            "Qwen3-TTS"
-            if runtime.tts and "MLX" in runtime.tts
-            else "macOS TTS"
-            if runtime.tts
-            else "文字模式"
-        )
-        technology.append(
-            f"sherpa-onnx · {_short_model(runtime.model)} · {tts_name}",
-            style=f"dim {secondary}",
-        )
+        hints = {
+            "idle": "随时可以开始",
+            "listening": "直接说话即可",
+            "thinking": "我正在认真想",
+            "speaking": "正在把回答说给你听",
+        }
+        hint.append(status_hint or hints.get(state, "随时可以开始"), style="dim")
 
     details = Group(
         Align.center(title),
-        Align.center(tagline),
-        Text(""),
-        Align.center(greeting),
+        Align.center(greeting_text),
         Text(""),
         Align.center(status),
-        Align.center(technology),
+        Align.center(hint),
+        Text(""),
+        _technical_profile(persona, runtime, stage),
     )
     wide_avatar = avatar is not None and _console.width >= 82
     if wide_avatar:
         content = Table.grid(expand=True, padding=(0, 2))
         content.add_column(width=persona.appearance.avatar.width + 2)
         content.add_column(ratio=1)
-        content.add_row(Align.center(avatar, vertical="middle"), details)
+        content.add_row(
+            Align.center(avatar, vertical="middle"),
+            Align.center(details, vertical="middle", height=13),
+        )
     elif avatar is not None:
         content = Group(Align.center(avatar), Text(""), details)
     elif native_avatar:
@@ -353,16 +706,22 @@ def _splash_panel(
         if wide_avatar
         else min(64, max(44, _console.width - 4))
     )
+    panel_height = (
+        max(8, persona.appearance.avatar.width // 2) + 4
+        if wide_avatar
+        else None
+    )
     return Panel(
         content,
         border_style=primary,
         padding=(1, 4),
         subtitle="[dim]直接说话 · Ctrl+C 退出[/dim]",
         width=panel_width,
+        height=panel_height,
     )
 
 
-def splash(*, model: str, tts: str | None) -> None:
+def splash(*, model: str, tts: str | None) -> bool:
     """展示一次性角色开场；非交互输出直接打印最终帧。"""
     global _dashboard
     persona = _current()
@@ -373,7 +732,7 @@ def splash(*, model: str, tts: str | None) -> None:
     if _console.is_terminal and _console.file is sys.stdout and dashboard_enabled:
         _dashboard = Dashboard(persona, runtime)
         _dashboard.start()
-        return
+        return True
     avatar = avatar_ui.render_avatar(persona, "idle", _console.is_terminal)
     native_avatar = avatar_ui.write_native(avatar, _console.file)
     animations = os.environ.get("VOICE_AGENT_ANIMATIONS", "1") not in {
@@ -411,6 +770,19 @@ def splash(*, model: str, tts: str | None) -> None:
             )
         )
     _console.print()
+    return False
+
+
+def update_greeting(greeting: str) -> None:
+    if _dashboard is not None:
+        _dashboard.set_greeting(greeting)
+
+
+def start_idle_emotions(
+    generator: Callable[[], str | None] | None = None,
+) -> None:
+    if _dashboard is not None and config.IDLE_EMOTION_ENABLED:
+        _dashboard.start_idle_emotions(generator)
 
 
 def _clear_current_line() -> None:
@@ -450,8 +822,11 @@ def listening(initial: bool = False) -> None:
 
 def partial(text: str) -> None:
     if _dashboard is not None:
-        _dashboard.partial_text = text
-        _dashboard.refresh()
+        if text:
+            _dashboard.mark_voice_activity(refresh=False)
+        with _dashboard._lock:
+            _dashboard.partial_text = text
+            _dashboard.refresh()
         return
     if sys.stdout.isatty():
         secondary = _current().appearance.secondary_color
@@ -466,6 +841,7 @@ def partial(text: str) -> None:
 
 def user_text(text: str) -> None:
     if _dashboard is not None:
+        _dashboard.mark_voice_activity(refresh=False)
         _dashboard.partial_text = ""
         _dashboard.add("you", text)
         return
@@ -480,10 +856,10 @@ def answer_start() -> None:
     _answer_pending = True
     _answer_has_content = False
     if _dashboard is not None:
-        _dashboard.messages.append(
-            ("agent", f"{persona.display_name} 正在想…")
+        _dashboard.answer_index = _dashboard.append(
+            "agent",
+            f"{persona.display_name} 正在想…",
         )
-        _dashboard.answer_index = len(_dashboard.messages) - 1
         # 合并为一次刷新，并让高清头像在文本画布之后绘制。
         _dashboard.set_state("thinking")
         return
@@ -527,7 +903,7 @@ def answer_end() -> None:
     if _dashboard is not None:
         if _answer_pending and _dashboard.answer_index is not None:
             # 取消或无输出时移除“正在想”，避免留下永远进行中的假状态。
-            _dashboard.messages.pop(_dashboard.answer_index)
+            _dashboard.remove(_dashboard.answer_index)
         _answer_pending = False
         _dashboard.answer_index = None
         _dashboard.refresh()
@@ -548,11 +924,6 @@ def speaking() -> None:
         return
     accent = _current().appearance.accent_color
     _console.print(f"  [{accent}]≋[/{accent}] [dim]正在说话[/dim]")
-
-
-def mouth_level(level: float) -> None:
-    if _dashboard is not None:
-        _dashboard.set_mouth_level(level)
 
 
 def notice(text: str) -> None:
@@ -579,6 +950,7 @@ def interrupted(text: str) -> None:
 
 def recognized(text: str) -> None:
     if _dashboard is not None:
+        _dashboard.mark_voice_activity(refresh=False)
         _dashboard.add("you", text)
         return
     _console.print(f"  [bold]识别结果[/bold]  {text}")

@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import threading
 
 from . import config, conversation
 from .clients import llm
@@ -56,10 +57,38 @@ def main() -> None:
     except Exception as exc:
         print(f"LLM 服务不可用: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    terminal.splash(
+    dashboard_started = terminal.splash(
         model=model,
         tts=_tts_description(),
     )
+    if dashboard_started and config.LLM_GREETING_ENABLED:
+        period = terminal.day_period()
+
+        def refresh_greeting() -> None:
+            try:
+                greeting = llm.generate_greeting(
+                    model,
+                    persona.display_name,
+                    period,
+                )
+            except Exception:
+                return
+            if greeting:
+                terminal.update_greeting(greeting)
+
+        threading.Thread(target=refresh_greeting, daemon=True).start()
+    if dashboard_started:
+        idle_generator = None
+        if config.LLM_IDLE_EMOTION_ENABLED:
+
+            def idle_generator() -> str | None:
+                return llm.generate_idle_emotion(
+                    model,
+                    persona.display_name,
+                    terminal.day_period(),
+                )
+
+        terminal.start_idle_emotions(idle_generator)
     chat = llm.Chat(model)
     try:
         if args.text:

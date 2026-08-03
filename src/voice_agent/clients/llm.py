@@ -3,6 +3,7 @@
 import json
 import re
 import threading
+import unicodedata
 from collections.abc import Iterator
 
 import httpx
@@ -38,6 +39,116 @@ def pick_model() -> str:
     if not models:
         raise RuntimeError(f"{config.LLM_URL} 没有可用模型,请检查 llama 服务")
     return models[0]["id"]
+
+
+def _display_width(text: str) -> int:
+    return sum(
+        2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        for char in text
+    )
+
+
+def _clean_greeting(text: str, display_name: str | None = None) -> str | None:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = text.splitlines()[0].strip() if text else ""
+    text = re.sub(r"^[#>*\-\d.、\s]+", "", text).strip("“”\"' ")
+    if display_name:
+        text = re.sub(
+            rf"(?:我是|这里是)\s*{re.escape(display_name)}\s*[，,]?\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if match := re.match(r"(.{2,28}?[。！？!?])", text):
+        text = match.group(1)
+    if not 2 <= len(text) <= 28 or _display_width(text) > 30:
+        return None
+    return text
+
+
+def generate_greeting(model: str, display_name: str, period: str) -> str | None:
+    """生成不进入对话历史的短欢迎语；失败时 UI 继续使用本地时间兜底。"""
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    config.SYSTEM_PROMPT
+                    + "\n只生成一句自然的中文开场欢迎语，不超过十五个汉字。"
+                    "不要自报姓名，不要提问，不要解释，不要使用 Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"现在是{period}，你是{display_name}。"
+                    "请用符合当前时段和人格的口吻欢迎用户。只输出欢迎语。"
+                ),
+            },
+        ],
+        "stream": False,
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "max_tokens": 32,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+        response = client.post(
+            f"{config.LLM_URL}/v1/chat/completions",
+            json=payload,
+        )
+        response.raise_for_status()
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return _clean_greeting(text, display_name)
+
+
+def generate_idle_emotion(
+    model: str,
+    display_name: str,
+    period: str,
+) -> str | None:
+    """生成独立于聊天历史的等待短句，供安静陪伴状态使用。"""
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    config.SYSTEM_PROMPT
+                    + "\n只生成一句表达等待、想念、无聊或期待用户开口的中文短句，"
+                    "不超过十五个汉字。语气自然克制，不要自报姓名，不要解释，"
+                    "不要使用 Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"现在是{period}，你是{display_name}，用户已经安静了一会儿。"
+                    "请轻轻表达一种情绪，可以邀请用户说话。只输出短句。"
+                ),
+            },
+        ],
+        "stream": False,
+        "temperature": 0.9,
+        "top_p": 0.9,
+        "max_tokens": 32,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+        response = client.post(
+            f"{config.LLM_URL}/v1/chat/completions",
+            json=payload,
+        )
+        response.raise_for_status()
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return _clean_greeting(text, display_name)
 
 
 class Chat:

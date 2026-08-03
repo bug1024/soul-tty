@@ -53,6 +53,25 @@ LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.7"))
 LLM_TOP_P = float(os.environ.get("LLM_TOP_P", "0.9"))
 LLM_REPEAT_PENALTY = float(os.environ.get("LLM_REPEAT_PENALTY", "1.1"))
 LLM_REPEAT_LAST_N = int(os.environ.get("LLM_REPEAT_LAST_N", "128"))
+LLM_GREETING_ENABLED = os.environ.get("LLM_GREETING_ENABLED", "1") not in (
+    "0",
+    "false",
+    "False",
+)
+LLM_GREETING_TIMEOUT = float(os.environ.get("LLM_GREETING_TIMEOUT", "5"))
+# Dashboard 长时间没有收到语音识别文本时，轮换一句克制的情绪短句。
+IDLE_EMOTION_ENABLED = os.environ.get("IDLE_EMOTION_ENABLED", "1") not in (
+    "0",
+    "false",
+    "False",
+)
+IDLE_EMOTION_AFTER_S = float(os.environ.get("IDLE_EMOTION_AFTER_S", "60"))
+IDLE_EMOTION_INTERVAL_S = float(
+    os.environ.get("IDLE_EMOTION_INTERVAL_S", "120")
+)
+LLM_IDLE_EMOTION_ENABLED = os.environ.get(
+    "LLM_IDLE_EMOTION_ENABLED", "1"
+) not in ("0", "false", "False")
 
 # TTS
 TTS_ENABLED = os.environ.get("TTS_ENABLED", "1") not in ("0", "false", "False")

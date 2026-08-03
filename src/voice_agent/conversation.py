@@ -69,15 +69,13 @@ def _answer(
 ) -> str:
     cancel = cancel or threading.Event()
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
-        with tts.StreamingSpeaker(
-            cancel, on_audio_level=terminal.mouth_level
-        ) as speaker:
+        with tts.StreamingSpeaker(cancel) as speaker:
             return _print_answer(chat, text, speaker, cancel, on_token)
     answer = _print_answer(chat, text, cancel=cancel, on_token=on_token)
     if config.TTS_ENABLED and answer and not cancel.is_set():
         try:
             terminal.speaking()
-            tts.speak(answer, cancel, on_audio_level=terminal.mouth_level)
+            tts.speak(answer, cancel)
         except Exception as e:
             if not cancel.is_set():
                 terminal.notice(f"TTS 失败: {e}")

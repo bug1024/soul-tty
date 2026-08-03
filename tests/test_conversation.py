@@ -14,6 +14,7 @@ from voice_agent.audio.tts import (
     synthesize_mlx_stream,
 )
 from voice_agent.clients.llm import Chat
+from voice_agent.clients import llm as llm_client
 from voice_agent.conversation import _is_probable_echo, _usable_transcript
 
 
@@ -63,6 +64,26 @@ class FakeClient:
         return FakeResponse()
 
 
+class GreetingResponse:
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {
+            "choices": [
+                {"message": {"content": "“晚上好，我把月光留给你。”\n多余内容"}}
+            ]
+        }
+
+
+class GreetingClient(FakeClient):
+    request = None
+
+    def post(self, url, **kwargs):
+        type(self).request = (url, kwargs)
+        return GreetingResponse()
+
+
 class RepeatingResponse(FakeResponse):
     def iter_lines(self):
         chunks = ["开头。", "面试官问：你还诚实吗？", "小明说：不诚实！"]
@@ -102,6 +123,41 @@ class ChatCancellationTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], config.LLM_MAX_TOKENS)
         self.assertEqual(payload["repeat_penalty"], config.LLM_REPEAT_PENALTY)
         self.assertEqual(chat.messages[-1]["content"], answer)
+
+
+class GreetingGenerationTests(unittest.TestCase):
+    @patch("voice_agent.clients.llm.httpx.Client", GreetingClient)
+    def test_generates_a_short_time_aware_greeting_without_chat_history(self):
+        greeting = llm_client.generate_greeting("test", "Serena", "晚上")
+        payload = GreetingClient.request[1]["json"]
+
+        self.assertEqual(greeting, "晚上好，我把月光留给你。")
+        self.assertFalse(payload["stream"])
+        self.assertIn("晚上", payload["messages"][1]["content"])
+        self.assertEqual(payload["max_tokens"], 32)
+
+    def test_removes_self_introduction_and_rejects_wide_terminal_text(self):
+        self.assertEqual(
+            llm_client._clean_greeting(
+                "晚上好呀，我是 Serena，正好来陪你聊聊。",
+                "Serena",
+            ),
+            "晚上好呀，正好来陪你聊聊。",
+        )
+        self.assertIsNone(llm_client._clean_greeting("晚" * 16))
+
+    def test_rejects_an_abnormally_long_greeting(self):
+        self.assertIsNone(llm_client._clean_greeting("这是一句" * 20))
+
+    @patch("voice_agent.clients.llm.httpx.Client", GreetingClient)
+    def test_idle_emotion_is_generated_without_chat_history(self):
+        phrase = llm_client.generate_idle_emotion("test", "Serena", "下午")
+        payload = GreetingClient.request[1]["json"]
+
+        self.assertEqual(phrase, "晚上好，我把月光留给你。")
+        self.assertFalse(payload["stream"])
+        self.assertIn("已经安静了一会儿", payload["messages"][1]["content"])
+        self.assertIn("不超过十五个汉字", payload["messages"][0]["content"])
 
 
 class FakePCMResponse:

@@ -74,7 +74,7 @@ appearance:
 
 固定 Dashboard 会在 Kitty、Ghostty、iTerm2 或 WezTerm 中使用 Chafa 原生图片协议，把高清头像覆盖到卡片的固定预留区域，并在状态变化时原位替换；其他终端回退为真彩字符像素画。程序不会主动发送能力探测查询。`NO_COLOR=1`、`VOICE_AGENT_AVATAR=0` 或 renderer 为 `off` 时会恢复人格图标。
 
-Qwen3-TTS 播放时会直接分析扬声器 PCM 的平滑音量，在闭嘴、半开和张嘴三帧之间切换。Kitty/Ghostty/WezTerm 兼容路径只在开始说话时上传一次三帧，播放期间使用轻量选帧指令；不会读取麦克风音量。可用 `AVATAR_LIP_SYNC_ENABLED=0` 单独关闭口型。
+Ghostty/Kitty 启动 Dashboard 时会一次性缓存闭嘴、半开两张干净的普通图片；TTS 说话期间由客户端以 `90/80ms` 的节奏切换固定宽度 placement，高度由终端根据方形源图自动计算，避免不同字符行高下头像被纵向拉伸。所有状态使用同一种宽高比策略，不创建终端动画对象，也不会在播放期间反复传输整张图片；其他终端稳定回退为闭嘴完整帧。可用 `AVATAR_LIP_SYNC_ENABLED=0` 关闭说话动画。Dashboard 会按终端剩余高度固定对话视口，默认持续跟随最新消息；滚轮查看历史时保持当前位置，回到底部后恢复自动跟随。
 
 ## 项目结构
 
@@ -159,6 +159,12 @@ BARGE_IN_ENABLED=1 svc start voice-agent
 | `LLM_TOP_P` | `0.9` | LLM nucleus sampling 上限 |
 | `LLM_REPEAT_PENALTY` | `1.1` | llama.cpp 重复惩罚 |
 | `LLM_REPEAT_LAST_N` | `128` | 重复惩罚回看 token 数 |
+| `LLM_GREETING_ENABLED` | `1` | 后台生成符合早中晚时段的简短欢迎语；失败时使用本地时间兜底，不阻塞启动 |
+| `LLM_GREETING_TIMEOUT` | `5` | 动态欢迎语请求超时（秒） |
+| `IDLE_EMOTION_ENABLED` | `1` | Dashboard 长时间未识别到语音时，主动切换一条情绪短句 |
+| `IDLE_EMOTION_AFTER_S` | `60` | 进入聆听后首次触发安静陪伴的等待时间（秒） |
+| `IDLE_EMOTION_INTERVAL_S` | `120` | 持续安静时后续情绪短句的最小间隔（秒） |
+| `LLM_IDLE_EMOTION_ENABLED` | `1` | 后台使用 LLM 润色安静陪伴短句；失败时保留本地短句 |
 | `VAD_AGGRESSIVENESS` | `2` | VAD 严格度 0-3,误触发多就调大 |
 | `SILENCE_MS` | `700` | 插话 VAD 的连续静音阈值 |
 | `MAX_UTTERANCE_S` | `15` | 单句最长秒数,超出强制切段 |

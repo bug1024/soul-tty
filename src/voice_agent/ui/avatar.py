@@ -1,6 +1,7 @@
 """Chafa 头像渲染：原生像素协议 -> ANSI 像素画 -> 无头像。"""
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -12,6 +13,13 @@ from ..personas.models import Persona
 
 _NATIVE_MARKERS = (b"\033_G", b"\033]1337;", b"\033Pq", b"\033P0;")
 _KITTY_IMAGE_NUMBER = 0x564F4943  # "VOIC"，仅用于当前 alternate screen。
+_KITTY_IMAGE_PLACEMENT_ID = 1
+_KITTY_SPEAKING_IMAGE_NUMBER = 0x5350454B  # "SPEK"
+_KITTY_SPEAKING_FRAME_NUMBERS = tuple(
+    _KITTY_SPEAKING_IMAGE_NUMBER + index for index in range(2)
+)
+_KITTY_SPEAKING_PLACEMENT_ID = 1
+_KITTY_APC = re.compile(rb"\033_G(.*?)\033\\", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -179,78 +187,181 @@ def write_native_at(
     # Chafa 在 payload 末尾添加换行；固定定位时不需要它，否则可能滚动画布。
     payload = render.native.rstrip(b"\r\n")
     buffer.write(b"\0337")
-    buffer.write(f"\033[{row};{column}H".encode("ascii"))
     if render.protocol == "kitty":
-        # 删除 voice-agent 上一次放置的图像及数据，避免长时间对话累积显存。
-        buffer.write(
-            f"\033_Ga=d,d=N,I={_KITTY_IMAGE_NUMBER},q=2\033\\".encode("ascii")
+        size = _kitty_display_size(render)
+        hidden = _rewrite_kitty_hidden_payload(
+            render,
+            image_number=_KITTY_IMAGE_NUMBER,
         )
-        payload = payload.replace(
-            b"\033_Ga=T,",
-            f"\033_Ga=T,I={_KITTY_IMAGE_NUMBER},".encode("ascii"),
-            1,
-        )
+        if size is not None and hidden is not None:
+            width, _ = size
+            # 静态与说话状态统一采用隐藏传输 + 固定 placement，避免
+            # Ghostty 对 a=T 和 a=p 使用不同的显示几何。
+            buffer.write(
+                f"\033_Ga=d,d=N,I={_KITTY_IMAGE_NUMBER},q=2\033\\".encode(
+                    "ascii"
+                )
+            )
+            buffer.write(hidden)
+            buffer.write(f"\033[{row};{column}H".encode("ascii"))
+            buffer.write(
+                (
+                    f"\033_Ga=p,I={_KITTY_IMAGE_NUMBER},"
+                    f"p={_KITTY_IMAGE_PLACEMENT_ID},c={width},"
+                    f"C=1,q=2\033\\"
+                ).encode("ascii")
+            )
+            buffer.write(b"\0338")
+            buffer.flush()
+            return True
+    buffer.write(f"\033[{row};{column}H".encode("ascii"))
     buffer.write(payload)
     buffer.write(b"\0338")
     buffer.flush()
     return True
 
 
-def _kitty_frame_payload(render: AvatarRender) -> bytes | None:
-    """把 Chafa 的 Kitty 根图传输改写为同一图像的动画帧传输。"""
+def hide_native_avatar(output) -> bool:
+    """隐藏当前普通状态头像，保留图片数据直到下一次状态重绘。"""
+    buffer = getattr(output, "buffer", None)
+    if buffer is None:
+        return False
+    buffer.write(
+        (
+            f"\033_Ga=d,d=n,I={_KITTY_IMAGE_NUMBER},"
+            f"p={_KITTY_IMAGE_PLACEMENT_ID},q=2\033\\"
+        ).encode("ascii")
+    )
+    buffer.flush()
+    return True
+
+
+def _kitty_display_size(render: AvatarRender) -> tuple[int, int] | None:
     if render.native is None or render.protocol != "kitty":
         return None
-    payload = render.native.rstrip(b"\r\n")
-    prefix = b"\033_G"
-    start = payload.find(prefix)
-    separator = payload.find(b";", start + len(prefix))
-    if start < 0 or separator < 0:
+    match = _KITTY_APC.search(render.native)
+    if match is None:
         return None
-    controls = payload[start + len(prefix) : separator].split(b",")
-    kept = []
-    for control in controls:
-        key = control.split(b"=", 1)[0]
-        if key not in {b"a", b"c", b"r", b"i", b"I", b"p", b"z"}:
-            kept.append(control)
-    header = b",".join(
-        [b"a=f", f"I={_KITTY_IMAGE_NUMBER}".encode("ascii"), *kept]
+    controls = match.group(1).partition(b";")[0]
+    values = dict(
+        part.split(b"=", 1) for part in controls.split(b",") if b"=" in part
     )
-    return payload[: start + len(prefix)] + header + payload[separator:]
+    try:
+        width, height = int(values[b"c"]), int(values[b"r"])
+    except (KeyError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
 
 
-def write_native_animation_at(
-    frames: tuple[AvatarRender, AvatarRender, AvatarRender],
-    output,
+def _rewrite_kitty_hidden_payload(
+    render: AvatarRender,
     *,
-    row: int,
-    column: int,
+    image_number: int,
+) -> bytes | None:
+    """把 Chafa 的直接显示分块改写为带稳定编号的隐藏图片。"""
+    if render.native is None or render.protocol != "kitty":
+        return None
+    first = True
+
+    def rewrite(match: re.Match[bytes]) -> bytes:
+        nonlocal first
+        body = match.group(1)
+        controls, separator, data = body.partition(b";")
+        parts = controls.split(b",") if controls else []
+        if first:
+            first = False
+            kept = []
+            for part in parts:
+                key = part.split(b"=", 1)[0]
+                if key not in {b"a", b"c", b"r", b"i", b"I", b"p", b"z", b"X"}:
+                    kept.append(part)
+            prefix = [
+                b"a=t",
+                f"I={image_number}".encode("ascii"),
+            ]
+            controls = b",".join([*prefix, *kept])
+        rewritten = controls + (separator + data if separator else b"")
+        return b"\033_G" + rewritten + b"\033\\"
+
+    payload, count = _KITTY_APC.subn(rewrite, render.native.rstrip(b"\r\n"))
+    return payload if count and not first else None
+
+
+def prepare_native_frames(
+    frames: tuple[AvatarRender, AvatarRender],
+    output,
 ) -> bool:
-    """一次上传闭/半开/张嘴三帧；后续只需发送很小的选帧指令。"""
-    if not all(frame.protocol == "kitty" for frame in frames):
-        return False
-    if not write_native_at(frames[0], output, row=row, column=column):
-        return False
-    extra = [_kitty_frame_payload(frame) for frame in frames[1:]]
-    if any(payload is None for payload in extra):
+    """缓存两张干净的普通 Kitty 图片；不创建会改变显示几何的动画对象。"""
+    payloads = [
+        _rewrite_kitty_hidden_payload(
+            frame,
+            image_number=number,
+        )
+        for frame, number in zip(frames, _KITTY_SPEAKING_FRAME_NUMBERS)
+    ]
+    if any(payload is None for payload in payloads):
         return False
     buffer = getattr(output, "buffer", None)
     if buffer is None:
         return False
-    for payload in extra:
+    flush = getattr(output, "flush", None)
+    if flush is not None:
+        flush()
+    for number, payload in zip(_KITTY_SPEAKING_FRAME_NUMBERS, payloads):
+        buffer.write(f"\033_Ga=d,d=N,I={number},q=2\033\\".encode("ascii"))
         buffer.write(payload)
     buffer.flush()
     return True
 
 
-def select_native_animation_frame(output, frame: int) -> bool:
-    """选择 Kitty 动画帧：1=闭嘴，2=半开，3=张嘴。"""
-    if frame not in {1, 2, 3}:
+def show_native_frame_at(
+    output,
+    frame: int,
+    *,
+    row: int,
+    column: int,
+    width: int,
+) -> bool:
+    """切换缓存图片；只限定宽度，由终端按源图比例计算高度。"""
+    if frame not in range(len(_KITTY_SPEAKING_FRAME_NUMBERS)):
+        return False
+    if min(row, column, width) < 1:
         return False
     buffer = getattr(output, "buffer", None)
     if buffer is None:
         return False
+    placement = _KITTY_SPEAKING_PLACEMENT_ID
+    for number in _KITTY_SPEAKING_FRAME_NUMBERS:
+        buffer.write(
+            f"\033_Ga=d,d=n,I={number},p={placement},q=2\033\\".encode(
+                "ascii"
+            )
+        )
+    number = _KITTY_SPEAKING_FRAME_NUMBERS[frame]
+    buffer.write(b"\0337")
+    buffer.write(f"\033[{row};{column}H".encode("ascii"))
     buffer.write(
-        f"\033_Ga=a,I={_KITTY_IMAGE_NUMBER},c={frame},q=2\033\\".encode("ascii")
+        (
+            f"\033_Ga=p,I={number},p={placement},c={width},"
+            "C=1,q=2\033\\"
+        ).encode("ascii")
     )
+    buffer.write(b"\0338")
+    buffer.flush()
+    return True
+
+
+def hide_native_frames(output) -> bool:
+    """隐藏客户端口型帧，保留缓存数据供下一轮说话复用。"""
+    buffer = getattr(output, "buffer", None)
+    if buffer is None:
+        return False
+    placement = _KITTY_SPEAKING_PLACEMENT_ID
+    for number in _KITTY_SPEAKING_FRAME_NUMBERS:
+        buffer.write(
+            f"\033_Ga=d,d=n,I={number},p={placement},q=2\033\\".encode(
+                "ascii"
+            )
+        )
     buffer.flush()
     return True
