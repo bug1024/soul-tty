@@ -1,4 +1,4 @@
-"""voice-agent 命令行入口。"""
+"""Soul TTY（终端之魂）命令行入口。"""
 
 import argparse
 import os
@@ -20,13 +20,13 @@ def _tts_description() -> str | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="voice-agent", description=__doc__)
+    parser = argparse.ArgumentParser(prog="soul-tty", description=__doc__)
     parser.add_argument(
         "command", nargs="?", choices=["personas"], help="列出可用人格"
     )
     parser.add_argument(
         "--persona",
-        default=os.environ.get("VOICE_AGENT_PERSONA", "serena"),
+        default=os.environ.get("SOUL_TTY_PERSONA", "serena"),
         help="人格 id 或 YAML 文件路径（默认: serena）",
     )
     parser.add_argument(

@@ -92,7 +92,7 @@ def render_avatar(
     renderer_override: str | None = None,
 ) -> AvatarRender:
     avatar = persona.appearance.avatar
-    enabled = os.environ.get("VOICE_AGENT_AVATAR", "1") not in {
+    enabled = os.environ.get("SOUL_TTY_AVATAR", "1") not in {
         "0",
         "false",
         "False",
@@ -105,7 +105,7 @@ def render_avatar(
     ):
         return AvatarRender()
     configured_renderer = os.environ.get(
-        "VOICE_AGENT_AVATAR_RENDERER", avatar.renderer
+        "SOUL_TTY_AVATAR_RENDERER", avatar.renderer
     ).lower()
     # renderer_override 只选择布局所需的输出格式，不能绕过用户的关闭设置。
     if configured_renderer == "off":

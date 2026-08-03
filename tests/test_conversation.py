@@ -3,19 +3,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from voice_agent import config
-from voice_agent import conversation as main_module
-from voice_agent.audio import asr
-from voice_agent.audio.tts import (
+from soul_tty import config
+from soul_tty import conversation as main_module
+from soul_tty.audio import asr
+from soul_tty.audio.tts import (
     PlaybackLevelMeter,
     StreamingSpeaker,
     _trim_trailing_silence,
     speak,
     synthesize_mlx_stream,
 )
-from voice_agent.clients.llm import Chat
-from voice_agent.clients import llm as llm_client
-from voice_agent.conversation import _is_probable_echo, _usable_transcript
+from soul_tty.clients.llm import Chat
+from soul_tty.clients import llm as llm_client
+from soul_tty.conversation import _is_probable_echo, _usable_transcript
 
 
 class ConversationPolicyTests(unittest.TestCase):
@@ -104,7 +104,7 @@ class RepeatingClient(FakeClient):
 
 
 class ChatCancellationTests(unittest.TestCase):
-    @patch("voice_agent.clients.llm.httpx.Client", FakeClient)
+    @patch("soul_tty.clients.llm.httpx.Client", FakeClient)
     def test_cancel_before_first_token_rolls_back_user_message(self):
         chat = Chat("test")
         cancel = threading.Event()
@@ -112,7 +112,7 @@ class ChatCancellationTests(unittest.TestCase):
         self.assertEqual(list(chat.ask_stream("不应留下", cancel)), [])
         self.assertEqual([message["role"] for message in chat.messages], ["system"])
 
-    @patch("voice_agent.clients.llm.httpx.Client", RepeatingClient)
+    @patch("soul_tty.clients.llm.httpx.Client", RepeatingClient)
     def test_stops_repeated_sentence_loop_and_sets_generation_limits(self):
         chat = Chat("test")
         answer = "".join(chat.ask_stream("讲故事"))
@@ -126,7 +126,7 @@ class ChatCancellationTests(unittest.TestCase):
 
 
 class GreetingGenerationTests(unittest.TestCase):
-    @patch("voice_agent.clients.llm.httpx.Client", GreetingClient)
+    @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
     def test_generates_a_short_time_aware_greeting_without_chat_history(self):
         greeting = llm_client.generate_greeting("test", "Serena", "晚上")
         payload = GreetingClient.request[1]["json"]
@@ -149,7 +149,7 @@ class GreetingGenerationTests(unittest.TestCase):
     def test_rejects_an_abnormally_long_greeting(self):
         self.assertIsNone(llm_client._clean_greeting("这是一句" * 20))
 
-    @patch("voice_agent.clients.llm.httpx.Client", GreetingClient)
+    @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
     def test_idle_emotion_is_generated_without_chat_history(self):
         phrase = llm_client.generate_idle_emotion("test", "Serena", "下午")
         payload = GreetingClient.request[1]["json"]
@@ -199,7 +199,7 @@ class MLXTTSClientTests(unittest.TestCase):
     def setUp(self):
         RecordingPCMClient.requests = []
 
-    @patch("voice_agent.audio.tts.httpx.Client", RecordingPCMClient)
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_sends_builtin_voice_stream_request_and_aligns_pcm(self):
         chunks = list(synthesize_mlx_stream("你好"))
         method, url, kwargs = RecordingPCMClient.request
@@ -216,13 +216,13 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertEqual(payload["repetition_penalty"], 1.05)
         self.assertEqual(chunks, [b"\x01\x02", b"\x03\x04"])
 
-    @patch("voice_agent.audio.tts.httpx.Client", RecordingPCMClient)
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_synthesizes_each_sentence_as_an_independent_request(self):
         list(synthesize_mlx_stream("第一句。第二句！"))
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(inputs, ["第一句。", "第二句！"])
 
-    @patch("voice_agent.audio.tts.httpx.Client", RecordingPCMClient)
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_strips_markdown_and_never_sends_symbol_only_segments(self):
         text = "普通句！\n**气死我了！你怎么这么笨！**\n"
         list(synthesize_mlx_stream(text))
@@ -230,14 +230,14 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertEqual(inputs, ["普通句！", "气死我了！", "你怎么这么笨！"])
         self.assertNotIn("**", inputs)
 
-    @patch("voice_agent.audio.tts.httpx.Client", RecordingPCMClient)
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_normalizes_quoted_elongated_interjection(self):
         text = '会啊，我喊一声“嗯”。\n这就来个响亮的“嗯——"！'
         list(synthesize_mlx_stream(text))
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(inputs, ["会啊，我喊一声嗯。", "这就来个响亮的嗯！"])
 
-    @patch("voice_agent.audio.tts.httpx.Client", RecordingPCMClient)
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_skips_a_symbol_only_answer(self):
         self.assertEqual(list(synthesize_mlx_stream("***\n**")), [])
         self.assertEqual(RecordingPCMClient.requests, [])
@@ -269,7 +269,7 @@ class FinishedProcess:
 
 
 class MacOSSpeakerTests(unittest.TestCase):
-    @patch("voice_agent.audio.tts.subprocess.Popen", return_value=FinishedProcess())
+    @patch("soul_tty.audio.tts.subprocess.Popen", return_value=FinishedProcess())
     def test_uses_configured_system_voice(self, popen):
         with patch.object(config, "TTS_BACKEND", "macos"):
             with StreamingSpeaker() as speaker:
@@ -278,7 +278,7 @@ class MacOSSpeakerTests(unittest.TestCase):
         self.assertEqual(command[0:2], ["say", "-v"])
         self.assertEqual(command[-1], "你好")
 
-    @patch("voice_agent.audio.tts.subprocess.Popen", return_value=FinishedProcess())
+    @patch("soul_tty.audio.tts.subprocess.Popen", return_value=FinishedProcess())
     def test_whole_answer_uses_configured_system_voice(self, popen):
         with patch.object(config, "TTS_BACKEND", "macos"):
             speak("整段回答")

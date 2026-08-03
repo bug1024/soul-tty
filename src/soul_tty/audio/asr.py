@@ -30,7 +30,7 @@ def _load_sherpa_recognizer():
         import sherpa_onnx
     except ImportError as e:
         raise RuntimeError(
-            "sherpa-onnx 运行时加载失败，请在 voice-agent 目录执行 uv sync"
+            "sherpa-onnx 运行时加载失败，请在 soul-tty 目录执行 uv sync"
         ) from e
 
     model_dir = Path(config.SHERPA_MODEL_DIR).expanduser()

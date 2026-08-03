@@ -3,8 +3,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-from voice_agent.personas import load_persona
-from voice_agent.ui import avatar
+from soul_tty.personas import load_persona
+from soul_tty.ui import avatar
 
 
 class AvatarRendererTests(unittest.TestCase):
@@ -29,8 +29,8 @@ class AvatarRendererTests(unittest.TestCase):
         payload = b"\x1b[38;2;1;2;3m\xe2\x96\x80\x1b[0m\n"
         with (
             patch.dict(os.environ, {"TERM": "dumb"}, clear=True),
-            patch("voice_agent.ui.avatar.shutil.which", return_value="/bin/chafa"),
-            patch("voice_agent.ui.avatar._run_chafa", return_value=payload) as run,
+            patch("soul_tty.ui.avatar.shutil.which", return_value="/bin/chafa"),
+            patch("soul_tty.ui.avatar._run_chafa", return_value=payload) as run,
         ):
             render = avatar.render_avatar(load_persona("serena"), "idle", True)
         self.assertEqual(render.mode, "symbols")
@@ -41,8 +41,8 @@ class AvatarRendererTests(unittest.TestCase):
         payload = b"\x1b_Gf=100;payload\x1b\\"
         with (
             patch.dict(os.environ, {"KITTY_WINDOW_ID": "1"}, clear=True),
-            patch("voice_agent.ui.avatar.shutil.which", return_value="/bin/chafa"),
-            patch("voice_agent.ui.avatar._run_chafa", return_value=payload) as run,
+            patch("soul_tty.ui.avatar.shutil.which", return_value="/bin/chafa"),
+            patch("soul_tty.ui.avatar._run_chafa", return_value=payload) as run,
         ):
             render = avatar.render_avatar(load_persona("serena"), "speaking", True)
         self.assertEqual(render.mode, "pixels")

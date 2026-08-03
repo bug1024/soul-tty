@@ -1,6 +1,6 @@
-# voice-agent
+# soul-tty
 
-本地语音对话 Agent:麦克风实时输入 → sherpa-onnx 流式识别 → llama.cpp 流式对话 → MLX Qwen3-TTS 流式语音。
+**Soul TTY，终端之魂。** 本地语音对话伙伴：麦克风实时输入 → sherpa-onnx 流式识别 → llama.cpp 流式对话 → MLX Qwen3-TTS 流式语音。
 
 ## 依赖服务
 
@@ -11,7 +11,7 @@ svc start llama
 svc start mlx-tts
 ```
 
-- sherpa-onnx:直接嵌入 voice-agent 进程，无需单独启动服务
+- sherpa-onnx:直接嵌入 soul-tty 进程，无需单独启动服务
 - llama:8180,router 模式,按需自动加载模型
 - mlx-tts:50501,Qwen3-TTS 1.7B CustomVoice 内置 Serena 中文女声(MLX/Apple Silicon,默认)
 - chafa:终端角色图渲染；支持原生图片协议时显示像素图，否则回退为 Truecolor Unicode 像素画
@@ -19,18 +19,18 @@ svc start mlx-tts
 ## 使用
 
 ```bash
-svc start voice-agent     # 前台启动(推荐,任何目录可用)
+svc start soul-tty     # 前台启动(推荐,任何目录可用)
 ```
 
-等价于 `cd apps/voice-agent && uv run voice-agent`(首次自动建环境)。
+等价于 `cd apps/soul-tty && uv run soul-tty`(首次自动建环境)。
 
 交互:显示 `◉ 正在聆听` 后直接说话。sherpa-onnx 持续接收 30ms PCM 帧并在当前行显示 partial 文本，检测到约 0.6s 尾部静音后提交 final；LLM 回答边生成边送 TTS。默认**半双工**:播报期间麦克风停止采集(避免外放回声),播完自动恢复聆听。`Ctrl+C` 退出。
 
 调试模式(不需要麦克风):
 
 ```bash
-uv run voice-agent --file /path/to/audio.wav   # 测 ASR->LLM->TTS 全链路(需 16kHz 16bit 单声道 WAV)
-uv run voice-agent --text "你好"               # 跳过 ASR 直测 LLM+TTS
+uv run soul-tty --file /path/to/audio.wav   # 测 ASR->LLM->TTS 全链路(需 16kHz 16bit 单声道 WAV)
+uv run soul-tty --text "你好"               # 跳过 ASR 直测 LLM+TTS
 ```
 
 ## 人格与名字
@@ -38,18 +38,18 @@ uv run voice-agent --text "你好"               # 跳过 ASR 直测 LLM+TTS
 默认人格是 `serena`，项目同时内置了更简洁的 `assistant`：
 
 ```bash
-uv run voice-agent personas                       # 列出可用人格
-uv run voice-agent --persona assistant            # 切换人格
-uv run voice-agent --persona serena --name 小夜  # 临时改名
-VOICE_AGENT_PERSONA=assistant svc start voice-agent
-AGENT_NAME=小夜 svc start voice-agent
+uv run soul-tty personas                       # 列出可用人格
+uv run soul-tty --persona assistant            # 切换人格
+uv run soul-tty --persona serena --name 小夜  # 临时改名
+SOUL_TTY_PERSONA=assistant svc start soul-tty
+AGENT_NAME=小夜 svc start soul-tty
 ```
 
 人格文件位于 `personas/*.yaml`，可以自定义名字、开场白、告别语、LLM 系统提示词、TTS 语气与终端主题色。也可直接加载外部文件：
 
 ```bash
-uv run voice-agent --persona /path/to/my-persona.yaml
-VOICE_AGENT_PERSONA_DIR=/path/to/personas uv run voice-agent --persona my-agent
+uv run soul-tty --persona /path/to/my-persona.yaml
+SOUL_TTY_PERSONA_DIR=/path/to/personas uv run soul-tty --persona my-agent
 ```
 
 配置优先级：命令行名字 > 环境变量 > persona YAML > 程序默认值。`--name` 不仅修改终端标题，也会把新名字注入 LLM 人格。
@@ -72,14 +72,14 @@ appearance:
     width: 26            # 12-48 个终端字符宽度
 ```
 
-固定 Dashboard 会在 Kitty、Ghostty、iTerm2 或 WezTerm 中使用 Chafa 原生图片协议，把高清头像覆盖到卡片的固定预留区域，并在状态变化时原位替换；其他终端回退为真彩字符像素画。程序不会主动发送能力探测查询。`NO_COLOR=1`、`VOICE_AGENT_AVATAR=0` 或 renderer 为 `off` 时会恢复人格图标。
+固定 Dashboard 会在 Kitty、Ghostty、iTerm2 或 WezTerm 中使用 Chafa 原生图片协议，把高清头像覆盖到卡片的固定预留区域，并在状态变化时原位替换；其他终端回退为真彩字符像素画。程序不会主动发送能力探测查询。`NO_COLOR=1`、`SOUL_TTY_AVATAR=0` 或 renderer 为 `off` 时会恢复人格图标。
 
 Ghostty/Kitty 启动 Dashboard 时会一次性缓存闭嘴、半开两张干净的普通图片；TTS 说话期间由客户端以 `90/80ms` 的节奏切换固定宽度 placement，高度由终端根据方形源图自动计算，避免不同字符行高下头像被纵向拉伸。所有状态使用同一种宽高比策略，不创建终端动画对象，也不会在播放期间反复传输整张图片；其他终端稳定回退为闭嘴完整帧。可用 `AVATAR_LIP_SYNC_ENABLED=0` 关闭说话动画。Dashboard 会按终端剩余高度固定对话视口，默认持续跟随最新消息；滚轮查看历史时保持当前位置，回到底部后恢复自动跟随。
 
 ## 项目结构
 
 ```text
-src/voice_agent/
+src/soul_tty/
 ├── cli.py             # 命令行入口与启动信息
 ├── config.py          # 环境变量配置
 ├── conversation.py    # 对话流程与打断策略
@@ -100,8 +100,8 @@ assets/avatars/           # 人格角色图资产
 | `macos` | 系统 `say` 命令,首音延迟极低,但音色机械僵硬 |
 
 ```bash
-TTS_BACKEND=macos svc start voice-agent       # 回退到系统音色
-MLX_TTS_INSTRUCT='用温柔、亲切的语气说' svc start voice-agent
+TTS_BACKEND=macos svc start soul-tty       # 回退到系统音色
+MLX_TTS_INSTRUCT='用温柔、亲切的语气说' svc start soul-tty
 ```
 
 默认内置音色为 `Serena`。`MLX_TTS_INSTRUCT` 留空时使用自然语气，也可设置为“用特别愤怒的语气说”或“用撒娇、亲昵的语气说”。切换 `Vivian` 等其他内置音色时，需同时修改 `scripts/registry.yaml` 的服务启动参数并重启 `mlx-tts`。
@@ -111,7 +111,7 @@ MLX_TTS_INSTRUCT='用温柔、亲切的语气说' svc start voice-agent
 默认使用进程内 sherpa-onnx Streaming Paraformer int8。模型启动时加载一次，后续音频持续进入同一个在线识别流，不经过 WAV 封装和 HTTP 上传。
 
 ```bash
-svc start voice-agent                         # sherpa 流式 ASR（默认）
+svc start soul-tty                         # sherpa 流式 ASR（默认）
 ```
 
 本机 `/Users/bug1024/Documents/sounds/test.wav` 实测：4.9 秒音频纯推理约 0.22 秒，RTF 约 0.044；真实逐帧回放在 0.6 秒 endpoint 下完整识别为“你好我在做一个语音测试”。
@@ -131,7 +131,7 @@ MLX 服务启动时完成模型与参考音色预热；健康检查通过后的�
 默认关闭。开启后回答期间仍持续聆听,确认是真人插话(非扬声器回声)即打断当前回答并响应新一句:
 
 ```bash
-BARGE_IN_ENABLED=1 svc start voice-agent
+BARGE_IN_ENABLED=1 svc start soul-tty
 ```
 
 外放环境没有 AEC 时可能误判,**建议只在戴耳机时开启**;回声相似度阈值可用 `BARGE_IN_ECHO_SIMILARITY`(默认 0.72)微调。
@@ -140,13 +140,13 @@ BARGE_IN_ENABLED=1 svc start voice-agent
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `VOICE_AGENT_PERSONA` | `serena` | 启动时使用的人格 id 或 YAML 路径 |
-| `VOICE_AGENT_PERSONA_DIR` | `personas/` | 额外的人格目录，同 id 会覆盖内置人格 |
+| `SOUL_TTY_PERSONA` | `serena` | 启动时使用的人格 id 或 YAML 路径 |
+| `SOUL_TTY_PERSONA_DIR` | `personas/` | 额外的人格目录，同 id 会覆盖内置人格 |
 | `AGENT_NAME` | 人格名 | 覆盖显示名称并注入 LLM 人格 |
-| `VOICE_AGENT_ANIMATIONS` | `1` | 设为 `0` 关闭一次性开场动画 |
-| `VOICE_AGENT_DASHBOARD` | `1` | 设为 `0` 使用传统滚动输出；固定头像与动态表情仅在 Dashboard 中启用 |
-| `VOICE_AGENT_AVATAR` | `1` | 设为 `0` 关闭角色图并使用人格图标 |
-| `VOICE_AGENT_AVATAR_RENDERER` | persona 配置 | 临时覆盖 `auto` / `pixels` / `symbols` / `off` |
+| `SOUL_TTY_ANIMATIONS` | `1` | 设为 `0` 关闭一次性开场动画 |
+| `SOUL_TTY_DASHBOARD` | `1` | 设为 `0` 使用传统滚动输出；固定头像与动态表情仅在 Dashboard 中启用 |
+| `SOUL_TTY_AVATAR` | `1` | 设为 `0` 关闭角色图并使用人格图标 |
+| `SOUL_TTY_AVATAR_RENDERER` | persona 配置 | 临时覆盖 `auto` / `pixels` / `symbols` / `off` |
 | `AVATAR_LIP_SYNC_ENABLED` | `1` | 使用实际播放的 TTS PCM 音量驱动三段口型 |
 | `SHERPA_MODEL_DIR` | `../sherpa-asr/models/...` | Streaming Paraformer int8 模型目录 |
 | `SHERPA_NUM_THREADS` | `1` | ONNX Runtime CPU 推理线程数 |

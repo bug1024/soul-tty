@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from voice_agent import config
-from voice_agent.personas import apply_persona, available_personas, load_persona
+from soul_tty import config
+from soul_tty.personas import apply_persona, available_personas, load_persona
 
 
 class PersonaTests(unittest.TestCase):

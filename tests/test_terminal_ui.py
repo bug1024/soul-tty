@@ -5,8 +5,8 @@ from unittest.mock import patch
 from rich.cells import cell_len
 from rich.console import Console
 
-from voice_agent.personas import load_persona
-from voice_agent.ui import terminal
+from soul_tty.personas import load_persona
+from soul_tty.ui import terminal
 
 
 class TerminalUITests(unittest.TestCase):

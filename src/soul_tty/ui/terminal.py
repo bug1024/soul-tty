@@ -147,7 +147,7 @@ class Dashboard:
         self._idle_emotion_thread: threading.Thread | None = None
         self.input = TerminalInput(self.scroll)
         configured_renderer = os.environ.get(
-            "VOICE_AGENT_AVATAR_RENDERER",
+            "SOUL_TTY_AVATAR_RENDERER",
             persona.appearance.avatar.renderer
             if persona.appearance.avatar is not None
             else "off",
@@ -726,7 +726,7 @@ def splash(*, model: str, tts: str | None) -> bool:
     global _dashboard
     persona = _current()
     runtime = RuntimeDetails(model=model, tts=tts)
-    dashboard_enabled = os.environ.get("VOICE_AGENT_DASHBOARD", "1") not in {
+    dashboard_enabled = os.environ.get("SOUL_TTY_DASHBOARD", "1") not in {
         "0", "false", "False"
     }
     if _console.is_terminal and _console.file is sys.stdout and dashboard_enabled:
@@ -735,7 +735,7 @@ def splash(*, model: str, tts: str | None) -> bool:
         return True
     avatar = avatar_ui.render_avatar(persona, "idle", _console.is_terminal)
     native_avatar = avatar_ui.write_native(avatar, _console.file)
-    animations = os.environ.get("VOICE_AGENT_ANIMATIONS", "1") not in {
+    animations = os.environ.get("SOUL_TTY_ANIMATIONS", "1") not in {
         "0",
         "false",
         "False",

@@ -14,7 +14,7 @@ _PROJECT_PERSONA_DIR = Path(__file__).resolve().parents[3] / "personas"
 
 def persona_directories() -> list[Path]:
     directories: list[Path] = []
-    custom = os.environ.get("VOICE_AGENT_PERSONA_DIR")
+    custom = os.environ.get("SOUL_TTY_PERSONA_DIR")
     if custom:
         directories.append(Path(custom).expanduser())
     directories.append(_PROJECT_PERSONA_DIR)
