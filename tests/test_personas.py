@@ -27,6 +27,28 @@ class PersonaTests(unittest.TestCase):
         for mouth in ("speaking_closed", "speaking_half", "speaking_open"):
             self.assertTrue(Path(persona.appearance.avatar.for_state(mouth)).is_file())
 
+    def test_selects_serena_outfit_without_changing_other_persona_data(self):
+        persona = load_persona("serena")
+        self.assertEqual(
+            [outfit.id for outfit in persona.appearance.avatar.outfits],
+            ["default", "late-night", "work"],
+        )
+
+        work = persona.wearing("work")
+
+        self.assertEqual(work.display_name, "Serena")
+        self.assertEqual(work.appearance.avatar.selected_outfit, "work")
+        self.assertIn("/work/", work.appearance.avatar.for_state("idle"))
+        self.assertIn("/work/", work.appearance.avatar.for_state("speaking_half"))
+        self.assertIn("编程", work.appearance.avatar.outfit.description)
+        self.assertTrue(work.appearance.avatar.outfit.switch_greetings)
+
+    def test_rejects_unknown_outfit(self):
+        with self.assertRaisesRegex(
+            ValueError, "可用: default, late-night, work"
+        ):
+            load_persona("serena").wearing("missing")
+
     def test_applies_persona_defaults(self):
         persona = load_persona("assistant")
         with (

@@ -23,6 +23,10 @@ _MARKDOWN_LINK = re.compile(r"!?\[([^]]*)\]\([^)]+\)")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _MARKDOWN_PREFIX = re.compile(r"(?m)^\s{0,3}(?:#{1,6}|[-+>]\s+)\s*")
 _ELONGATED_INTERJECTION = re.compile(r"([嗯啊呀哦噢唔哎诶哈])\s*[—–-]{2,}")
+_LONG_PAUSE_PUNCTUATION = re.compile(r"(?:\.[ \t]*){2,}|…{2,}")
+_TRAILING_LONG_PAUSE = re.compile(
+    r"(?:(?:\.[ \t]*){2,}|…{2,})(?=[ \t]*(?:\n|$))"
+)
 _SHORT_TAIL_MAX_CHARS = 8
 _SHORT_TAIL_MIN_PREFIX_CHARS = 8
 _PLAYBACK_LEVEL_FRAME_MS = 50
@@ -95,8 +99,11 @@ def _split_mlx_text(text: str) -> list[str]:
     text = _MARKDOWN_PREFIX.sub("", text)
     text = re.sub(r"[*_]{1,3}", "", text)
     text = re.sub(r"~~([^~]+)~~", r"\1", text)
-    # 引号本身没有朗读价值；拟声词后的长破折号会诱导模型持续发同一个音。
+    # 引号本身没有朗读价值；拉长符号会诱导模型持续发声或生成足以被
+    # 尾部静音保护误判的内部长停顿。
     text = _ELONGATED_INTERJECTION.sub(r"\1", text)
+    text = _TRAILING_LONG_PAUSE.sub("。", text)
+    text = _LONG_PAUSE_PUNCTUATION.sub("，", text)
     text = re.sub(r"[“”‘’\"']", "", text)
     sentences = [
         match.group().strip()

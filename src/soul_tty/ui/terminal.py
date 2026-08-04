@@ -20,7 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import config
-from ..personas.models import Persona
+from ..personas.models import AvatarOutfit, Persona
 from ..presence import LaunchContext
 from . import avatar as avatar_ui
 
@@ -31,6 +31,7 @@ _answer_has_content = False
 _dashboard: "Dashboard | None" = None
 _relationship_profile: tuple[int, str, str, str] | None = None
 _launch_context = LaunchContext()
+_outfit_greeting_generator: Callable[[AvatarOutfit], str | None] | None = None
 _AVATAR_ROW = 3
 _AVATAR_COLUMN = 7
 _USER_COLOR = "#67B7D1"
@@ -68,14 +69,22 @@ class TerminalInput:
     """接管 alternate screen 输入，防止滚轮被回显成 ^[[A。"""
 
     _MOUSE_EVENT = re.compile(rb"\033\[<(64|65);\d+;\d+[mM]")
+    _CSI_EVENT = re.compile(rb"\033\[[0-?]*[ -/]*[@-~]")
 
-    def __init__(self, on_scroll, on_toggle_details=None) -> None:
+    def __init__(
+        self,
+        on_scroll,
+        on_toggle_details=None,
+        on_cycle_outfit=None,
+    ) -> None:
         self.on_scroll = on_scroll
         self.on_toggle_details = on_toggle_details
+        self.on_cycle_outfit = on_cycle_outfit
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
         self.thread: threading.Thread | None = None
+        self._pending_input = b""
 
     def start(self) -> None:
         if not sys.stdin.isatty() or not _console.is_terminal:
@@ -106,6 +115,27 @@ class TerminalInput:
     def detail_toggles(data: bytes) -> int:
         return data.count(b"\t")
 
+    @classmethod
+    def outfit_toggles(cls, data: bytes) -> int:
+        """统计裸 `0` 按键，忽略所有 CSI 键盘与鼠标转义序列。"""
+        plain = cls._CSI_EVENT.sub(b"", data)
+        return plain.count(b"0")
+
+    @staticmethod
+    def split_incomplete_escape(data: bytes) -> tuple[bytes, bytes]:
+        """保留末尾未收完的 CSI 序列，避免其中的坐标被当成按键。"""
+        start = data.rfind(b"\033")
+        if start < 0:
+            return data, b""
+        suffix = data[start:]
+        if suffix == b"\033" or suffix == b"\033[":
+            return data[:start], suffix
+        if suffix.startswith(b"\033[") and not any(
+            0x40 <= byte <= 0x7E for byte in suffix[2:]
+        ):
+            return data[:start], suffix
+        return data, b""
+
     def _read(self) -> None:
         assert self.fd is not None
         while not self.closed.is_set():
@@ -113,12 +143,16 @@ class TerminalInput:
                 ready, _, _ = select.select([self.fd], [], [], 0.1)
                 if not ready:
                     continue
-                data = os.read(self.fd, 1024)
+                chunk = self._pending_input + os.read(self.fd, 1024)
+                data, self._pending_input = self.split_incomplete_escape(chunk)
                 for direction in self.navigation(data):
                     self.on_scroll(direction)
                 if self.on_toggle_details is not None:
                     for _ in range(self.detail_toggles(data)):
                         self.on_toggle_details()
+                if self.on_cycle_outfit is not None:
+                    for _ in range(self.outfit_toggles(data)):
+                        self.on_cycle_outfit()
             except OSError:
                 return
 
@@ -181,7 +215,15 @@ class Dashboard:
         self._idle_emotion_active = False
         self._idle_emotion_stop = threading.Event()
         self._idle_emotion_thread: threading.Thread | None = None
-        self.input = TerminalInput(self.scroll, self.toggle_details)
+        self._outfit_switch_index = 0
+        self._outfit_greeting_serial = 0
+        self._outfit_greeting_timer: threading.Timer | None = None
+        self._outfit_greeting_generator = _outfit_greeting_generator
+        self.input = TerminalInput(
+            self.scroll,
+            self.toggle_details,
+            self.cycle_outfit,
+        )
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
             persona.appearance.avatar.renderer
@@ -191,21 +233,8 @@ class Dashboard:
         preferred_renderer = (
             "symbols" if configured_renderer == "symbols" else "pixels"
         )
-        self.avatars = {
-            state: avatar_ui.render_avatar(
-                persona, state, True, renderer_override=preferred_renderer
-            )
-            for state in _STATE_LABELS
-        }
-        self.mouth_avatars = tuple(
-            avatar_ui.render_avatar(
-                persona, state, True, renderer_override=preferred_renderer
-            )
-            for state in (
-                "speaking_closed",
-                "speaking_half",
-            )
-        )
+        self._preferred_avatar_renderer = preferred_renderer
+        self.avatars, self.mouth_avatars = self._load_avatar_set(persona)
         self.live = Live(
             self.render(),
             console=_console,
@@ -213,6 +242,120 @@ class Dashboard:
             auto_refresh=False,
             transient=False,
         )
+
+    def _load_avatar_set(
+        self,
+        persona: Persona,
+    ) -> tuple[
+        dict[str, avatar_ui.AvatarRender],
+        tuple[avatar_ui.AvatarRender, ...],
+    ]:
+        """只转换当前套装；同一路径的多个状态共享一次渲染结果。"""
+        avatar = persona.appearance.avatar
+        cache: dict[str, avatar_ui.AvatarRender] = {}
+
+        def render(state: str) -> avatar_ui.AvatarRender:
+            key = avatar.for_state(state) if avatar is not None else state
+            if key not in cache:
+                cache[key] = avatar_ui.render_avatar(
+                    persona,
+                    state,
+                    True,
+                    renderer_override=self._preferred_avatar_renderer,
+                )
+            return cache[key]
+
+        avatars = {state: render(state) for state in _STATE_LABELS}
+        mouths = tuple(
+            render(state) for state in ("speaking_closed", "speaking_half")
+        )
+        return avatars, mouths
+
+    def _local_outfit_greeting(self, outfit: AvatarOutfit) -> str:
+        lines = outfit.switch_greetings
+        if not lines:
+            return f"换成{outfit.label}，感觉也不错。"
+        line = lines[self._outfit_switch_index % len(lines)]
+        self._outfit_switch_index += 1
+        return line
+
+    def _schedule_outfit_greeting(
+        self,
+        outfit: AvatarOutfit,
+        serial: int,
+    ) -> None:
+        generator = self._outfit_greeting_generator
+        if generator is None:
+            return
+
+        def generate() -> None:
+            try:
+                greeting = generator(outfit)
+            except Exception:
+                return
+            if not greeting:
+                return
+            with self._lock:
+                avatar = self.persona.appearance.avatar
+                if (
+                    self._idle_emotion_stop.is_set()
+                    or serial != self._outfit_greeting_serial
+                    or avatar is None
+                    or avatar.selected_outfit != outfit.id
+                ):
+                    return
+                self.base_greeting = greeting
+                if not self._idle_emotion_active:
+                    self.greeting = greeting
+                    self.refresh()
+
+        timer = threading.Timer(0.25, generate)
+        timer.daemon = True
+        with self._lock:
+            if self._outfit_greeting_timer is not None:
+                self._outfit_greeting_timer.cancel()
+            self._outfit_greeting_timer = timer
+        timer.start()
+
+    def cycle_outfit(self) -> None:
+        """按 persona 顺序切换套装，并原位替换当前头像缓存。"""
+        global _persona
+        with self._lock:
+            avatar = self.persona.appearance.avatar
+            if avatar is None or len(avatar.outfits) < 2:
+                return
+            ids = [outfit.id for outfit in avatar.outfits]
+            current = ids.index(avatar.selected_outfit)
+            outfit_id = ids[(current + 1) % len(ids)]
+            persona = self.persona.wearing(outfit_id)
+            avatars, mouths = self._load_avatar_set(persona)
+
+            if self._native_frames_ready:
+                self._stop_mouth_animation()
+            avatar_ui.hide_native_avatar(_console.file)
+            self.persona = persona
+            _persona = persona
+            self.avatars = avatars
+            self.mouth_avatars = mouths
+            self.mouth_frame = 1
+            self._native_frames_ready = False
+            if config.AVATAR_LIP_SYNC_ENABLED:
+                self._native_frames_ready = avatar_ui.prepare_native_frames(
+                    self.mouth_avatars,
+                    _console.file,
+                )
+
+            outfit = persona.appearance.avatar.outfit
+            self._mark_voice_activity_locked(time.monotonic())
+            greeting = self._local_outfit_greeting(outfit)
+            self.base_greeting = greeting
+            self.greeting = greeting
+            self.presence_hint = ""
+            self._outfit_greeting_serial += 1
+            serial = self._outfit_greeting_serial
+            self.refresh(paint_avatar=True)
+
+        self._schedule_outfit_greeting(outfit, serial)
 
     def render(self) -> Group:
         avatar_render = self._active_avatar()
@@ -477,8 +620,20 @@ class Dashboard:
         if self.scroll_offset:
             self.scroll_offset = max(0, self.scroll_offset - 1)
 
-    def set_greeting(self, greeting: str) -> None:
+    def set_greeting(
+        self,
+        greeting: str,
+        *,
+        outfit_id: str | None = None,
+    ) -> None:
         with self._lock:
+            avatar = self.persona.appearance.avatar
+            if (
+                outfit_id is not None
+                and avatar is not None
+                and avatar.selected_outfit != outfit_id
+            ):
+                return
             self.base_greeting = greeting
             if not self._idle_emotion_active:
                 self.greeting = greeting
@@ -619,6 +774,8 @@ class Dashboard:
 
     def stop(self) -> None:
         self._idle_emotion_stop.set()
+        if self._outfit_greeting_timer is not None:
+            self._outfit_greeting_timer.cancel()
         self.input.stop()
         with self._lock:
             if self._native_frames_ready:
@@ -629,6 +786,14 @@ class Dashboard:
 def configure(persona: Persona) -> None:
     global _persona
     _persona = persona
+
+
+def configure_outfit_greetings(
+    generator: Callable[[AvatarOutfit], str | None] | None = None,
+) -> None:
+    """配置非阻塞换装台词生成器；本地短句始终可独立工作。"""
+    global _outfit_greeting_generator
+    _outfit_greeting_generator = generator
 
 
 def configure_relationship(
@@ -936,7 +1101,7 @@ def _splash_panel(
         content,
         border_style=primary,
         padding=(1, 4),
-        subtitle="[dim]直接说话 · Tab 详情 · Ctrl+C 退出[/dim]",
+        subtitle="[dim]直接说话 · 0 换装 · Tab 详情 · Ctrl+C 退出[/dim]",
         width=panel_width,
         height=panel_height,
     )
@@ -994,9 +1159,9 @@ def splash(*, model: str, tts: str | None) -> bool:
     return False
 
 
-def update_greeting(greeting: str) -> None:
+def update_greeting(greeting: str, *, outfit_id: str | None = None) -> None:
     if _dashboard is not None:
-        _dashboard.set_greeting(greeting)
+        _dashboard.set_greeting(greeting, outfit_id=outfit_id)
 
 
 def start_idle_emotions(

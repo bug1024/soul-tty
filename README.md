@@ -24,7 +24,7 @@ svc start soul-tty     # 前台启动(推荐,任何目录可用)
 
 等价于 `cd apps/soul-tty && uv run soul-tty`(首次自动建环境)。
 
-交互:显示 `◉ 正在聆听` 后直接说话。按 `Tab` 展开或收起精确羁绊值与完整技术详情，`Ctrl+C` 退出。空闲时仅由轻量 WebRTC VAD 检查 30ms PCM 帧，连续检测到人声后携带 300ms pre-roll 唤醒 sherpa-onnx；识别期间显示 partial，检测到约 0.6s 尾部静音后提交 final。默认**半双工**:播报期间麦克风停止采集(避免外放回声),播完自动恢复聆听。
+交互:显示 `◉ 正在聆听` 后直接说话。按 `0` 循环切换头像套装，按 `Tab` 展开或收起精确羁绊值与完整技术详情，`Ctrl+C` 退出。空闲时仅由轻量 WebRTC VAD 检查 30ms PCM 帧，连续检测到人声后携带 300ms pre-roll 唤醒 sherpa-onnx；识别期间显示 partial，检测到约 0.6s 尾部静音后提交 final。默认**半双工**:播报期间麦克风停止采集(避免外放回声),播完自动恢复聆听。
 
 调试模式(不需要麦克风):
 
@@ -54,6 +54,21 @@ SOUL_TTY_PERSONA_DIR=/path/to/personas uv run soul-tty --persona my-agent
 
 配置优先级：命令行名字 > 环境变量 > persona YAML > 程序默认值。`--name` 不仅修改终端标题，也会把新名字注入 LLM 人格。
 
+### 手动换装
+
+Serena 内置默认装、深夜装和工作装。可以在启动时指定，也可以进入 Dashboard 后按 `0` 按配置顺序循环切换。每次只保留当前套装的渲染结果，不预载另外两套素材：
+
+```bash
+uv run soul-tty outfits                 # 查看当前人格的可用套装
+uv run soul-tty --outfit late-night     # 深夜装
+uv run soul-tty --outfit work           # 工作装
+SOUL_TTY_OUTFIT=work svc start soul-tty # 通过 svc 启动工作装
+```
+
+未传 `--outfit` 或 `SOUL_TTY_OUTFIT` 时使用人格 YAML 中的 `default_outfit`。自定义人格仍兼容原来的单套 `avatar` 写法，也可以使用 `avatar.outfits` 增加多套资源。
+
+换装后会立即显示当前套装配置的本地短句，随后由后台 LLM 根据套装气质、当前时段、羁绊阶段和本次会话情绪生成动态台词；生成失败、超时或快速连续切换都不会阻塞界面，也不会把换装台词写入正式对话历史。
+
 ### 羁绊成长
 
 欢迎区默认只显示当前人格的羁绊阶段，例如 `♡ 羁绊  亲近`，避免把陪伴关系表现成游戏进度条；按 `Tab` 后才显示精确分值。每轮完整回答结束后，主流程只向一个有界内存队列投递问答；后台单线程再调用 LLM 判断关心、信任、共同玩笑、冒犯等关系事件，并生成受限分值变化、情绪和一句第一人称的当下感受。机制化或第三人称的画外音会被丢弃。
@@ -68,20 +83,29 @@ SOUL_TTY_PERSONA_DIR=/path/to/personas uv run soul-tty --persona my-agent
 
 ### 角色图像
 
-Serena 自带待机、聆听、思考和说话四张 768×768 原创像素风角色图，位于 `assets/avatars/serena/`。交互模式使用固定全屏 Dashboard，在同一角色卡中原位切换四种表情，并在下方保留最近的对话。
+Serena 自带三套 768×768 原创像素风角色图，位于 `assets/avatars/serena/`。默认装保留完整的待机、聆听、思考和说话表情；深夜装与工作装各使用一张稳定主图和一张说话帧，避免口型切换时构图漂移。交互模式使用固定全屏 Dashboard，在同一角色卡中原位切换状态，并在下方保留最近的对话。
 
 ```yaml
 appearance:
   avatar:
-    idle: ../assets/avatars/serena/idle.png
-    listening: ../assets/avatars/serena/listening.png
-    thinking: ../assets/avatars/serena/thinking.png
-    speaking: ../assets/avatars/serena/speaking.png
-    speaking_closed: ../assets/avatars/serena/speaking_closed.png
-    speaking_half: ../assets/avatars/serena/speaking_half.png
-    speaking_open: ../assets/avatars/serena/speaking_open.png
     renderer: auto       # auto / pixels / symbols / off
     width: 26            # 12-48 个终端字符宽度
+    default_outfit: default
+    outfits:
+      default:
+        label: 默认装
+        idle: ../assets/avatars/serena/idle.png
+        speaking_closed: ../assets/avatars/serena/speaking_closed.png
+        speaking_half: ../assets/avatars/serena/speaking_half.png
+      work:
+        label: 工作装
+        description: 克制的衬衫与轻机能背心，专注、利落，适合编程
+        switch_greetings:
+          - 工作模式，今天从哪里开始？
+          - 好了，现在专心陪你把事情做好。
+        idle: ../assets/avatars/serena/work/idle.png
+        speaking_closed: ../assets/avatars/serena/work/idle.png
+        speaking_half: ../assets/avatars/serena/work/speaking.png
 ```
 
 固定 Dashboard 会在 Kitty、Ghostty、iTerm2 或 WezTerm 中使用 Chafa 原生图片协议，把高清头像覆盖到卡片的固定预留区域，并在状态变化时原位替换；其他终端回退为真彩字符像素画。程序不会主动发送能力探测查询。`NO_COLOR=1`、`SOUL_TTY_AVATAR=0` 或 renderer 为 `off` 时会恢复人格图标。
@@ -157,6 +181,7 @@ BARGE_IN_ENABLED=1 svc start soul-tty
 |---|---|---|
 | `SOUL_TTY_PERSONA` | `serena` | 启动时使用的人格 id 或 YAML 路径 |
 | `SOUL_TTY_PERSONA_DIR` | `personas/` | 额外的人格目录，同 id 会覆盖内置人格 |
+| `SOUL_TTY_OUTFIT` | persona 默认套装 | 启动时选择当前人格的头像套装；Serena 支持 `default` / `late-night` / `work` |
 | `AGENT_NAME` | 人格名 | 覆盖显示名称并注入 LLM 人格 |
 | `SOUL_TTY_ANIMATIONS` | `1` | 设为 `0` 关闭一次性开场动画 |
 | `SOUL_TTY_DASHBOARD` | `1` | 设为 `0` 使用传统滚动输出；固定头像与动态表情仅在 Dashboard 中启用 |
@@ -179,7 +204,7 @@ BARGE_IN_ENABLED=1 svc start soul-tty
 | `LLM_TOP_P` | `0.9` | LLM nucleus sampling 上限 |
 | `LLM_REPEAT_PENALTY` | `1.1` | llama.cpp 重复惩罚 |
 | `LLM_REPEAT_LAST_N` | `128` | 重复惩罚回看 token 数 |
-| `LLM_GREETING_ENABLED` | `1` | 后台生成符合早中晚时段的简短欢迎语；失败时使用本地时间兜底，不阻塞启动 |
+| `LLM_GREETING_ENABLED` | `1` | 后台生成欢迎语和换装动态台词；失败时使用 persona 本地短句，不阻塞界面 |
 | `LLM_GREETING_TIMEOUT` | `5` | 动态欢迎语请求超时（秒） |
 | `PRESENCE_REPEAT_LAUNCH_WINDOW_S` | `600` | 在此秒数内再次启动时使用“欢迎回来”语气 |
 | `PRESENCE_SPECIAL_GREETING_RATE` | `0.05` | 每次正常启动采用低频特殊开场的概率 |

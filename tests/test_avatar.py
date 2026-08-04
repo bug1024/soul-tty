@@ -37,6 +37,19 @@ class AvatarRendererTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[2], "symbols")
         self.assertIsNotNone(render.symbols)
 
+    def test_renderer_reads_only_the_selected_outfit_path(self):
+        payload = b"avatar\n"
+        persona = load_persona("serena").wearing("work")
+        with (
+            patch.dict(os.environ, {"TERM": "dumb"}, clear=True),
+            patch("soul_tty.ui.avatar.shutil.which", return_value="/bin/chafa"),
+            patch("soul_tty.ui.avatar._run_chafa", return_value=payload) as run,
+        ):
+            avatar.render_avatar(persona, "speaking_half", True)
+
+        self.assertIn("/work/", str(run.call_args.args[0]))
+        self.assertNotIn("/late-night/", str(run.call_args.args[0]))
+
     def test_kitty_terminal_selects_native_pixels(self):
         payload = b"\x1b_Gf=100;payload\x1b\\"
         with (

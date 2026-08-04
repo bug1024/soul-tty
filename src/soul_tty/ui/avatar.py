@@ -120,7 +120,7 @@ def render_avatar(
 
     path = Path(avatar.for_state(state))
     if not path.is_file():
-        path = Path(avatar.idle)
+        path = Path(avatar.for_state("idle"))
     if not path.is_file():
         return AvatarRender()
 

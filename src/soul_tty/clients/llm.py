@@ -119,6 +119,61 @@ def generate_greeting(
     return _clean_greeting(text, display_name)
 
 
+def generate_outfit_greeting(
+    model: str,
+    display_name: str,
+    period: str,
+    outfit_label: str,
+    outfit_description: str,
+    *,
+    relationship_tier: str = "",
+    mood: str = "calm",
+) -> str | None:
+    """生成换装后的即时短句；独立请求，不写入正式对话历史。"""
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    config.SYSTEM_PROMPT
+                    + "\n你刚刚主动换了一套衣服。只生成一句自然的中文短句，"
+                    "不超过十五个汉字。台词必须体现新服装带来的当下气质，"
+                    "可以轻轻邀请用户继续聊天。不要自报姓名，不要解释机制，"
+                    "不要描写动作，不要使用 Markdown。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"现在是{period}，你是{display_name}，"
+                    f"刚切换为{outfit_label}，服装气质是："
+                    f"{outfit_description or outfit_label}。"
+                    f"羁绊阶段是{relationship_tier or '未建立'}，"
+                    f"本次会话情绪是{mood}。"
+                    "请让服装、时段、熟悉程度和情绪共同影响语气。只输出短句。"
+                ),
+            },
+        ],
+        "stream": False,
+        "temperature": 0.85,
+        "top_p": 0.9,
+        "max_tokens": 32,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+        response = client.post(
+            f"{config.LLM_URL}/v1/chat/completions",
+            json=payload,
+        )
+        response.raise_for_status()
+    try:
+        text = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return _clean_greeting(text, display_name)
+
+
 def generate_idle_emotion(
     model: str,
     display_name: str,

@@ -54,7 +54,8 @@ BARGE_IN_ECHO_SIMILARITY = float(os.environ.get("BARGE_IN_ECHO_SIMILARITY", "0.7
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
     "你是一个语音对话助手。请用简短、口语化的中文回答，每次回答不超过三句话，"
-    "不要使用 Markdown，不要重复同一句话，不要用破折号拉长拟声词。",
+    "直接说要说的话，不要输出角色名、旁白或动作描写。"
+    "不要使用 Markdown，不要重复同一句话，不要用破折号或连续句点拉长语气。",
 )
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "10"))  # 保留最近 N 轮
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "256"))

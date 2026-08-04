@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from .. import config
-from .models import Avatar, Persona
+from .models import Avatar, AvatarOutfit, Persona
 
 _PROJECT_PERSONA_DIR = Path(__file__).resolve().parents[3] / "personas"
 
@@ -38,14 +38,25 @@ def _load_file(path: Path) -> Persona:
                 asset = path.parent / asset
             return str(asset.resolve())
 
+        outfits = tuple(
+            AvatarOutfit(
+                id=outfit.id,
+                label=outfit.label,
+                idle=resolved(outfit.idle),
+                description=outfit.description,
+                switch_greetings=outfit.switch_greetings,
+                listening=resolved(outfit.listening),
+                thinking=resolved(outfit.thinking),
+                speaking=resolved(outfit.speaking),
+                speaking_closed=resolved(outfit.speaking_closed),
+                speaking_half=resolved(outfit.speaking_half),
+                speaking_open=resolved(outfit.speaking_open),
+            )
+            for outfit in avatar.outfits
+        )
         avatar = Avatar(
-            idle=resolved(avatar.idle),
-            listening=resolved(avatar.listening),
-            thinking=resolved(avatar.thinking),
-            speaking=resolved(avatar.speaking),
-            speaking_closed=resolved(avatar.speaking_closed),
-            speaking_half=resolved(avatar.speaking_half),
-            speaking_open=resolved(avatar.speaking_open),
+            outfits=outfits,
+            selected_outfit=avatar.selected_outfit,
             renderer=avatar.renderer,
             width=avatar.width,
         )

@@ -15,6 +15,7 @@ class TerminalUITests(unittest.TestCase):
         terminal._dashboard = None
         terminal._relationship_profile = None
         terminal._launch_context = LaunchContext()
+        terminal._outfit_greeting_generator = None
 
     def test_splash_has_emotion_status_and_lightweight_technical_layers(self):
         output = io.StringIO()
@@ -43,6 +44,7 @@ class TerminalUITests(unittest.TestCase):
             "早上好，今天也请多关照。",
             "◉ 正在聆听",
             "直接说话即可",
+            "0 换装",
             "LOCAL · Qwen3.5-9B · 文字模式 · Sherpa-ONNX",
         )
         for text in expected:
@@ -475,6 +477,63 @@ class TerminalUITests(unittest.TestCase):
         data = b"\x1b[<64;20;10M\x1b[<65;20;10M\x1b[A\x1b[B"
         self.assertEqual(terminal.TerminalInput.navigation(data), [1, -1, 1, -1])
         self.assertEqual(terminal.TerminalInput.detail_toggles(b"\t\t"), 2)
+        self.assertEqual(terminal.TerminalInput.outfit_toggles(data), 0)
+        self.assertEqual(terminal.TerminalInput.outfit_toggles(b"00"), 2)
+
+    def test_mouse_click_coordinates_never_trigger_outfit_switch(self):
+        click = b"\x1b[<0;120;30M\x1b[<0;120;30m"
+        right_click = b"\x1b[<2;100;40M\x1b[<2;100;40m"
+
+        self.assertEqual(terminal.TerminalInput.outfit_toggles(click), 0)
+        self.assertEqual(terminal.TerminalInput.outfit_toggles(right_click), 0)
+
+    def test_split_mouse_escape_is_buffered_until_complete(self):
+        complete, pending = terminal.TerminalInput.split_incomplete_escape(
+            b"\x1b[<0;120;"
+        )
+        self.assertEqual(complete, b"")
+        self.assertEqual(pending, b"\x1b[<0;120;")
+
+        complete, pending = terminal.TerminalInput.split_incomplete_escape(
+            pending + b"30M0"
+        )
+        self.assertEqual(pending, b"")
+        self.assertEqual(terminal.TerminalInput.outfit_toggles(complete), 1)
+
+    def test_zero_cycles_outfit_and_loads_only_its_unique_frames(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        paths = []
+
+        def render(persona, state, terminal_enabled, renderer_override=None):
+            path = persona.appearance.avatar.for_state(state)
+            paths.append(path)
+            return terminal.avatar_ui.AvatarRender(symbols=terminal.Text(state))
+
+        with (
+            patch.object(terminal, "_console", console),
+            patch.object(terminal.avatar_ui, "render_avatar", side_effect=render),
+        ):
+            dashboard = terminal.Dashboard(persona, runtime)
+            dashboard.live.update = lambda *args, **kwargs: None
+            dashboard._next_idle_emotion_at = 0
+            paths.clear()
+            dashboard.cycle_outfit()
+            dashboard.set_greeting("过期的默认装台词", outfit_id="default")
+
+        self.assertEqual(
+            dashboard.persona.appearance.avatar.selected_outfit,
+            "late-night",
+        )
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all("/late-night/" in path for path in paths))
+        self.assertEqual(dashboard.greeting, "夜深了，就这样轻松一点吧。")
+        self.assertGreater(
+            dashboard._next_idle_emotion_at,
+            dashboard._last_voice_activity,
+        )
 
     def test_dashboard_details_toggle_is_explicit_and_reversible(self):
         output = io.StringIO()

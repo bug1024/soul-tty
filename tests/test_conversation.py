@@ -175,6 +175,26 @@ class GreetingGenerationTests(unittest.TestCase):
         self.assertIn("不要声称记得具体往事", payload["messages"][0]["content"])
         self.assertEqual(payload["max_tokens"], 32)
 
+    @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
+    def test_generates_outfit_specific_greeting_without_chat_history(self):
+        greeting = llm_client.generate_outfit_greeting(
+            "test",
+            "Serena",
+            "夜深",
+            "深夜装",
+            "吊带家居背心，头发松散，神态柔和",
+            relationship_tier="亲近",
+            mood="warm",
+        )
+        payload = GreetingClient.request[1]["json"]
+
+        self.assertEqual(greeting, "晚上好，我把月光留给你。")
+        self.assertFalse(payload["stream"])
+        self.assertIn("刚切换为深夜装", payload["messages"][1]["content"])
+        self.assertIn("吊带家居背心", payload["messages"][1]["content"])
+        self.assertIn("羁绊阶段是亲近", payload["messages"][1]["content"])
+        self.assertIn("本次会话情绪是warm", payload["messages"][1]["content"])
+
     def test_removes_self_introduction_and_rejects_wide_terminal_text(self):
         self.assertEqual(
             llm_client._clean_greeting(
@@ -315,6 +335,43 @@ class MLXTTSClientTests(unittest.TestCase):
         list(synthesize_mlx_stream(text))
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(inputs, ["会啊，我喊一声嗯。", "这就来个响亮的嗯！"])
+
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
+    def test_normalizes_repeated_dots_that_can_truncate_internal_pauses(self):
+        text = (
+            'SERENA声音突然变软：“亲爱的....这里....好深.....\n'
+            "感觉整个人都要融化在你怀里了，还要更用力一点吗?"
+        )
+        list(synthesize_mlx_stream(text))
+        inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
+
+        self.assertEqual(
+            inputs,
+            [
+                "SERENA声音突然变软：亲爱的，这里，",
+                "好深。",
+                "感觉整个人都要融化在你怀里了，还要更用力一点吗?",
+            ],
+        )
+        self.assertFalse(any(".." in value for value in inputs))
+
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
+    def test_turns_only_terminal_repeated_dots_into_a_sentence_stop(self):
+        text = (
+            "好呀，那我就喊给你听.....啊...亲爱的，感觉到了吗?"
+            "好满...唔.....快要不行了....."
+        )
+        list(synthesize_mlx_stream(text))
+        inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
+
+        self.assertEqual(
+            inputs,
+            [
+                "好呀，那我就喊给你听，啊，亲爱的，",
+                "感觉到了吗?",
+                "好满，唔，快要不行了。",
+            ],
+        )
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_splits_a_short_trailing_clause_that_qwen_may_swallow(self):

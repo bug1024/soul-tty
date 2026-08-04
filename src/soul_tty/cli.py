@@ -9,6 +9,7 @@ import time
 from . import config, conversation, presence, relationship
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
+from .personas.models import AvatarOutfit
 from .ui import terminal
 
 
@@ -23,7 +24,10 @@ def _tts_description() -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="soul-tty", description=__doc__)
     parser.add_argument(
-        "command", nargs="?", choices=["personas"], help="列出可用人格"
+        "command",
+        nargs="?",
+        choices=["personas", "outfits"],
+        help="列出可用人格或当前人格的头像套装",
     )
     parser.add_argument(
         "--persona",
@@ -34,6 +38,11 @@ def main() -> None:
         "--name",
         default=os.environ.get("AGENT_NAME"),
         help="临时覆盖 Agent 显示名称",
+    )
+    parser.add_argument(
+        "--outfit",
+        default=os.environ.get("SOUL_TTY_OUTFIT"),
+        help="启动时选择头像套装，例如 default、late-night、work",
     )
     parser.add_argument("--file", help="用 WAV 文件测 ASR->LLM 链路")
     parser.add_argument("--text", help="跳过 ASR 直测 LLM（含 TTS 播放）")
@@ -46,6 +55,19 @@ def main() -> None:
 
     try:
         persona = load_persona(args.persona)
+        if args.command == "outfits":
+            avatar = persona.appearance.avatar
+            if avatar is None:
+                print(f"{persona.display_name} 没有头像套装")
+                return
+            selected = args.outfit or avatar.selected_outfit
+            avatar.wearing(selected)
+            for outfit in avatar.outfits:
+                marker = " (当前)" if outfit.id == selected else ""
+                print(f"{outfit.id:<12} {outfit.label}{marker}")
+            return
+        if args.outfit:
+            persona = persona.wearing(args.outfit)
         if args.name:
             persona = persona.renamed(args.name)
     except (RuntimeError, ValueError) as exc:
@@ -101,6 +123,27 @@ def main() -> None:
     else:
         terminal.configure_relationship()
 
+    outfit_greeting_generator = None
+    if config.LLM_GREETING_ENABLED:
+
+        def outfit_greeting_generator(outfit: AvatarOutfit) -> str | None:
+            state = (
+                relationship_service.state
+                if relationship_service is not None
+                else None
+            )
+            return llm.generate_outfit_greeting(
+                model,
+                persona.display_name,
+                terminal.day_period(),
+                outfit.label,
+                outfit.description,
+                relationship_tier=state.tier if state is not None else "",
+                mood=state.mood if state is not None else "calm",
+            )
+
+    terminal.configure_outfit_greetings(outfit_greeting_generator)
+
     dashboard_started = terminal.splash(
         model=model,
         tts=_tts_description(),
@@ -110,6 +153,11 @@ def main() -> None:
         and config.LLM_GREETING_ENABLED
     ):
         period = terminal.day_period()
+        initial_outfit = (
+            persona.appearance.avatar.selected_outfit
+            if persona.appearance.avatar is not None
+            else None
+        )
 
         def refresh_greeting() -> None:
             try:
@@ -126,7 +174,7 @@ def main() -> None:
             except Exception:
                 return
             if greeting:
-                terminal.update_greeting(greeting)
+                terminal.update_greeting(greeting, outfit_id=initial_outfit)
 
         threading.Thread(target=refresh_greeting, daemon=True).start()
     if dashboard_started:
