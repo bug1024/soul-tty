@@ -54,8 +54,11 @@
 优先级从高到低（异常状态优先判定）：
 
 ```
-Numb → Tired → Sad → Excited → Happy → Curious → Calm
+Numb → Tired → Sad → Excited → Curious → Happy → Calm
 ```
+
+注意：**Curious 在 Happy 之前**——好奇是一种认知状态，不应被开心覆盖。
+当 `happiness=0.8, energy=0.8, curiosity=0.9` 时优先识别为 Curious。
 
 ### 3.2 Resolver 阈值表
 
@@ -65,23 +68,23 @@ Numb → Tired → Sad → Excited → Happy → Curious → Calm
 | Tired   | energy ≤ 0.35                     |
 | Sad     | happiness ≤ 0.35 AND stress ≥ 0.45 |
 | Excited | happiness ≥ 0.75 AND energy ≥ 0.75 |
-| Happy   | happiness ≥ 0.65 AND energy ≥ 0.4  |
 | Curious | curiosity ≥ 0.7                   |
+| Happy   | happiness ≥ 0.65 AND energy ≥ 0.4  |
 | Calm    | 默认（不满足以上任意条件）           |
 
 ### 3.3 Intensity 计算
 
 每个 mood 都附一个 0~1 的强度值，体现该 mood 的"程度"：
 
-| Mood    | Intensity 计算           |
-| ------- | ------------------------ |
+| Mood    | Intensity 计算              |
+| ------- | --------------------------- |
 | Numb    | `(stress + (1-energy)) / 2` |
-| Tired   | `1 - energy`             |
+| Tired   | `1 - energy`                |
 | Sad     | `(1-happiness + stress) / 2` |
-| Excited | `(happiness + energy) / 2` |
-| Happy   | `happiness`              |
-| Curious | `curiosity`              |
-| Calm    | `calmness`               |
+| Excited | `(happiness + energy) / 2`  |
+| Curious | `curiosity`                 |
+| Happy   | `happiness`                 |
+| Calm    | `calmness`                  |
 
 ---
 
@@ -195,20 +198,28 @@ Interaction Analyzer 每次输出五维情绪的增量（每维度 ∈ [-0.3, +0
 
 ## 6. 情绪变化算法
 
-### 6.1 EMA 平滑
+### 6.1 Emotion Delta 是目标变化量
 
-每轮收到 emotion_delta 后，对每一维执行：
+emotion_delta 表示**用户/事件希望 Soul 状态往哪个方向变化多少**，不是每轮直接叠加量。
+
+LLM 输出的 delta 表示"目标变化量"，先 clamp 到 [-0.3, +0.3]：
 
 ```
-new = old × (1 - rate) + (old + delta) × rate
+target = clamp(old + delta, 0, 1)
+```
+
+然后用 EMA 平滑趋向 target：
+
+```
+new = old + (target - old) × rate
 ```
 
 推荐 `rate = 0.2`。
 
 效果：
 
-- 单次对话影响有限；
-- 连续同向输入会累积；
+- 单轮最大变化被 `rate` 限制（实际最大变化 ≈ 0.3 × 0.2 = 0.06）；
+- 连续同向输入会累积，逐步逼近 target；
 - 不会瞬间人格变化。
 
 ### 6.2 衰减（Decay）
@@ -223,8 +234,18 @@ value += (baseline - value) × 0.05
 
 ### 6.3 规则优先级
 
-- **Active conversation**：只执行对话更新，不执行 decay；
-- **Idle（≥ 5 分钟无输入）**：只执行 decay，不接收对话更新。
+- **Active conversation**：只执行对话更新（6.1），不执行 decay；
+- **Idle（≥ 5 分钟无输入）**：只执行 decay（6.2），不接收对话更新。
+
+### 6.4 Prompt 热更新节流
+
+每次 emotion_delta 更新都会触发 Prompt 重算，但**只有满足以下条件之一才调用 `Chat.update_system_prompt`**：
+
+- Mood 标签发生变化（例如 Happy → Excited）；
+- Intensity 变化绝对值 > 0.1；
+- Expression 标签发生变化（例如默认 → caring）。
+
+避免每次小波动都重写 system prompt，造成模型行为不稳定。
 
 ---
 
@@ -232,33 +253,59 @@ value += (baseline - value) × 0.05
 
 V1 **不接入 Memory**，本地 JSON 保存即可。
 
-### 7.1 文件位置
+### 7.1 文件布局
 
 ```
-~/.local/state/soul-tty/emotion/{persona_id}.json
+~/.local/state/soul-tty/
+├── runtime.json              # 全局会话统计
+└── emotion/
+    ├── serena.json
+    └── alice.json
 ```
 
-### 7.2 结构
+### 7.2 runtime.json
+
+```json
+{
+  "total_sessions": 12
+}
+```
+
+每次启动 +1，独立于 persona。
+
+### 7.3 emotion/{persona_id}.json
 
 ```json
 {
   "session_id": "uuid",
-  "session_count": 7,
-  "emotion": {
+  "baseline": {
     "happiness": 0.65,
     "calmness": 0.75,
     "curiosity": 0.70,
     "stress": 0.20,
-    "energy": 0.80
+    "energy": 0.75
+  },
+  "emotion": {
+    "happiness": 0.72,
+    "calmness": 0.68,
+    "curiosity": 0.75,
+    "stress": 0.25,
+    "energy": 0.70
   },
   "updated_at": "2026-08-05 22:00"
 }
 ```
 
-### 7.3 规则
+`baseline` 是本次启动时的基准值（persona 默认值 + 启动扰动结果），用于：
+
+- 调试时理解初始值来源；
+- Decay 时确定回归目标。
+
+### 7.4 规则
 
 - Session 期间持续保存（每次更新后落盘）；
-- 新启动时**情绪值重置**，但 `session_count` 从 JSON 读取并 +1；
+- 新启动时**情绪值重置**，但 `baseline` 重新生成（带新扰动）；
+- `session_count`（即 `runtime.total_sessions`）跨 session 同步递增；
 - V1 不跨 session 持久化情绪值，V2 可扩展。
 
 ---
@@ -315,20 +362,20 @@ System Prompt 现在分三段：
 
 通过 `MLX_TTS_INSTRUCT` 注入情绪描述：
 
-| Mood    | TTS Instruct                            |
-| ------- | --------------------------------------- |
-| Happy   | "用开心上扬的语气说"                      |
-| Excited | "用兴奋激动的语气说"                      |
-| Sad     | "用低沉平缓的语气说"                      |
-| Tired   | "用轻柔缓慢的语气说"                      |
-| Calm    | (使用音色默认)                              |
-| Curious | "用好奇询问的语气说"                      |
-| Caring  | "用温柔关切的语气说"                      |
-| Numb    | "用平淡低能量的语气说"                    |
+| Mood       | TTS Instruct                       |
+| ---------- | ---------------------------------- |
+| Happy      | "用开心上扬的语气说"                  |
+| Excited    | "用兴奋激动的语气说"                  |
+| Sad        | "用低沉平缓的语气说"                  |
+| Tired      | "用轻柔缓慢的语气说"                  |
+| Calm       | (使用音色默认)                       |
+| Curious    | "用好奇询问的语气说"                  |
+| Numb       | "用平淡低能量的语气说"                |
+| Caring 表达 | "用温柔关切的语气说"                  |
 
 ### 9.3 Avatar（V1 预留接口）
 
-不在 outfit schema 扩展，新增独立 `avatar_expression` 概念：
+不在 outfit schema 扩展，新增独立 `avatar_expression` 概念，由 **mood × expression** 组合映射：
 
 ```json
 {
@@ -340,22 +387,46 @@ System Prompt 现在分三段：
 
 V1 提供默认 mapping 表，但**不实际接入 renderer**——renderer 后续单独实现。
 
-默认 mapping 表：
+默认 mapping 表（按 `mood` 维度，expression 会覆盖 motion 字段）：
 
-| Mood    | face     | eye   | motion       |
-| ------- | -------- | ----- | ------------ |
-| Happy   | smile    | open  | slight_nod   |
-| Excited | bright   | open  | bounce       |
-| Sad     | droop    | half  | none         |
-| Tired   | flat     | half  | none         |
-| Calm    | neutral  | open  | none         |
-| Curious | neutral  | wide  | tilt_head    |
-| Caring  | soft     | open  | slight_lean  |
-| Numb    | flat     | half  | none         |
+| Mood    | face     | eye   | motion_default |
+| ------- | -------- | ----- | -------------- |
+| Happy   | smile    | open  | slight_nod     |
+| Excited | bright   | open  | bounce         |
+| Sad     | droop    | half  | none           |
+| Tired   | flat     | half  | none           |
+| Calm    | neutral  | open  | none           |
+| Curious | neutral  | wide  | tilt_head      |
+| Numb    | flat     | half  | none           |
+
+默认 expression mapping：
+
+| Expression | motion       |
+| ---------- | ------------ |
+| caring     | slight_lean  |
 
 ### 9.4 Outfit（V1 不接入）
 
 V1 不让情绪直接触发换装。换装仍由用户 `0` 键手动控制。
+
+### 9.5 Expression 与 Mood 的关系
+
+**Caring 不是 Mood**——它表示 Soul 对当前用户的"表达方式"，而非 Soul 自身情绪状态。
+
+```
+用户：最近压力很大
+Soul 自身状态：Calm
+Soul 表达方式：Caring（关心）
+```
+
+模型最终输出：
+
+```
+mood: calm
+expression: caring
+```
+
+Prompt Builder 会同时使用两者生成 Emotion Context；TTS 用 expression 覆盖 mood 默认 instruct；Avatar mapping 用 `mood` 决定 face/eye，用 `expression` 决定 motion。
 
 ---
 
@@ -366,12 +437,14 @@ V1 不让情绪直接触发换装。换装仍由用户 `0` 键手动控制。
 ```
 src/soul_tty/emotion/
 ├── __init__.py
-├── state.py             # 五维情绪值数据结构 + 持久化
+├── state.py             # 五维情绪值数据结构 + 持久化 + runtime.json
 ├── analyzer.py          # 从 LLM 输出提取 emotion_delta
 ├── updater.py           # EMA 平滑 + decay 算法
 ├── resolver.py          # 五维值 → mood + intensity
-├── prompt_builder.py    # mood → Emotion Context 段落
-├── expression.py        # mood → avatar_expression mapping
+├── expression.py        # 推导 expression（caring 等）
+├── prompt_builder.py    # mood + expression → Emotion Context 段落
+├── tts_mapping.py       # mood + expression → TTS instruct
+├── avatar_mapping.py    # mood + expression → avatar_expression
 └── service.py           # EmotionService 顶层协调
 ```
 
@@ -379,12 +452,12 @@ src/soul_tty/emotion/
 
 ```
 src/soul_tty/
-├── cli.py               # 启动 EmotionService，注入到 RelationshipService
-├── relationship.py      # 升级为 InteractionAnalyzer，输出 emotion_delta
-├── clients/llm.py       # evaluate_relationship 输出加 emotion_delta 字段
+├── cli.py               # 启动 EmotionService
+├── relationship.py      # 重命名为 InteractionAnalyzer，输出 emotion_delta
+├── clients/llm.py       # evaluate_relationship 输出加 emotion_delta + expression 字段
 ├── personas/loader.py   # 加载 mood_baseline
 ├── personas/models.py   # Personality 增加 mood_baseline 字段
-├── ui/terminal.py       # 暂不显示情绪数值（V1 UI 不变）
+├── ui/terminal.py       # V1 UI 不变
 ├── config.py            # 新增情绪相关配置
 └── conversation.py      # 注入 Emotion Context 到 system_prompt
 ```
@@ -420,29 +493,33 @@ Chat(model) 创建
 ```
 用户语音 → ASR → text
    ↓
-Chat.ask_stream(text)  # 主对话，注入完整 system_prompt
-   ↓
-LLM 回复流式输出
-   ↓
-relationship.record_turn(user, agent)
-   ↓
-InteractionAnalyzer.evaluate()  # 旁路
-   ↓
-输出 emotion_delta + relationship_delta
-   ↓
-EmotionService.apply_delta(emotion_delta)
-   ↓
-EMA 平滑更新五维值
-   ↓
-持久化到 JSON
-   ↓
-MoodResolver → 新 mood + intensity
-   ↓
-PromptBuilder → 新 Emotion Context
-   ↓
-Chat.update_system_prompt(new_system_prompt)
-   ↓
-下一轮对话生效
+   ├── Chat.ask_stream(text)         # 主对话 LLM
+   │       ↓
+   │     流式回复
+   │
+   └── relationship.record_turn(user, agent)
+          ↓
+        InteractionAnalyzer.evaluate()  # 旁路 LLM
+          ↓
+        输出 emotion_delta + relationship_delta
+          ↓
+        EmotionService.apply_delta(emotion_delta)
+          ↓
+        EMA 平滑更新五维值
+          ↓
+        持久化到 emotion/{persona_id}.json
+          ↓
+        MoodResolver → 新 mood + intensity
+          ↓
+        ExpressionResolver → 新 expression（如 caring）
+          ↓
+        PromptBuilder → 新 Emotion Context
+          ↓
+        节流判断：mood/expression 变化或 |Δintensity|>0.1？
+          ↓ (是)
+        Chat.update_system_prompt(new_system_prompt)
+          ↓
+        下一轮对话生效
 ```
 
 ### 11.3 Idle 衰减
@@ -465,6 +542,20 @@ Chat.update_system_prompt(new_system_prompt)
 
 ## 12. Interaction Analyzer 输出协议
 
+Interaction Analyzer 是**旁路 LLM**，与主对话 Chat LLM 并行运行，不在主 Chat 流程里：
+
+```
+用户输入
+    ├── 主对话 LLM        → 实时回复
+    └── Interaction Analyzer（旁路）  → 情绪/关系评估
+                ↓
+        emotion_delta + relationship_delta
+```
+
+V1 复用现有 `evaluate_relationship` 调用，emotion_delta 与 relationship 数据同一次旁路 LLM 输出，避免额外推理调用。
+
+### 12.1 输出 schema
+
 升级 `evaluate_relationship` 输出 schema：
 
 ```json
@@ -482,12 +573,18 @@ Chat.update_system_prompt(new_system_prompt)
 }
 ```
 
-`emotion_delta` 是新增字段，可选。`apply_evaluation` 处理时：
+`emotion_delta` 是新增字段，可选。
+
+### 12.2 处理流程
+
+`apply_evaluation` 处理时：
 
 1. 原有 relationship 逻辑不变；
 2. 新增情绪 delta 处理：调用 `EmotionService.apply_delta()`。
 
-V1 默认行为：情绪分析由同一个 LLM 输出，避免额外调用。
+### 12.3 未来扩展
+
+V2 可独立拆出 EmotionAnalyzer 模型，与 RelationshipAnalyzer 并列；当前 V1 共用同一模型。
 
 ---
 
@@ -540,14 +637,18 @@ EMOTION_PERSIST = False             # 是否跨 session 持久化（V1 固定 Fa
 
 | 问题             | 决策                                         |
 | ---------------- | -------------------------------------------- |
-| 情绪评估来源       | 复用 relationship pipeline，加 `emotion_delta` |
+| 情绪评估来源       | Interaction Analyzer 旁路 LLM，与 relationship 共用同一次调用 |
 | 分析模块名称       | Interaction Analyzer                        |
-| Resolver 方式    | 优先级 + 阈值                                |
-| 默认 mood        | 不满足任意条件时按情绪最低的 mood 输出        |
+| Resolver 方式    | 优先级 + 阈值，Curious 在 Happy 之前        |
+| 默认 mood        | 不满足任意条件时返回 Calm                     |
 | 衰减触发          | 仅 idle 时执行                              |
 | Prompt 注入      | system_prompt 独立 Emotion Context 段落     |
 | Prompt 是否暴露数值 | 否，只暴露行为描述                          |
+| Prompt 热更新     | mood/expression 变化或 \|Δintensity\|>0.1 才更新 |
+| Caring 归属       | Expression 而非 Mood                       |
 | Avatar           | 预留 expression 接口和 mapping 表，不实际渲染 |
 | Persona 基础值    | YAML 配置，缺省用全局默认                   |
-| 持久化            | 仅本地 JSON，情绪不跨 session              |
-| session_count    | 跨 session 同步递增                          |
+| 持久化            | emotion/{persona}.json + runtime.json      |
+| session_count    | 跨 session 同步递增（runtime.json）          |
+| EMA 公式         | target=clamp(old+delta); new=old+(target-old)*rate |
+| Avatar schema    | mood 决定 face/eye，expression 决定 motion |
