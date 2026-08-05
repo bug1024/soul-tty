@@ -76,6 +76,37 @@ def main() -> None:
     apply_persona(persona)
     terminal.configure(persona)
 
+    # Initialize EmotionService
+    emotion_service = None
+    if config.EMOTION_ENABLED:
+        from .emotion import EmotionService
+        from .emotion.state import load_runtime, save_runtime
+        from .conversation import emit_emotion_update
+
+        existing = load_runtime(config.SOUL_TTY_STATE_DIR)
+        save_runtime(config.SOUL_TTY_STATE_DIR, existing + 1)
+
+        baseline = persona.personality.mood_baseline
+        emotion_service = EmotionService(
+            persona_id=persona.id,
+            baseline=baseline,
+            state_dir=config.SOUL_TTY_STATE_DIR,
+            jitter=0.1,
+            ema_rate=config.EMOTION_EMA_RATE,
+            delta_cap=config.EMOTION_DELTA_CAP,
+            decay_rate=config.EMOTION_DECAY_RATE,
+            intensity_update_threshold=config.EMOTION_PROMPT_UPDATE_INTENSITY,
+            on_update=lambda snap: (
+                emit_emotion_update(emotion_service, snap)
+                if snap.should_update_prompt
+                else None
+            ),
+            decay_interval_s=config.EMOTION_DECAY_INTERVAL_S,
+            idle_threshold_s=config.EMOTION_IDLE_THRESHOLD_S,
+        )
+        apply_persona(persona, emotion_service=emotion_service)
+        emotion_service.start_decay_thread()
+
     try:
         llm.start_conversation()
     except RuntimeError as exc:
@@ -116,6 +147,7 @@ def main() -> None:
             persona.id,
             evaluate,
             terminal.update_relationship,
+            emotion=emotion_service,
         )
         relationship_state = relationship_service.state
         terminal.configure_relationship(
@@ -226,4 +258,6 @@ def main() -> None:
         terminal.goodbye()
     finally:
         relationship.close()
+        if emotion_service is not None:
+            emotion_service.stop()
         terminal.close()
