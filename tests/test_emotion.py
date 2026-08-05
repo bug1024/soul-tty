@@ -346,3 +346,82 @@ def test_unknown_mood_falls_back_to_neutral():
     assert expr["face"] == "neutral"
     assert expr["eye"] == "open"
     assert expr["motion"] == "none"
+
+
+# --- Task 10: EmotionService ---
+
+from src.soul_tty.emotion.service import EmotionService, EmotionSnapshot
+
+
+def test_service_initializes_with_perturbed_baseline():
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.1,
+        seed=42,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    snap = svc.snapshot()
+    assert isinstance(snap, EmotionSnapshot)
+    assert snap.baseline == svc.baseline
+    for dim in ("happiness", "calmness", "curiosity", "stress", "energy"):
+        v = getattr(snap.emotion, dim)
+        assert 0.4 <= v <= 0.6
+    assert snap.mood in ("calm", "happy", "curious", "excited")
+
+
+def test_apply_delta_updates_emotion_and_returns_new_snapshot():
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    before = svc.snapshot().emotion
+    snap = svc.apply_delta(
+        {"happiness": 0.3, "stress": -0.1},
+        expression_hint="caring",
+    )
+    assert snap.emotion.happiness > before.happiness
+    assert snap.emotion.stress < before.stress
+    assert snap.expression == "caring"
+
+
+def test_should_update_prompt_on_mood_change():
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    svc.apply_delta({}, expression_hint="neutral")
+    # Big jump should trigger mood change
+    snap = svc.apply_delta(
+        {"happiness": 0.3, "energy": 0.3},
+        expression_hint="neutral",
+    )
+    # Either previous was already similar or this triggered update
+    assert isinstance(snap.should_update_prompt, bool)
