@@ -55,6 +55,7 @@ def _proxy_headers() -> dict[str, str]:
         "x-team-id": config.LLM_TEAM_ID,
         "x-agent-id": config.LLM_AGENT_ID,
         "x-conversation-id": config.LLM_CONVERSATION_ID,
+        "x-session-init-enabled": "false",
     }
 
 
@@ -282,7 +283,12 @@ def evaluate_relationship(
                     "不要使用第三人称旁白，不要解释判断原因，"
                     "禁止出现亲密度、关系、加分、扣分、分数、等级、阶段、事件、"
                     "提升、下降、进度等机制词；"
-                    "confidence 为 0 到 1 的数字。不要输出 Markdown。"
+                    "confidence 为 0 到 1 的数字。"
+                    "同时输出 emotion_delta（五维目标变化量，每维 -0.3 到 +0.3 的浮点数），"
+                    "维度为 happiness/calmness/curiosity/stress/energy；"
+                    "以及 expression 字符串，取值为 neutral 或 caring；"
+                    "caring 表示 Soul 对用户当下的关心姿态。"
+                    "不要输出 Markdown。"
                 ),
             },
             {
@@ -291,7 +297,8 @@ def evaluate_relationship(
                     f"角色：{display_name}\n当前亲密度：{score}\n"
                     f"当前阶段：{tier}\n当前情绪：{mood}\n\n"
                     f"<dialogue>\n用户：{user_text}\n"
-                    f"{display_name}：{agent_text}\n</dialogue>"
+                    f"{display_name}：{agent_text}\n</dialogue>\n"
+                    "请同时评估 Soul 的五维情绪目标变化量和 expression。"
                 ),
             },
         ],
@@ -349,13 +356,14 @@ class Chat:
             "max_tokens": config.LLM_MAX_TOKENS,
             "repeat_penalty": config.LLM_REPEAT_PENALTY,
             "repeat_last_n": config.LLM_REPEAT_LAST_N,
-            # 关闭思考链:语音对话要即问即答,thinking 会拖慢首 token
-            "chat_template_kwargs": {"enable_thinking": False},
+            "tools": [],
         }
         parts: list[str] = []
         pending = ""
         recent_sentences: list[str] = []
         stop_generation = False
+        _log = open("/tmp/soul_tty_debug.log", "a")
+        _log.write(f"\n[REQUEST] POST {config.LLM_PROXY_URL}/v1/chat/completions\nheaders={_proxy_headers()}\n")
         with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
             with client.stream(
                 "POST",
@@ -363,16 +371,31 @@ class Chat:
                 json=payload,
                 headers=_proxy_headers(),
             ) as resp:
+                _log.write(f"[RESP STATUS] {resp.status_code}\n")
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     if cancel is not None and cancel.is_set():
                         break
                     if not line.startswith("data:"):
+                        _log.write(f"[SKIP] {line!r}\n")
+                        _log.flush()
                         continue
+                    _log.write(f"[DATA] {line!r}\n")
+                    _log.flush()
                     data = line[5:].strip()
                     if data == "[DONE]":
                         break
-                    delta = json.loads(data)["choices"][0]["delta"]
+                    try:
+                        delta = json.loads(data)["choices"][0]["delta"]
+                    except Exception:
+                        continue
+                    # delta 可能是 {"content": "..."} 或 {"reasoning_content": "..."} 或直接是字符串
+                    if isinstance(delta, dict):
+                        token = delta.get("content") or delta.get("reasoning_content") or ""
+                    else:
+                        token = delta if isinstance(delta, str) else ""
+                    if not token:
+                        continue
                     token = delta.get("content") or ""
                     if not token:
                         continue
@@ -403,6 +426,8 @@ class Chat:
             parts.append(pending)
             yield pending
         answer = "".join(parts).strip()
+        _log.write(f"[DONE] answer={answer!r}\n")
+        _log.close()
         if answer:
             # 被插话时保留已经说出的部分，下一轮上下文才与人真正听到的一致。
             self.messages.append({"role": "assistant", "content": answer})

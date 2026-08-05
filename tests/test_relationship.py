@@ -223,3 +223,14 @@ class RelationshipServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Task 12: LLM prompt schema ---
+
+def test_evaluate_relationship_system_prompt_mentions_emotion_delta():
+    from src.soul_tty.clients import llm as llm_mod
+    import inspect
+
+    src = inspect.getsource(llm_mod.evaluate_relationship)
+    assert "emotion_delta" in src
+    assert "expression" in src
