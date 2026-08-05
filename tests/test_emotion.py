@@ -124,4 +124,39 @@ def test_resolve_intensity_excited():
 
 
 def test_moods_contains_all():
-    assert MOODS == {"numb", "tired", "sad", "excited", "curious", "happy", "calm"}
+    assert MOODS == ("numb", "tired", "sad", "excited", "curious", "happy", "calm")
+
+
+# --- Task 4: Expression Resolver ---
+
+from src.soul_tty.emotion.expression import resolve_expression, EXPRESSIONS
+
+
+def test_default_expression_neutral():
+    v = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.3, energy=0.6
+    )
+    assert resolve_expression(v, "") == "neutral"
+
+
+def test_caring_when_user_negative_event():
+    v = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.3, stress=0.5, energy=0.5
+    )
+    assert resolve_expression(v, "caring") == "caring"
+
+
+def test_caring_persists_with_user_signal():
+    v = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.3, stress=0.6, energy=0.5
+    )
+    assert resolve_expression(v, "caring") == "caring"
+
+
+def test_invalid_hint_falls_back_to_neutral():
+    assert resolve_expression(EmotionVector(0.5,0.5,0.5,0.3,0.6), "WEIRD") == "neutral"
+
+
+def test_expressions_list():
+    assert "neutral" in EXPRESSIONS
+    assert "caring" in EXPRESSIONS
