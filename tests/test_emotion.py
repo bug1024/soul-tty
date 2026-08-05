@@ -262,3 +262,41 @@ def test_parse_emotion_delta_empty_returns_empty_dict():
 def test_parse_emotion_delta_invalid_type_returns_empty():
     assert parse_emotion_delta({"happiness": "abc"}, delta_cap=0.3) == {}
     assert parse_emotion_delta(None, delta_cap=0.3) == {}
+
+
+# --- Task 7: Prompt Builder ---
+
+from src.soul_tty.emotion.prompt_builder import build_emotion_context
+
+
+def test_build_emotion_context_calm_high_intensity():
+    text = build_emotion_context("calm", 0.85)
+    assert "明显" in text
+
+
+def test_build_emotion_context_happy_low_intensity():
+    text = build_emotion_context("happy", 0.6)
+    assert "开心" in text or "积极" in text
+
+
+def test_build_emotion_context_with_caring_expression():
+    text = build_emotion_context("calm", 0.5, expression="caring")
+    assert "关心" in text or "温柔" in text or "陪伴" in text or "关切" in text
+
+
+def test_build_emotion_context_never_includes_numeric_values():
+    text = build_emotion_context("happy", 0.85)
+    assert "happiness=" not in text
+    assert "0.85" not in text
+
+
+def test_build_emotion_context_unknown_mood_returns_minimal():
+    text = build_emotion_context("unknown_mood", 0.5)
+    assert isinstance(text, str)
+    assert len(text) > 0
+
+
+def test_build_emotion_context_low_intensity_no_intensity_word():
+    text = build_emotion_context("calm", 0.3)
+    assert "明显" not in text
+    assert "中等" not in text
