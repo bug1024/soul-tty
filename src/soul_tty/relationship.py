@@ -133,7 +133,7 @@ def apply_evaluation(
     state: RelationshipState,
     result: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """返回包含 relationship 更新和 emotion_delta 的 payload；confidence 不足则 None。
+    """统一旁路输出：relationship 已应用 + emotion_delta + expression_state。
 
     result schema 期望（v1 拆分三路状态）：
     {
@@ -145,12 +145,14 @@ def apply_evaluation(
         "confidence":         0..1,
     }
 
-    返回结构：
+    返回结构（三路分离，调用方各自 dispatch）：
     {
-        "relationship": RelationshipState,
-        "emotion_delta": dict[str, float] | {},
-        "expression":   str,
+        "relationship":     RelationshipState,    # 已应用 bond
+        "emotion_delta":    dict[str, float],    # 给 EmotionService
+        "expression_state": {"style": str},      # 给 ExpressionService（未来扩 voice_style/avatar_expression）
     }
+
+    confidence 不足或 result 不是 dict 时返回 None。
     """
     if not isinstance(result, dict):
         return None
@@ -191,7 +193,7 @@ def apply_evaluation(
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
 
-    # Emotion payload
+    # Emotion payload：五维情绪 delta，给 EmotionService 消费。
     raw_emotion = result.get("emotion_delta") or {}
     emotion_delta: dict[str, float] = {}
     if isinstance(raw_emotion, dict):
@@ -204,34 +206,39 @@ def apply_evaluation(
             except (TypeError, ValueError):
                 continue
 
+    # Expression：包成 dict 给未来 voice_style / avatar_expression 留位。
+    # 当前只透传 style；ExpressionService 负责收敛合法值。
     expression_raw = str(result.get("expression", "neutral")).strip().lower()
-    expression = expression_raw if expression_raw in ("neutral", "caring") else "neutral"
+    style = expression_raw or "neutral"
 
     return {
         "relationship": new_relationship,
         "emotion_delta": emotion_delta,
-        "expression": expression,
+        "expression_state": {"style": style},
     }
 
 
+EvaluationCallback = Callable[[dict[str, Any]], None]
+
+
 class RelationshipService:
-    """单 Worker 有界旁路；队列满或评估失败时静默降级。"""
+    """单 Worker 有界旁路；只管 bond 持久化，emotion/expression 透传给上层协调器。"""
 
     def __init__(
         self,
         persona_id: str,
         evaluator: Evaluator,
         on_update: UpdateCallback | None = None,
+        on_evaluation: EvaluationCallback | None = None,
         *,
         state_dir: Path | None = None,
         queue_size: int | None = None,
         idle_delay_s: float | None = None,
         min_interval_s: float | None = None,
-        emotion: object | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.on_update = on_update
-        self.emotion = emotion
+        self.on_evaluation = on_evaluation
         self.path = _state_path(
             persona_id,
             state_dir or config.SOUL_TTY_STATE_DIR,
@@ -386,17 +393,13 @@ class RelationshipService:
                         self.on_update(final_state)
                     except Exception:
                         pass
-                # Emotion hook 仅在 confidence 足够时触发；低 confidence 不污染情绪。
-                if updated_payload is not None:
-                    emotion = getattr(self, "emotion", None)
-                    if emotion is not None:
-                        try:
-                            emotion.apply_delta(
-                                updated_payload["emotion_delta"],
-                                expression_hint=updated_payload["expression"],
-                            )
-                        except Exception:
-                            pass
+                # 把 apply_evaluation 的完整 payload 抛给上层协调器；
+                # emotion / expression 的应用都不在 RelationshipService 的职责里。
+                if updated_payload is not None and self.on_evaluation is not None:
+                    try:
+                        self.on_evaluation(updated_payload)
+                    except Exception:
+                        pass
             finally:
                 self.queue.task_done()
 

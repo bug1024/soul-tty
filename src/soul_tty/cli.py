@@ -164,11 +164,27 @@ def main() -> None:
             )
             terminal.update_relationship(state, mood=current_mood)
 
+        def on_evaluation_result(payload: dict) -> None:
+            """RelationshipService 把 apply_evaluation 的 payload 抛上来；这里分发到 emotion/expression。"""
+            if emotion_service is None:
+                return
+            emotion_delta = payload.get("emotion_delta") or {}
+            expression_state = payload.get("expression_state") or {}
+            style = expression_state.get("style", "neutral")
+            if not emotion_delta and style == "neutral":
+                return
+            try:
+                # EmotionService.apply_delta 内部会把 expression_hint 转给
+                # ExpressionService.resolve 完成合法性收敛。
+                emotion_service.apply_delta(emotion_delta, expression_hint=style)
+            except Exception:
+                pass
+
         relationship_service = relationship.RelationshipService(
             persona.id,
             evaluate,
             on_relationship_update,
-            emotion=emotion_service,
+            on_evaluation_result,
         )
         relationship_state = relationship_service.state
         initial_mood = (

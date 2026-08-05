@@ -335,36 +335,20 @@ def test_apply_evaluation_returns_emotion_payload():
     # 边际递减：0.10 + 0.01 * (1 - 0.10) = 0.109
     assert abs(payload["relationship"].bond - 0.109) < 1e-6
     assert payload["emotion_delta"] == {"happiness": 0.15, "stress": -0.05}
-    assert payload["expression"] == "caring"
+    # expression 改为 expression_state 包 dict，给未来扩展留位
+    assert payload["expression_state"] == {"style": "caring"}
 
 
-def test_relationship_service_calls_emotion_apply():
+def test_relationship_service_dispatches_evaluation_payload_to_coordinator():
+    """RelationshipService 不再直接管 emotion；payload 透传给 on_evaluation 协调器。"""
     import time
     import tempfile
     from src.soul_tty.relationship import RelationshipService
-    from src.soul_tty.emotion.state import EmotionVector
-    from src.soul_tty.emotion.service import EmotionSnapshot
 
-    calls = []
+    payloads = []
 
-    class FakeEmotion:
-        baseline = EmotionVector(
-            happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
-        )
-
-        def apply_delta(self, delta, *, expression_hint="neutral"):
-            calls.append((dict(delta), expression_hint))
-            return EmotionSnapshot(
-                baseline=self.baseline,
-                emotion=self.baseline,
-                mood="calm",
-                intensity=0.5,
-                expression=expression_hint,
-                should_update_prompt=False,
-                context_text="",
-            )
-
-    fake = FakeEmotion()
+    def coordinator(payload):
+        payloads.append(payload)
 
     def fake_evaluator(state, turn):
         return {
@@ -381,19 +365,23 @@ def test_relationship_service_calls_emotion_apply():
             persona_id="serena",
             evaluator=fake_evaluator,
             on_update=None,
+            on_evaluation=coordinator,
             state_dir=Path(tmp),
             queue_size=4,
             idle_delay_s=0.0,
             min_interval_s=0.0,
         )
-        svc.emotion = fake
         svc.start()
         assert svc.submit("hi", "hello back") is True
         for _ in range(50):
-            if calls:
+            if payloads:
                 break
             time.sleep(0.05)
         svc.stop()
-        assert len(calls) >= 1
-        assert calls[0][0] == {"happiness": 0.1}
-        assert calls[0][1] == "caring"
+
+    # 协调器收到的 payload 应包含三路：relationship / emotion_delta / expression_state
+    assert len(payloads) >= 1
+    payload = payloads[0]
+    assert "relationship" in payload
+    assert payload["emotion_delta"] == {"happiness": 0.1}
+    assert payload["expression_state"] == {"style": "caring"}
