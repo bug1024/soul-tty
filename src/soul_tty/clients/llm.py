@@ -159,6 +159,7 @@ def generate_outfit_greeting(
     *,
     relationship_tier: str = "",
     mood: str = "calm",
+    expression: str = "neutral",
 ) -> str | None:
     """生成换装后的即时短句；独立请求，不写入正式对话历史。"""
     payload = {
@@ -181,8 +182,8 @@ def generate_outfit_greeting(
                     f"刚切换为{outfit_label}，服装气质是："
                     f"{outfit_description or outfit_label}。"
                     f"羁绊阶段是{relationship_tier or '未建立'}，"
-                    f"本次会话情绪是{mood}。"
-                    "请让服装、时段、熟悉程度和情绪共同影响语气。只输出短句。"
+                    f"本次会话情绪是{mood}，当前 expression 是 {expression}。"
+                    "请让服装、时段、熟悉程度、情绪和 expression 共同影响语气。只输出短句。"
                 ),
             },
         ],
@@ -212,6 +213,7 @@ def generate_idle_emotion(
     *,
     relationship_tier: str = "",
     mood: str = "calm",
+    expression: str = "neutral",
 ) -> str | None:
     """生成独立于聊天历史的等待短句，供安静陪伴状态使用。"""
     payload = {
@@ -231,7 +233,8 @@ def generate_idle_emotion(
                 "content": (
                     f"现在是{period}，你是{display_name}，"
                     f"羁绊阶段是{relationship_tier or '未建立'}，"
-                    f"本次会话情绪是{mood}，用户已经安静了一会儿。"
+                    f"本次会话情绪是{mood}，当前 expression 是 {expression}，"
+                    "用户已经安静了一会儿。"
                     "请轻轻表达一种情绪，可以邀请用户说话。只输出短句。"
                 ),
             },

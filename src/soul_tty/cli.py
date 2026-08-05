@@ -178,6 +178,7 @@ def main() -> None:
                 outfit.description,
                 relationship_tier=state.tier if state is not None else "",
                 mood=state.mood if state is not None else "calm",
+                expression=emotion_service.snapshot().expression if emotion_service is not None else "neutral",
             )
 
     terminal.configure_outfit_greetings(outfit_greeting_generator)
@@ -243,6 +244,7 @@ def main() -> None:
                         if relationship_service is not None
                         else "calm"
                     ),
+                    expression=emotion_service.snapshot().expression if emotion_service is not None else "neutral",
                 )
 
         terminal.start_idle_emotions(idle_generator)
