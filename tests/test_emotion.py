@@ -300,3 +300,26 @@ def test_build_emotion_context_low_intensity_no_intensity_word():
     text = build_emotion_context("calm", 0.3)
     assert "明显" not in text
     assert "中等" not in text
+
+
+# --- Task 8: TTS Mapping ---
+
+from src.soul_tty.emotion.tts_mapping import build_tts_instruct
+
+
+def test_calm_returns_empty_instruct():
+    assert build_tts_instruct("calm", 0.5, expression="neutral") == ""
+
+
+def test_happy_returns_instruct():
+    text = build_tts_instruct("happy", 0.8, expression="neutral")
+    assert "开心" in text or "上扬" in text
+
+
+def test_caring_expression_overrides_mood_instruct():
+    text = build_tts_instruct("calm", 0.5, expression="caring")
+    assert "关心" in text or "温柔" in text
+
+
+def test_unknown_mood_returns_empty():
+    assert build_tts_instruct("weird_mood", 0.5) == ""
