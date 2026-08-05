@@ -323,3 +323,26 @@ def test_caring_expression_overrides_mood_instruct():
 
 def test_unknown_mood_returns_empty():
     assert build_tts_instruct("weird_mood", 0.5) == ""
+
+
+# --- Task 9: Avatar Mapping ---
+
+from src.soul_tty.emotion.avatar_mapping import build_avatar_expression
+
+
+def test_happy_avatar_expression():
+    expr = build_avatar_expression("happy", 0.8, expression="neutral")
+    assert expr["face"] == "smile"
+    assert expr["eye"] == "open"
+
+
+def test_caring_expression_overrides_motion():
+    expr = build_avatar_expression("calm", 0.5, expression="caring")
+    assert expr["motion"] == "slight_lean"
+
+
+def test_unknown_mood_falls_back_to_neutral():
+    expr = build_avatar_expression("weird_mood", 0.5)
+    assert expr["face"] == "neutral"
+    assert expr["eye"] == "open"
+    assert expr["motion"] == "none"
