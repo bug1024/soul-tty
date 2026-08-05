@@ -132,6 +132,27 @@ RELATIONSHIP_MIN_CONFIDENCE = float(
 RELATIONSHIP_LLM_MAX_TOKENS = int(
     os.environ.get("RELATIONSHIP_LLM_MAX_TOKENS", "96")
 )
+
+# 实时情绪系统（multi-dim emotion with EMA smoothing + idle decay）
+EMOTION_ENABLED = os.environ.get("EMOTION_ENABLED", "1") not in (
+    "0", "false", "False",
+)
+EMOTION_EMA_RATE = float(os.environ.get("EMOTION_EMA_RATE", "0.2"))
+EMOTION_DELTA_CAP = float(os.environ.get("EMOTION_DELTA_CAP", "0.3"))
+EMOTION_DECAY_INTERVAL_S = float(
+    os.environ.get("EMOTION_DECAY_INTERVAL_S", "300")
+)
+EMOTION_DECAY_RATE = float(os.environ.get("EMOTION_DECAY_RATE", "0.05"))
+EMOTION_IDLE_THRESHOLD_S = float(
+    os.environ.get("EMOTION_IDLE_THRESHOLD_S", "300")
+)
+EMOTION_PERSIST = os.environ.get("EMOTION_PERSIST", "0") not in (
+    "0", "false", "False",
+)
+EMOTION_PROMPT_UPDATE_INTENSITY = float(
+    os.environ.get("EMOTION_PROMPT_UPDATE_INTENSITY", "0.1")
+)
+
 SOUL_TTY_STATE_DIR = Path(
     os.environ.get(
         "SOUL_TTY_STATE_DIR",
