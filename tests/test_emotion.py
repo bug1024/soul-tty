@@ -229,3 +229,36 @@ def test_perturb_baseline_zero_jitter_is_identity():
     )
     perturbed = perturb_baseline(base, jitter=0.0, seed=1)
     assert perturbed == base
+
+
+# --- Task 6: Emotion Delta Analyzer ---
+
+from src.soul_tty.emotion.analyzer import parse_emotion_delta
+
+
+def test_parse_emotion_delta_valid():
+    raw = {"happiness": 0.1, "stress": -0.05, "energy": 0.05}
+    assert parse_emotion_delta(raw, delta_cap=0.3) == raw
+
+
+def test_parse_emotion_delta_caps_large_values():
+    raw = {"happiness": 1.0, "stress": -2.0}
+    parsed = parse_emotion_delta(raw, delta_cap=0.3)
+    assert parsed["happiness"] == 0.3
+    assert parsed["stress"] == -0.3
+
+
+def test_parse_emotion_delta_ignores_unknown_dims():
+    raw = {"happiness": 0.1, "weird": 0.5}
+    parsed = parse_emotion_delta(raw, delta_cap=0.3)
+    assert "weird" not in parsed
+    assert parsed["happiness"] == 0.1
+
+
+def test_parse_emotion_delta_empty_returns_empty_dict():
+    assert parse_emotion_delta({}, delta_cap=0.3) == {}
+
+
+def test_parse_emotion_delta_invalid_type_returns_empty():
+    assert parse_emotion_delta({"happiness": "abc"}, delta_cap=0.3) == {}
+    assert parse_emotion_delta(None, delta_cap=0.3) == {}
