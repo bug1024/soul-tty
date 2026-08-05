@@ -744,3 +744,38 @@ class SherpaStreamingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Task 15: system_prompt composition ---
+
+def test_apply_persona_with_emotion_appends_context():
+    import os
+    os.environ.pop("SYSTEM_PROMPT", None)
+    from soul_tty.personas.loader import load_persona, apply_persona
+    from soul_tty.emotion.service import EmotionService
+
+    p = load_persona("serena")
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=p.personality.mood_baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    apply_persona(p, emotion_service=svc)
+    assert "[Emotion Context]" in config.SYSTEM_PROMPT
+    assert "当前情绪状态：" in config.SYSTEM_PROMPT
+
+
+def test_apply_persona_without_emotion_unchanged():
+    import os
+    os.environ.pop("SYSTEM_PROMPT", None)
+    from soul_tty.personas.loader import load_persona, apply_persona
+
+    p = load_persona("serena")
+    apply_persona(p, emotion_service=None)
+    assert "[Emotion Context]" not in config.SYSTEM_PROMPT

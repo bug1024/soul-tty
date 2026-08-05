@@ -118,14 +118,20 @@ def available_personas() -> list[Persona]:
     return sorted(found.values(), key=lambda persona: persona.id)
 
 
-def apply_persona(persona: Persona) -> None:
-    """应用角色默认值，同时保留环境变量的最高优先级。"""
+def apply_persona(persona: Persona, emotion_service=None) -> None:
+    """应用角色默认值，同时保留环境变量的最高优先级。
+
+    emotion_service 不为 None 时，追加 [Emotion Context] 段落。
+    """
     if "SYSTEM_PROMPT" not in os.environ:
-        base = f"你的名字是“{persona.display_name}”。\n{persona.personality.system_prompt}"
+        base = f"你的名字是\"{persona.display_name}\"。\n{persona.personality.system_prompt}"
         avatar = persona.appearance.avatar
         mode = avatar.outfit.mode if avatar else "companion"
         modifier = _MODE_MODIFIERS.get(mode, _MODE_MODIFIERS["companion"])
-        config.SYSTEM_PROMPT = f"{base}\n\n{modifier}"
+        sections = [base, modifier]
+        if emotion_service is not None:
+            sections.append("[Emotion Context]\n" + emotion_service.snapshot().context_text)
+        config.SYSTEM_PROMPT = "\n\n".join(sections)
     if "TTS_BACKEND" not in os.environ:
         config.TTS_BACKEND = persona.voice.backend
     if "MLX_TTS_VOICE" not in os.environ and persona.voice.voice:
