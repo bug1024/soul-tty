@@ -21,6 +21,13 @@ def _tts_description() -> str | None:
     return f"{config.MLX_TTS_URL} (MLX Qwen3-TTS / {config.MLX_TTS_VOICE})"
 
 
+def _on_emotion_update(emotion_service, snap) -> None:
+    """EmotionService 可视化与 prompt 热更新共用一份快照。"""
+    terminal.update_emotion(snap)
+    if snap.should_update_prompt:
+        emit_emotion_update(emotion_service, snap)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="soul-tty", description=__doc__)
     parser.add_argument(
@@ -97,15 +104,14 @@ def main() -> None:
             decay_rate=config.EMOTION_DECAY_RATE,
             intensity_update_threshold=config.EMOTION_PROMPT_UPDATE_INTENSITY,
             on_update=lambda snap: (
-                emit_emotion_update(emotion_service, snap)
-                if snap.should_update_prompt
-                else None
+                _on_emotion_update(emotion_service, snap)
             ),
             decay_interval_s=config.EMOTION_DECAY_INTERVAL_S,
             idle_threshold_s=config.EMOTION_IDLE_THRESHOLD_S,
         )
         apply_persona(persona, emotion_service=emotion_service)
         emotion_service.start_decay_thread()
+        terminal.configure_emotion(emotion_service)
 
     try:
         llm.start_conversation()

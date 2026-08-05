@@ -639,6 +639,32 @@ class TerminalUITests(unittest.TestCase):
             [("you", "消息 2"), ("you", "消息 3"), ("you", "消息 4")],
         )
 
+    def test_set_emotion_stores_snapshot_and_respects_safe_window(self):
+        from soul_tty.emotion.service import EmotionSnapshot
+
+        output = io.StringIO()
+        console = Console(file=output, width=120, height=30, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        with patch.object(terminal, "_console", console):
+            dashboard = terminal.Dashboard(persona, runtime)
+            # 模拟 listening 安全窗口
+            dashboard.state = "listening"
+            dashboard.partial_text = ""
+            snap = EmotionSnapshot(
+                baseline=None,
+                emotion=None,
+                mood="excited",
+                intensity=0.75,
+                expression="caring",
+                should_update_prompt=False,
+                context_text="",
+            )
+            dashboard.set_emotion(snap)
+        self.assertEqual(dashboard.emotion_mood, "excited")
+        self.assertEqual(dashboard.emotion_intensity, 0.75)
+        self.assertEqual(dashboard.emotion_expression, "caring")
+
 
 if __name__ == "__main__":
     unittest.main()

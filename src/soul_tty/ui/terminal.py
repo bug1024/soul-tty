@@ -31,6 +31,7 @@ _answer_pending = False
 _answer_has_content = False
 _dashboard: "Dashboard | None" = None
 _relationship_profile: tuple[int, str, str, str] | None = None
+_emotion_service = None
 _launch_context = LaunchContext()
 _outfit_greeting_generator: Callable[[AvatarOutfit], str | None] | None = None
 _AVATAR_ROW = 3
@@ -51,6 +52,17 @@ _MODE_LABELS: dict[str, str] = {
     "companion": "陪伴模式",
     "focused": "专注模式",
     "late_night": "夜间模式",
+}
+
+# 情绪 Mood → 中文标签。贴近口语，不抢戏。
+_MOOD_LABELS: dict[str, str] = {
+    "numb": "麻木",
+    "tired": "疲惫",
+    "sad": "低落",
+    "excited": "雀跃",
+    "curious": "好奇",
+    "happy": "愉悦",
+    "calm": "平静",
 }
 
 _IDLE_EMOTION_LINES = (
@@ -200,6 +212,20 @@ class Dashboard:
         relationship_voice = (
             _relationship_profile[3] if _relationship_profile is not None else ""
         )
+        # 情绪系统：初值从 EmotionService 快照拉一次，
+        # 后续由 set_emotion 接收 on_update 回调热更新。
+        self.emotion_mood = "calm"
+        self.emotion_intensity = 0.0
+        self.emotion_expression = "neutral"
+        if _emotion_service is not None:
+            try:
+                initial = _emotion_service.snapshot()
+            except Exception:
+                initial = None
+            if initial is not None:
+                self.emotion_mood = initial.mood
+                self.emotion_intensity = initial.intensity
+                self.emotion_expression = initial.expression
         self.greeting = relationship_voice or _fallback_greeting(
             tier=self.relationship_tier,
             repeat_launch=_launch_context.repeat_launch,
@@ -420,6 +446,9 @@ class Dashboard:
             relationship_tier=self.relationship_tier,
             show_details=self.show_details,
             quiet_presence=self._idle_emotion_active,
+            emotion_mood=self.emotion_mood,
+            emotion_intensity=self.emotion_intensity,
+            emotion_expression=self.emotion_expression,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -713,6 +742,19 @@ class Dashboard:
             if safe_to_refresh:
                 self.refresh()
 
+    def set_emotion(self, snap) -> None:
+        """保存 EmotionSnapshot；只有安全窗口才触发重绘。
+
+        `snap` 具备以下鸭子类型字段：mood / intensity / expression。
+        """
+        with self._lock:
+            self.emotion_mood = snap.mood
+            self.emotion_intensity = snap.intensity
+            self.emotion_expression = snap.expression
+            safe_to_refresh = self.state == "listening" and not self.partial_text
+            if safe_to_refresh:
+                self.refresh()
+
     def _mark_voice_activity_locked(self, now: float) -> bool:
         self._last_voice_activity = now
         self._next_idle_emotion_at = now + config.IDLE_EMOTION_AFTER_S
@@ -852,6 +894,12 @@ def configure_relationship(
     )
 
 
+def configure_emotion(service) -> None:
+    """把 EmotionService 句柄交给 UI；splash 时会取一次初值。"""
+    global _emotion_service
+    _emotion_service = service
+
+
 def configure_presence(context: LaunchContext | None = None) -> None:
     global _launch_context
     _launch_context = context or LaunchContext()
@@ -866,6 +914,12 @@ def update_relationship(state) -> None:
             state.mood,
             state.inner_voice,
         )
+
+
+def update_emotion(snap) -> None:
+    """接收 EmotionService 的快照；非 listening 状态下会被 dashboard 延迟刷新。"""
+    if _dashboard is not None:
+        _dashboard.set_emotion(snap)
 
 
 def audio_level(level: float) -> None:
@@ -1055,6 +1109,9 @@ def _splash_panel(
     relationship_tier: str = "",
     show_details: bool = False,
     quiet_presence: bool = False,
+    emotion_mood: str = "calm",
+    emotion_intensity: float = 0.0,
+    emotion_expression: str = "neutral",
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -1101,12 +1158,25 @@ def _splash_panel(
         if show_details:
             relationship.append(f"  {relationship_score}/100", style="dim")
 
+    emotion = Text()
+    if stage >= 3:
+        emotion.append("◌ ", style=primary)
+        emotion.append("情绪  ", style="dim")
+        emotion.append(_MOOD_LABELS.get(emotion_mood, emotion_mood), style=primary)
+        if show_details:
+            intensity_pct = int(round(emotion_intensity * 100))
+            emotion.append(f"  {intensity_pct}/100", style="dim")
+        if emotion_expression == "caring" and show_details:
+            emotion.append("  · 关心", style="dim italic")
+
     details = Group(
         Align.center(title),
         Align.center(greeting_text),
         Text(""),
         Align.center(status),
         Align.center(hint),
+        Text(""),
+        Align.center(emotion),
         Text(""),
         Align.center(relationship),
         Text(""),
