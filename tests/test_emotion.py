@@ -425,3 +425,58 @@ def test_should_update_prompt_on_mood_change():
     )
     # Either previous was already similar or this triggered update
     assert isinstance(snap.should_update_prompt, bool)
+
+
+# --- Task 18: End-to-end smoke test ---
+
+def test_end_to_end_prompt_composition():
+    from src.soul_tty.emotion.service import EmotionService
+    from src.soul_tty.emotion.prompt_builder import build_emotion_context
+    from src.soul_tty.emotion.state import EmotionVector
+
+    baseline = EmotionVector(
+        happiness=0.6, calmness=0.7, curiosity=0.65, stress=0.25, energy=0.7
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    initial = svc.snapshot()
+    assert initial.mood == "calm"
+    after = svc.apply_delta(
+        {"happiness": 0.3, "energy": 0.3},
+        expression_hint="neutral",
+    )
+    assert after.mood in ("happy", "excited", "curious")
+    text = build_emotion_context(after.mood, after.intensity, expression=after.expression)
+    assert "当前情绪状态：" in text
+    assert "行为倾向：" in text
+
+
+def test_full_module_imports():
+    """确保整个 emotion 模块可被 import，没有循环依赖。"""
+    from src.soul_tty.emotion import EmotionService, EmotionSnapshot
+    from src.soul_tty.emotion.state import (
+        EmotionVector,
+        DEFAULT_BASELINE,
+        load_emotion_state,
+        save_emotion_state,
+        load_runtime,
+        save_runtime,
+    )
+    from src.soul_tty.emotion.resolver import resolve_mood, MOODS
+    from src.soul_tty.emotion.expression import resolve_expression, EXPRESSIONS
+    from src.soul_tty.emotion.updater import apply_delta, apply_decay, perturb_baseline
+    from src.soul_tty.emotion.analyzer import parse_emotion_delta
+    from src.soul_tty.emotion.prompt_builder import build_emotion_context
+    from src.soul_tty.emotion.tts_mapping import build_tts_instruct
+    from src.soul_tty.emotion.avatar_mapping import build_avatar_expression
+    # All imports succeeded
+    assert EmotionService is not None
