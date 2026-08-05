@@ -72,8 +72,14 @@ def main() -> None:
             persona = persona.renamed(args.name)
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
+
     apply_persona(persona)
     terminal.configure(persona)
+
+    try:
+        llm.start_conversation()
+    except RuntimeError as exc:
+        parser.error(str(exc))
 
     try:
         model = llm.pick_model()

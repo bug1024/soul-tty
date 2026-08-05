@@ -59,10 +59,12 @@ class PersonaTests(unittest.TestCase):
             patch.object(config, "MLX_TTS_INSTRUCT", "old"),
         ):
             apply_persona(persona)
-            self.assertEqual(
-                config.SYSTEM_PROMPT,
-                f"你的名字是“小助理”。\n{persona.personality.system_prompt}",
+            self.assertTrue(
+                config.SYSTEM_PROMPT.startswith(
+                    f"你的名字是“小助理”。\n{persona.personality.system_prompt}"
+                )
             )
+            self.assertIn("你处于陪伴模式", config.SYSTEM_PROMPT)
             self.assertEqual(config.TTS_BACKEND, "mlx")
             self.assertEqual(config.MLX_TTS_VOICE, "Serena")
             self.assertEqual(

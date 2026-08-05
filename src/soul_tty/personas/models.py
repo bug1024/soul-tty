@@ -48,6 +48,7 @@ class AvatarOutfit:
     speaking_closed: str = ""
     speaking_half: str = ""
     speaking_open: str = ""
+    mode: str = "companion"  # companion | focused | late_night
 
     def for_state(self, state: str) -> str:
         value = getattr(self, state, "")
@@ -169,6 +170,7 @@ class Persona:
                         speaking_closed=_text(outfit_data, "speaking_closed"),
                         speaking_half=_text(outfit_data, "speaking_half"),
                         speaking_open=_text(outfit_data, "speaking_open"),
+                        mode=_text(outfit_data, "mode", "companion"),
                     )
                 )
             selected_outfit = _text(

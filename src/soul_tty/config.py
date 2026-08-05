@@ -30,10 +30,21 @@ SHERPA_VAD_GATE_ENABLED = os.environ.get("SHERPA_VAD_GATE_ENABLED", "1") not in 
 )
 SHERPA_VAD_PRE_ROLL_MS = int(os.environ.get("SHERPA_VAD_PRE_ROLL_MS", "300"))
 SHERPA_VAD_TRIGGER_MS = int(os.environ.get("SHERPA_VAD_TRIGGER_MS", "120"))
-LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8180")
+# 辅助 LLM（欢迎语、空闲情绪、关系评估）保持直连，避免污染主会话记忆。
+LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8180").rstrip("/")
+# 只有正式 Chat 经过记忆代理；兼容已经使用的 LLM_BASE_URL 环境变量。
+LLM_PROXY_URL = os.environ.get(
+    "LLM_PROXY_URL",
+    os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8096/hermes/default"),
+).rstrip("/")
 LLM_MODEL = os.environ.get(
     "LLM_MODEL", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
 )  # 空 = 自动取 /v1/models 第一个
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_TEAM_ID = os.environ.get("LLM_TEAM_ID", "")
+LLM_AGENT_ID = os.environ.get("LLM_AGENT_ID", "")
+# 会话 ID 默认在每次启动时生成；显式设置可用于恢复指定会话。
+LLM_CONVERSATION_ID = os.environ.get("LLM_CONVERSATION_ID", "")
 
 # 音频采集
 SAMPLE_RATE = 16000

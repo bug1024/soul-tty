@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import unicodedata
+import uuid
 from collections.abc import Iterator
 
 import httpx
@@ -26,6 +27,35 @@ def _tail_is_repeating(text: str) -> bool:
         if compact.endswith(unit * 3):
             return True
     return False
+
+
+def start_conversation() -> str:
+    """校验记忆代理配置，并为本次进程准备唯一会话 ID。"""
+    required = {
+        "LLM_API_KEY": config.LLM_API_KEY,
+        "LLM_TEAM_ID": config.LLM_TEAM_ID,
+        "LLM_AGENT_ID": config.LLM_AGENT_ID,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "记忆代理配置缺失: "
+            + ", ".join(missing)
+            + "。请从 Memory Panel 获取 user_key、team_id 和 agent_id。"
+        )
+    if not config.LLM_CONVERSATION_ID:
+        config.LLM_CONVERSATION_ID = f"soul-tty-{uuid.uuid4()}"
+    return config.LLM_CONVERSATION_ID
+
+
+def _proxy_headers() -> dict[str, str]:
+    """构建代理所需的请求头，包含认证和会话标识。"""
+    return {
+        "Authorization": f"Bearer {config.LLM_API_KEY}",
+        "x-team-id": config.LLM_TEAM_ID,
+        "x-agent-id": config.LLM_AGENT_ID,
+        "x-conversation-id": config.LLM_CONVERSATION_ID,
+    }
 
 
 def pick_model() -> str:
@@ -300,6 +330,10 @@ class Chat:
         self.messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
         self.last_stop_reason: str | None = None
 
+    def update_system_prompt(self, prompt: str) -> None:
+        """热更新 system prompt；不影响对话历史。"""
+        self.messages[0] = {"role": "system", "content": prompt}
+
     def ask_stream(
         self, text: str, cancel: threading.Event | None = None
     ) -> Iterator[str]:
@@ -324,7 +358,10 @@ class Chat:
         stop_generation = False
         with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
             with client.stream(
-                "POST", f"{config.LLM_URL}/v1/chat/completions", json=payload
+                "POST",
+                f"{config.LLM_PROXY_URL}/v1/chat/completions",
+                json=payload,
+                headers=_proxy_headers(),
             ) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():

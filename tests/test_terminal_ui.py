@@ -500,7 +500,7 @@ class TerminalUITests(unittest.TestCase):
         self.assertEqual(pending, b"")
         self.assertEqual(terminal.TerminalInput.outfit_toggles(complete), 1)
 
-    def test_zero_cycles_outfit_and_loads_only_its_unique_frames(self):
+    def test_zero_cycles_mode_and_loads_only_its_unique_frames(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)
         persona = load_persona("serena")
@@ -525,11 +525,11 @@ class TerminalUITests(unittest.TestCase):
 
         self.assertEqual(
             dashboard.persona.appearance.avatar.selected_outfit,
-            "late-night",
+            "work",
         )
         self.assertEqual(len(paths), 2)
-        self.assertTrue(all("/late-night/" in path for path in paths))
-        self.assertEqual(dashboard.greeting, "夜深了，就这样轻松一点吧。")
+        self.assertTrue(all("/work/" in path for path in paths))
+        self.assertEqual(dashboard.greeting, "工作模式，今天从哪里开始？")
         self.assertGreater(
             dashboard._next_idle_emotion_at,
             dashboard._last_voice_activity,

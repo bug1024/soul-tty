@@ -31,6 +31,7 @@ appearance:
     outfits:
       default:
         label: 默认装
+        mode: companion
         description: 紫色未来感标准服装，精神、熟悉，带一点赛博气质
         switch_greetings:
           - 熟悉的样子，果然还是最自在。
@@ -44,6 +45,7 @@ appearance:
         speaking_open: ../assets/avatars/serena/speaking_open.png
       late-night:
         label: 深夜装
+        mode: late_night
         description: 深色吊带家居背心，头发松散，神态柔和而放松
         switch_greetings:
           - 夜深了，就这样轻松一点吧。
@@ -57,6 +59,7 @@ appearance:
         speaking_open: ../assets/avatars/serena/late-night/speaking.png
       work:
         label: 工作装
+        mode: focused
         description: 克制的衬衫与轻机能背心，专注、利落，适合编程
         switch_greetings:
           - 工作模式，今天从哪里开始？

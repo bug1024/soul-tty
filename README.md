@@ -12,7 +12,8 @@ svc start mlx-tts
 ```
 
 - sherpa-onnx:直接嵌入 soul-tty 进程，无需单独启动服务
-- llama:8180,router 模式,按需自动加载模型
+- llama:8180,router 模式,按需自动加载模型；欢迎语等辅助请求直连此地址
+- Memory Proxy:8096,正式主对话经由 Hermes 代理注入会话上下文和长期记忆
 - mlx-tts:50501,Qwen3-TTS 1.7B CustomVoice 内置 Serena 中文女声(MLX/Apple Silicon,默认)
 - chafa:终端角色图渲染；支持原生图片协议时显示像素图，否则回退为 Truecolor Unicode 像素画
 
@@ -23,6 +24,22 @@ svc start soul-tty     # 前台启动(推荐,任何目录可用)
 ```
 
 等价于 `cd apps/soul-tty && uv run soul-tty`(首次自动建环境)。
+
+正式对话默认通过 Memory Proxy。首次使用先从 Memory Panel 取得业务用户的
+`user_key`、team 和 agent，复制 `.env.example` 并导入环境：
+
+```bash
+cd /Users/bug1024/ai/apps/soul-tty
+cp .env.example .env
+# 编辑 .env，填写 LLM_API_KEY / LLM_TEAM_ID / LLM_AGENT_ID
+svc start soul-tty
+```
+
+`svc` 会自动导入项目 `.env`；直接执行 `uv run soul-tty` 时，需要先运行
+`set -a; source .env; set +a`。`.env` 已被忽略，不会进入 Git。Soul TTY 每次启动会生成一个新的
+`x-conversation-id`，本次进程中的所有正式主对话复用该 ID；Memory Proxy 在首个
+主对话请求时注册对应会话。若显式设置 `LLM_CONVERSATION_ID`，则可继续指定会话。
+欢迎语、空闲情绪、换装台词和羁绊评估仍直连 llama，不会污染主会话记忆。
 
 交互:显示 `◉ 正在聆听` 后直接说话。按 `0` 循环切换头像套装，按 `Tab` 展开或收起精确羁绊值与完整技术详情，`Ctrl+C` 退出。空闲时仅由轻量 WebRTC VAD 检查 30ms PCM 帧，连续检测到人声后携带 300ms pre-roll 唤醒 sherpa-onnx；识别期间显示 partial，检测到约 0.6s 尾部静音后提交 final。默认**半双工**:播报期间麦克风停止采集(避免外放回声),播完自动恢复聆听。
 
@@ -198,6 +215,11 @@ BARGE_IN_ENABLED=1 svc start soul-tty
 | `SHERPA_VAD_PRE_ROLL_MS` | `300` | 检测到人声时补回的句首音频长度 |
 | `SHERPA_VAD_TRIGGER_MS` | `120` | 连续人声达到该时长后唤醒 Sherpa；pre-roll 会补回句首 |
 | `LLM_URL` | `http://127.0.0.1:8180` | llama-server 地址 |
+| `LLM_PROXY_URL` | `http://127.0.0.1:8096/hermes/default` | 正式主对话使用的 Memory Proxy Hermes 地址；兼容旧变量 `LLM_BASE_URL` |
+| `LLM_API_KEY` | 空 | Memory Proxy 的 `user_key`，发送为 Bearer Token |
+| `LLM_TEAM_ID` | 空 | Memory Proxy 团队 ID |
+| `LLM_AGENT_ID` | 空 | Memory Proxy Agent ID |
+| `LLM_CONVERSATION_ID` | 每次启动自动生成 | 当前会话 ID；通常无需设置，显式设置时可恢复指定会话 |
 | `LLM_MODEL` | `Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf` | 模型 id,设为空则自动取 `/v1/models` 第一个 |
 | `LLM_MAX_TOKENS` | `256` | 单轮回答硬上限，防止模型无限生成 |
 | `LLM_TEMPERATURE` | `0.7` | LLM 采样温度 |

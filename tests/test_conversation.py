@@ -36,6 +36,40 @@ class ConversationPolicyTests(unittest.TestCase):
         self.assertFalse(_is_probable_echo("等一下，换个话题", spoken))
 
 
+class ProxyConversationTests(unittest.TestCase):
+    def test_requires_every_proxy_identity_field(self):
+        with patch.multiple(
+            config,
+            LLM_API_KEY="user-key",
+            LLM_TEAM_ID="team-id",
+            LLM_AGENT_ID="",
+            LLM_CONVERSATION_ID="",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "LLM_AGENT_ID"):
+                llm_client.start_conversation()
+
+    def test_generates_one_session_id_and_builds_complete_headers(self):
+        with patch.multiple(
+            config,
+            LLM_API_KEY="user-key",
+            LLM_TEAM_ID="team-id",
+            LLM_AGENT_ID="agent-id",
+            LLM_CONVERSATION_ID="",
+        ):
+            conversation_id = llm_client.start_conversation()
+            self.assertTrue(conversation_id.startswith("soul-tty-"))
+            self.assertEqual(llm_client.start_conversation(), conversation_id)
+            self.assertEqual(
+                llm_client._proxy_headers(),
+                {
+                    "Authorization": "Bearer user-key",
+                    "x-team-id": "team-id",
+                    "x-agent-id": "agent-id",
+                    "x-conversation-id": conversation_id,
+                },
+            )
+
+
 class FakeResponse:
     def raise_for_status(self):
         pass
@@ -142,12 +176,26 @@ class ChatCancellationTests(unittest.TestCase):
 
     @patch("soul_tty.clients.llm.httpx.Client", RepeatingClient)
     def test_stops_repeated_sentence_loop_and_sets_generation_limits(self):
-        chat = Chat("test")
-        answer = "".join(chat.ask_stream("讲故事"))
+        with patch.multiple(
+            config,
+            LLM_API_KEY="user-key",
+            LLM_TEAM_ID="team-id",
+            LLM_AGENT_ID="agent-id",
+            LLM_CONVERSATION_ID="conversation-id",
+        ):
+            chat = Chat("test")
+            answer = "".join(chat.ask_stream("讲故事"))
         payload = RepeatingClient.request[2]["json"]
+        headers = RepeatingClient.request[2]["headers"]
 
         self.assertEqual(chat.last_stop_reason, "repetition")
         self.assertEqual(answer.count("你还诚实吗"), 1)
+        self.assertEqual(
+            RepeatingClient.request[1],
+            f"{config.LLM_PROXY_URL}/v1/chat/completions",
+        )
+        self.assertNotIn("x-task-id", headers)
+        self.assertEqual(headers["x-conversation-id"], "conversation-id")
         self.assertEqual(payload["max_tokens"], config.LLM_MAX_TOKENS)
         self.assertEqual(payload["repeat_penalty"], config.LLM_REPEAT_PENALTY)
         self.assertEqual(chat.messages[-1]["content"], answer)
@@ -167,6 +215,11 @@ class GreetingGenerationTests(unittest.TestCase):
         payload = GreetingClient.request[1]["json"]
 
         self.assertEqual(greeting, "晚上好，我把月光留给你。")
+        self.assertEqual(
+            GreetingClient.request[0],
+            f"{config.LLM_URL}/v1/chat/completions",
+        )
+        self.assertNotIn("headers", GreetingClient.request[1])
         self.assertFalse(payload["stream"])
         self.assertIn("晚上", payload["messages"][1]["content"])
         self.assertIn("羁绊阶段是默契", payload["messages"][1]["content"])

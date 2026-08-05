@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import config
+from .. import conversation
 from ..personas.models import AvatarOutfit, Persona
 from ..presence import LaunchContext
 from . import avatar as avatar_ui
@@ -43,6 +44,13 @@ _STATE_LABELS = {
     "listening": "正在聆听",
     "thinking": "正在思考",
     "speaking": "正在说话",
+}
+
+_MODE_ORDER = ("companion", "focused", "late_night")
+_MODE_LABELS: dict[str, str] = {
+    "companion": "陪伴模式",
+    "focused": "专注模式",
+    "late_night": "夜间模式",
 }
 
 _IDLE_EMOTION_LINES = (
@@ -75,11 +83,11 @@ class TerminalInput:
         self,
         on_scroll,
         on_toggle_details=None,
-        on_cycle_outfit=None,
+        on_cycle_mode=None,
     ) -> None:
         self.on_scroll = on_scroll
         self.on_toggle_details = on_toggle_details
-        self.on_cycle_outfit = on_cycle_outfit
+        self.on_cycle_mode = on_cycle_mode
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
@@ -150,9 +158,9 @@ class TerminalInput:
                 if self.on_toggle_details is not None:
                     for _ in range(self.detail_toggles(data)):
                         self.on_toggle_details()
-                if self.on_cycle_outfit is not None:
+                if self.on_cycle_mode is not None:
                     for _ in range(self.outfit_toggles(data)):
-                        self.on_cycle_outfit()
+                        self.on_cycle_mode()
             except OSError:
                 return
 
@@ -217,12 +225,13 @@ class Dashboard:
         self._idle_emotion_thread: threading.Thread | None = None
         self._outfit_switch_index = 0
         self._outfit_greeting_serial = 0
+        self._mode_switch_index = 0
         self._outfit_greeting_timer: threading.Timer | None = None
         self._outfit_greeting_generator = _outfit_greeting_generator
         self.input = TerminalInput(
             self.scroll,
             self.toggle_details,
-            self.cycle_outfit,
+            self.cycle_mode,
         )
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
@@ -235,6 +244,11 @@ class Dashboard:
         )
         self._preferred_avatar_renderer = preferred_renderer
         self.avatars, self.mouth_avatars = self._load_avatar_set(persona)
+        self.mode = (
+            persona.appearance.avatar.outfit.mode
+            if persona.appearance.avatar
+            else "companion"
+        )
         self.live = Live(
             self.render(),
             console=_console,
@@ -317,17 +331,31 @@ class Dashboard:
             self._outfit_greeting_timer = timer
         timer.start()
 
-    def cycle_outfit(self) -> None:
-        """按 persona 顺序切换套装，并原位替换当前头像缓存。"""
-        global _persona
+    def cycle_mode(self) -> None:
+        """按 companion → focused → late_night 循环切换行为模式，同时切换头像。"""
         with self._lock:
             avatar = self.persona.appearance.avatar
-            if avatar is None or len(avatar.outfits) < 2:
+            if avatar is None:
                 return
-            ids = [outfit.id for outfit in avatar.outfits]
-            current = ids.index(avatar.selected_outfit)
-            outfit_id = ids[(current + 1) % len(ids)]
-            persona = self.persona.wearing(outfit_id)
+            # 当前 outfit 在固定顺序中的位置
+            current_outfit = avatar.outfit
+            try:
+                idx = _MODE_ORDER.index(current_outfit.mode)
+            except ValueError:
+                idx = -1
+            next_mode = _MODE_ORDER[(idx + 1) % len(_MODE_ORDER)]
+
+            # 找到第一套 mode 匹配 next_mode 的 outfit，切换过去
+            next_outfit_id = None
+            for o in avatar.outfits:
+                if o.mode == next_mode:
+                    next_outfit_id = o.id
+                    break
+
+            if next_outfit_id is None:
+                return  # 没有匹配 outfit，理论上不会发生
+
+            persona = self.persona.wearing(next_outfit_id)
             avatars, mouths = self._load_avatar_set(persona)
 
             if self._native_frames_ready:
@@ -346,6 +374,18 @@ class Dashboard:
                 )
 
             outfit = persona.appearance.avatar.outfit
+            self.mode = outfit.mode
+
+            # 重新 apply_persona 更新 config.SYSTEM_PROMPT（包含新 mode 修饰符）
+            from ..personas import apply_persona
+
+            apply_persona(self.persona)
+
+            # 热更新活跃 Chat 的 system prompt
+            chat = conversation._active_chat
+            if chat is not None:
+                chat.update_system_prompt(config.SYSTEM_PROMPT)
+
             self._mark_voice_activity_locked(time.monotonic())
             greeting = self._local_outfit_greeting(outfit)
             self.base_greeting = greeting
@@ -356,6 +396,10 @@ class Dashboard:
             self.refresh(paint_avatar=True)
 
         self._schedule_outfit_greeting(outfit, serial)
+
+    def cycle_outfit(self) -> None:
+        """兼容旧调用名称；换装现在同时切换对应行为模式。"""
+        self.cycle_mode()
 
     def render(self) -> Group:
         avatar_render = self._active_avatar()

@@ -7,6 +7,24 @@ from pathlib import Path
 import yaml
 
 from .. import config
+
+# 模式 → system prompt 修饰符
+_MODE_MODIFIERS: dict[str, str] = {
+    "companion": (
+        "你处于陪伴模式：允许自然闲聊和适度调侃，语气俏皮温暖，"
+        "回答保持正常长度（2-3句），话题不受限制。"
+    ),
+    "focused": (
+        "你处于专注模式：减少寒暄，直奔主题，回答更短（1-2句），"
+        "优先协助任务，克制情绪化表达，语气友善但精简。"
+    ),
+    "late_night": (
+        "你处于夜间模式：表达更松弛，允许聊私密话题，"
+        "语气柔和低沉，像深夜轻声交谈，控制在2-3句。"
+    ),
+}
+
+
 from .models import Avatar, AvatarOutfit, Persona
 
 _PROJECT_PERSONA_DIR = Path(__file__).resolve().parents[3] / "personas"
@@ -51,6 +69,7 @@ def _load_file(path: Path) -> Persona:
                 speaking_closed=resolved(outfit.speaking_closed),
                 speaking_half=resolved(outfit.speaking_half),
                 speaking_open=resolved(outfit.speaking_open),
+                mode=outfit.mode,
             )
             for outfit in avatar.outfits
         )
@@ -102,10 +121,11 @@ def available_personas() -> list[Persona]:
 def apply_persona(persona: Persona) -> None:
     """应用角色默认值，同时保留环境变量的最高优先级。"""
     if "SYSTEM_PROMPT" not in os.environ:
-        config.SYSTEM_PROMPT = (
-            f"你的名字是“{persona.display_name}”。\n"
-            f"{persona.personality.system_prompt}"
-        )
+        base = f"你的名字是“{persona.display_name}”。\n{persona.personality.system_prompt}"
+        avatar = persona.appearance.avatar
+        mode = avatar.outfit.mode if avatar else "companion"
+        modifier = _MODE_MODIFIERS.get(mode, _MODE_MODIFIERS["companion"])
+        config.SYSTEM_PROMPT = f"{base}\n\n{modifier}"
     if "TTS_BACKEND" not in os.environ:
         config.TTS_BACKEND = persona.voice.backend
     if "MLX_TTS_VOICE" not in os.environ and persona.voice.voice:

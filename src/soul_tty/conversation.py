@@ -13,6 +13,9 @@ from .audio import asr, capture, tts
 from .clients import llm
 from .ui import terminal
 
+# 全局 Chat 实例引用，供 terminal.py 换模式时热更新 system prompt
+_active_chat: llm.Chat | None = None
+
 # ASR 在静音/噪声段上的典型幻觉文本，直接丢弃不送 LLM。
 HALLUCINATIONS = (
     "谢谢收看", "謝謝收看", "谢谢观看", "謝謝觀看",
@@ -258,6 +261,8 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
 
 
 def run_microphone(chat: llm.Chat) -> None:
+    global _active_chat
+    _active_chat = chat
     if config.BARGE_IN_ENABLED:
         terminal.warning("插话模式已开启，请使用耳机或带 AEC 的设备")
         _run_barge_in_mic(chat)
@@ -266,6 +271,8 @@ def run_microphone(chat: llm.Chat) -> None:
 
 
 def answer_text(chat: llm.Chat, text: str) -> str:
+    global _active_chat
+    _active_chat = chat
     return _answer(chat, text)
 
 
