@@ -149,8 +149,8 @@ def main() -> None:
             return llm.evaluate_relationship(
                 model,
                 persona.display_name,
-                state.score,
-                state.tier,
+                state.bond,
+                state.level,
                 current_mood,
                 turn.user_text,
                 turn.agent_text,
@@ -177,10 +177,12 @@ def main() -> None:
             else "calm"
         )
         terminal.configure_relationship(
-            relationship_state.score,
-            relationship_state.tier,
+            relationship_state.bond,
+            relationship_state.level,
             initial_mood,
             relationship_state.inner_voice,
+            relationship_state.session_count,
+            relationship_state.event,
         )
         relationship.install(relationship_service)
         relationship_service.start()
@@ -207,7 +209,7 @@ def main() -> None:
                 terminal.day_period(),
                 outfit.label,
                 outfit.description,
-                relationship_tier=state.tier if state is not None else "",
+                relationship_tier=state.level if state is not None else "",
                 mood=current_mood,
                 expression=emotion_service.snapshot().expression if emotion_service is not None else "neutral",
             )
@@ -236,7 +238,7 @@ def main() -> None:
                     persona.display_name,
                     period,
                     relationship_tier=(
-                        relationship_state.tier if relationship_state else ""
+                        relationship_state.level if relationship_state else ""
                     ),
                     repeat_launch=launch_context.repeat_launch,
                     special=launch_context.special_greeting,
@@ -271,7 +273,7 @@ def main() -> None:
                     persona.display_name,
                     terminal.day_period(),
                     relationship_tier=(
-                        relationship_service.state.tier
+                        relationship_service.state.level
                         if relationship_service is not None
                         else ""
                     ),

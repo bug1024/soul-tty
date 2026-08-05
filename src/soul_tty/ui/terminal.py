@@ -30,7 +30,7 @@ _persona: Persona | None = None
 _answer_pending = False
 _answer_has_content = False
 _dashboard: "Dashboard | None" = None
-_relationship_profile: tuple[int, str, str, str] | None = None
+_relationship_profile: tuple[float, str, str, str, int, str] | None = None
 _emotion_service = None
 _launch_context = LaunchContext()
 _outfit_greeting_generator: Callable[[AvatarOutfit], str | None] | None = None
@@ -63,6 +63,25 @@ _MOOD_LABELS: dict[str, str] = {
     "curious": "好奇",
     "happy": "愉悦",
     "calm": "平静",
+}
+
+# 5 维情绪值 → 短中文标签（详情行使用）。
+_EMOTION_DIM_LABELS: dict[str, str] = {
+    "happiness": "愉悦",
+    "calmness": "平静",
+    "curiosity": "好奇",
+    "stress": "压力",
+    "energy": "活力",
+}
+
+# 关系 level 英文 → 中文展示。HUD 内部仍用英文做语义键，仅显示层翻译。
+_RELATIONSHIP_LEVEL_ZH: dict[str, str] = {
+    "stranger": "初识",
+    "acquaintance": "相熟",
+    "familiar": "熟悉",
+    "companion": "亲近",
+    "close": "默契",
+    "bonded": "挚友",
 }
 
 _IDLE_EMOTION_LINES = (
@@ -200,10 +219,10 @@ class Dashboard:
         self.persona = persona
         self.runtime = runtime
         self.state = "idle"
-        self.relationship_score = (
+        self.relationship_bond = (
             _relationship_profile[0] if _relationship_profile is not None else None
         )
-        self.relationship_tier = (
+        self.relationship_level = (
             _relationship_profile[1] if _relationship_profile is not None else ""
         )
         self.relationship_mood = (
@@ -212,11 +231,18 @@ class Dashboard:
         relationship_voice = (
             _relationship_profile[3] if _relationship_profile is not None else ""
         )
+        self.relationship_session_count = (
+            _relationship_profile[4] if _relationship_profile is not None else 0
+        )
+        self.relationship_event = (
+            _relationship_profile[5] if _relationship_profile is not None else ""
+        )
         # 情绪系统：初值从 EmotionService 快照拉一次，
         # 后续由 set_emotion 接收 on_update 回调热更新。
         self.emotion_mood = "calm"
         self.emotion_intensity = 0.0
         self.emotion_expression = "neutral"
+        self.emotion_vector = None
         if _emotion_service is not None:
             try:
                 initial = _emotion_service.snapshot()
@@ -226,8 +252,10 @@ class Dashboard:
                 self.emotion_mood = initial.mood
                 self.emotion_intensity = initial.intensity
                 self.emotion_expression = initial.expression
+                if initial.emotion is not None:
+                    self.emotion_vector = initial.emotion
         self.greeting = relationship_voice or _fallback_greeting(
-            tier=self.relationship_tier,
+            tier=self.relationship_level,
             repeat_launch=_launch_context.repeat_launch,
             special=_launch_context.special_greeting,
         )
@@ -442,13 +470,16 @@ class Dashboard:
             state=self.state,
             greeting=self.greeting,
             status_hint=self.partial_text or self.presence_hint or None,
-            relationship_score=self.relationship_score,
-            relationship_tier=self.relationship_tier,
+            relationship_score=self.relationship_bond,
+            relationship_tier=self.relationship_level,
             show_details=self.show_details,
             quiet_presence=self._idle_emotion_active,
             emotion_mood=self.emotion_mood,
             emotion_intensity=self.emotion_intensity,
             emotion_expression=self.emotion_expression,
+            emotion_vector=self.emotion_vector,
+            relationship_session_count=self.relationship_session_count,
+            relationship_event=self.relationship_event,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -714,16 +745,21 @@ class Dashboard:
 
     def set_relationship(
         self,
-        score: int,
-        tier: str,
+        bond: float,
+        level: str,
         mood: str,
         inner_voice: str = "",
+        *,
+        session_count: int = 0,
+        event: str = "",
     ) -> None:
         """保存旁路结果；画外音只在空闲聆听状态安全切换。"""
         with self._lock:
-            self.relationship_score = score
-            self.relationship_tier = tier
+            self.relationship_bond = bond
+            self.relationship_level = level
             self.relationship_mood = mood
+            self.relationship_session_count = session_count
+            self.relationship_event = event
             if self._idle_emotion_active:
                 self.presence_hint = _idle_presence_hint(
                     mood,
@@ -745,12 +781,13 @@ class Dashboard:
     def set_emotion(self, snap) -> None:
         """保存 EmotionSnapshot；只有安全窗口才触发重绘。
 
-        `snap` 具备以下鸭子类型字段：mood / intensity / expression。
+        `snap` 具备以下鸭子类型字段：mood / intensity / expression / emotion。
         """
         with self._lock:
             self.emotion_mood = snap.mood
             self.emotion_intensity = snap.intensity
             self.emotion_expression = snap.expression
+            self.emotion_vector = getattr(snap, "emotion", None)
             safe_to_refresh = self.state == "listening" and not self.partial_text
             if safe_to_refresh:
                 self.refresh()
@@ -883,14 +920,18 @@ def configure_outfit_greetings(
 
 
 def configure_relationship(
-    score: int | None = None,
-    tier: str = "",
+    bond: float | None = None,
+    level: str = "",
     mood: str = "calm",
     inner_voice: str = "",
+    session_count: int = 0,
+    event: str = "",
 ) -> None:
     global _relationship_profile
     _relationship_profile = (
-        (score, tier, mood, inner_voice) if score is not None else None
+        (bond, level, mood, inner_voice, session_count, event)
+        if bond is not None
+        else None
     )
 
 
@@ -923,10 +964,12 @@ def update_relationship(state, *, mood: str | None = None) -> None:
     if resolved_mood is None:
         resolved_mood = "calm"
     _dashboard.set_relationship(
-        state.score,
-        state.tier,
+        state.bond,
+        state.level,
         resolved_mood,
         state.inner_voice,
+        session_count=state.session_count,
+        event=state.event,
     )
 
 
@@ -1051,7 +1094,15 @@ def day_period(hour: int | None = None) -> str:
 
 
 def _is_close_tier(tier: str) -> bool:
-    return tier in {"亲近", "默契", "灵魂共鸣"}
+    """亲密阶段里"已经建立关系"那一档的判定。
+
+    兼容旧的中文 tier 和新英文 level；中文 key 用 UI 翻译后的标签。
+    """
+    return tier in {
+        "亲近", "默契", "灵魂共鸣",
+        "熟悉", "相熟", "挚友",  # 新 UI 中文标签
+        "familiar", "companion", "close", "bonded",
+    }
 
 
 def _fallback_greeting(
@@ -1082,6 +1133,47 @@ def _fallback_greeting(
         "夜深": ("已经很晚了。", "我就知道，这个时间你还没睡。"),
     }
     return greetings[period][1 if close else 0]
+
+
+def _emotion_detail_text(vector) -> Text:
+    """5 维情绪值 → 单行 dim 文本，给 Tab 详情行使用。"""
+    text = Text(style="dim")
+    if vector is None:
+        return text
+    parts: list[str] = []
+    for dim in ("happiness", "calmness", "curiosity", "stress", "energy"):
+        label = _EMOTION_DIM_LABELS[dim]
+        raw = getattr(vector, dim, None)
+        if raw is None and isinstance(vector, dict):
+            raw = vector.get(dim)
+        if raw is None:
+            continue
+        try:
+            pct = int(round(float(raw) * 100))
+        except (TypeError, ValueError):
+            continue
+        parts.append(f"{label} {pct}")
+    if not parts:
+        return text
+    text.append("  " + " · ".join(parts))
+    return text
+
+
+def _relationship_detail_text(
+    session_count: int,
+    event: str,
+) -> Text:
+    """亲密详情行：关系事件次数 + 最近事件，给 Tab 详情行使用。"""
+    text = Text(style="dim")
+    bits: list[str] = []
+    if session_count > 0:
+        bits.append(f"共 {session_count} 次关系事件")
+    if event:
+        bits.append(f"上次：{event[:20]}")
+    if not bits:
+        bits.append("初次见面")
+    text.append("  " + " · ".join(bits))
+    return text
 
 
 def _idle_emotion_line(mood: str, index: int) -> str:
@@ -1119,13 +1211,16 @@ def _splash_panel(
     state: str = "idle",
     greeting: str | None = None,
     status_hint: str | None = None,
-    relationship_score: int | None = None,
+    relationship_score: float | None = None,
     relationship_tier: str = "",
     show_details: bool = False,
     quiet_presence: bool = False,
     emotion_mood: str = "calm",
     emotion_intensity: float = 0.0,
     emotion_expression: str = "neutral",
+    emotion_vector=None,
+    relationship_session_count: int = 0,
+    relationship_event: str = "",
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -1167,10 +1262,13 @@ def _splash_panel(
     relationship = Text()
     if stage >= 3 and relationship_score is not None:
         relationship.append("♡ ", style=primary)
-        relationship.append("羁绊  ", style="dim")
-        relationship.append(relationship_tier, style=primary)
+        relationship.append("亲密  ", style="dim")
+        relationship.append(_RELATIONSHIP_LEVEL_ZH.get(
+            relationship_tier, relationship_tier
+        ), style=primary)
         if show_details:
-            relationship.append(f"  {relationship_score}/100", style="dim")
+            bond_pct = int(round(float(relationship_score) * 100))
+            relationship.append(f"  {bond_pct}/100", style="dim")
 
     emotion = Text()
     if stage >= 3:
@@ -1183,6 +1281,23 @@ def _splash_panel(
         if emotion_expression == "caring" and show_details:
             emotion.append("  · 关心", style="dim italic")
 
+    # 详情行：5 维情绪 + 亲密进度。空 Text() 渲染时无视觉占位。
+    emotion_detail = (
+        _emotion_detail_text(emotion_vector) if show_details else Text()
+    )
+    relationship_detail = (
+        _relationship_detail_text(relationship_session_count, relationship_event)
+        if show_details
+        else Text()
+    )
+    # Tab 详情模式下隐藏技术栈展开表（人格/大脑/声音/听觉），
+    # 让出空间给情绪与亲密的细化数值。
+    tech_footer = (
+        _technical_profile(persona, runtime, stage, expanded=False)
+        if not show_details
+        else Text()
+    )
+
     details = Group(
         Align.center(title),
         Align.center(greeting_text),
@@ -1191,10 +1306,12 @@ def _splash_panel(
         Align.center(hint),
         Text(""),
         Align.center(emotion),
+        Align.center(emotion_detail),
         Text(""),
         Align.center(relationship),
+        Align.center(relationship_detail),
         Text(""),
-        _technical_profile(persona, runtime, stage, expanded=show_details),
+        Align.center(tech_footer),
     )
     wide_avatar = avatar is not None and _console.width >= 82
     if wide_avatar:

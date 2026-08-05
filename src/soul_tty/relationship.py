@@ -22,16 +22,26 @@ _MECHANISM_VOICE = re.compile(
 )
 
 
-def tier_for(score: int) -> str:
-    if score < 15:
-        return "初识"
-    if score < 35:
-        return "熟悉"
-    if score < 60:
-        return "亲近"
-    if score < 85:
-        return "默契"
-    return "灵魂共鸣"
+_LEVEL_BOUNDARIES: tuple[tuple[float, str], ...] = (
+    (0.0, "stranger"),
+    (0.1, "acquaintance"),
+    (0.3, "familiar"),
+    (0.5, "companion"),
+    (0.7, "close"),
+    (0.9, "bonded"),
+)
+
+
+def level_for(bond: float) -> str:
+    """Bond (0~1) → 英文 level 标签。"""
+    value = max(0.0, min(1.0, float(bond)))
+    label = _LEVEL_BOUNDARIES[0][1]
+    for threshold, name in _LEVEL_BOUNDARIES:
+        if value >= threshold:
+            label = name
+        else:
+            break
+    return label
 
 
 @dataclass(frozen=True)
@@ -42,15 +52,15 @@ class CompletedTurn:
 
 @dataclass(frozen=True)
 class RelationshipState:
-    score: int = 10
+    bond: float = 0.05
     event: str = ""
     inner_voice: str = ""
     session_count: int = 0
     updated_at: str = ""
 
     @property
-    def tier(self) -> str:
-        return tier_for(self.score)
+    def level(self) -> str:
+        return level_for(self.bond)
 
 
 Evaluator = Callable[[RelationshipState, CompletedTurn], dict[str, Any] | None]
@@ -73,20 +83,38 @@ def _state_path(persona_id: str, state_dir: Path) -> Path:
     return state_dir / "relationships" / f"{safe_id}.json"
 
 
+def _clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
 def load_state(path: Path) -> RelationshipState:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        score = min(100, max(0, int(data.get("score", 10))))
-        return RelationshipState(
-            score=score,
-            # 画外音只属于本次会话；关系分数与事件才跨启动保存。
-            event=str(data.get("event", ""))[:80],
-            inner_voice="",
-            session_count=max(0, int(data.get("session_count", 0))),
-            updated_at=str(data.get("updated_at", "")),
-        )
     except (OSError, ValueError, TypeError):
-        return RelationshipState(score=config.RELATIONSHIP_INITIAL_SCORE)
+        return RelationshipState(
+            bond=_clamp_unit(config.RELATIONSHIP_INITIAL_BOND),
+        )
+
+    # 兼容旧字段 score（int 0~100）→ bond（float 0~1），只做内存迁移。
+    if "bond" in data and isinstance(data["bond"], (int, float)):
+        bond = _clamp_unit(float(data["bond"]))
+    elif "score" in data:
+        try:
+            legacy = int(data["score"])
+        except (TypeError, ValueError):
+            legacy = 10
+        bond = _clamp_unit(legacy / 100.0)
+    else:
+        bond = _clamp_unit(config.RELATIONSHIP_INITIAL_BOND)
+
+    return RelationshipState(
+        bond=bond,
+        # 画外音只属于本次会话；bond 与事件才跨启动保存。
+        event=str(data.get("event", ""))[:80],
+        inner_voice="",
+        session_count=max(0, int(data.get("session_count", 0))),
+        updated_at=str(data.get("updated_at", "")),
+    )
 
 
 def save_state(path: Path, state: RelationshipState) -> None:
@@ -109,7 +137,7 @@ def apply_evaluation(
 
     result schema 期望（v1 拆分三路状态）：
     {
-        "relationship_delta": {"score": -2..2},
+        "relationship_delta": {"bond": 0~0.03},
         "emotion_delta":      {happiness/calmness/curiosity/stress/energy: -0.3..+0.3},
         "expression":         "neutral" | "caring",
         "event":              str,
@@ -133,25 +161,33 @@ def apply_evaluation(
     if not math.isfinite(confidence) or confidence < config.RELATIONSHIP_MIN_CONFIDENCE:
         return None
 
-    # 关系 delta：优先 relationship_delta.score；兼容旧的扁平 delta 字段。
+    # 关系 delta：优先 relationship_delta.bond；兼容旧的扁平 delta 字段。
     raw_relationship_delta = result.get("relationship_delta")
     if isinstance(raw_relationship_delta, dict):
-        raw_score_delta = raw_relationship_delta.get("score", 0)
+        raw_bond_delta = raw_relationship_delta.get("bond", 0)
     else:
-        raw_score_delta = result.get("delta", 0)
+        raw_bond_delta = result.get("delta", 0)
     try:
-        score_delta = int(raw_score_delta)
+        bond_delta = float(raw_bond_delta)
     except (TypeError, ValueError):
-        score_delta = 0
-    score_delta = min(
+        bond_delta = 0.0
+    if not math.isfinite(bond_delta):
+        bond_delta = 0.0
+    bond_delta = min(
         config.RELATIONSHIP_MAX_DELTA,
-        max(-config.RELATIONSHIP_MAX_DELTA, score_delta),
+        max(0.0, bond_delta),
     )
+
+    # 边际递减：new = old + delta * (1 - old)。即使 0.9 也不会快速增长。
+    new_bond = _clamp_unit(state.bond + bond_delta * (1.0 - state.bond))
+
     new_relationship = RelationshipState(
-        score=min(100, max(0, state.score + score_delta)),
+        bond=new_bond,
         event=str(result.get("event", ""))[:80],
         inner_voice=_clean_inner_voice(result.get("inner_voice", "")),
-        session_count=state.session_count + 1,
+        # session_count 由 RelationshipService 在每轮评估时统一递增，
+        # apply_evaluation 不再触碰它。
+        session_count=state.session_count,
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
 
@@ -323,31 +359,44 @@ class RelationshipService:
                     continue
                 if self._stop.is_set():
                     return
-                updated_payload = apply_evaluation(current, result)
-                if updated_payload is None:
-                    continue
-                updated = updated_payload["relationship"]
+                # 每轮评估 +1：无论 confidence 够不够，HUD 上的「关系事件」计数都该往上走。
+                incremented = RelationshipState(
+                    bond=current.bond,
+                    event=current.event,
+                    inner_voice=current.inner_voice,
+                    session_count=current.session_count + 1,
+                    updated_at=datetime.now().astimezone().isoformat(
+                        timespec="seconds"
+                    ),
+                )
+                updated_payload = apply_evaluation(incremented, result)
+                final_state = (
+                    updated_payload["relationship"]
+                    if updated_payload is not None
+                    else incremented
+                )
                 try:
-                    save_state(self.path, updated)
+                    save_state(self.path, final_state)
                 except OSError:
                     continue
                 with self._lock:
-                    self.state = updated
+                    self.state = final_state
                 if self.on_update is not None:
                     try:
-                        self.on_update(updated)
+                        self.on_update(final_state)
                     except Exception:
                         pass
-                # Emotion hook
-                emotion = getattr(self, "emotion", None)
-                if emotion is not None:
-                    try:
-                        emotion.apply_delta(
-                            updated_payload["emotion_delta"],
-                            expression_hint=updated_payload["expression"],
-                        )
-                    except Exception:
-                        pass
+                # Emotion hook 仅在 confidence 足够时触发；低 confidence 不污染情绪。
+                if updated_payload is not None:
+                    emotion = getattr(self, "emotion", None)
+                    if emotion is not None:
+                        try:
+                            emotion.apply_delta(
+                                updated_payload["emotion_delta"],
+                                expression_hint=updated_payload["expression"],
+                            )
+                        except Exception:
+                            pass
             finally:
                 self.queue.task_done()
 

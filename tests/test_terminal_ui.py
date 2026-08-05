@@ -203,35 +203,59 @@ class TerminalUITests(unittest.TestCase):
                     persona,
                     runtime,
                     3,
-                    relationship_score=47,
+                    relationship_score=0.47,
                     relationship_tier="亲近",
                 )
             )
 
-        self.assertIn("♡ 羁绊  亲近", output.getvalue())
+        self.assertIn("♡ 亲密  亲近", output.getvalue())
         self.assertNotIn("47", output.getvalue())
 
-    def test_splash_reveals_exact_score_and_technical_profile_in_details(self):
+    def test_splash_reveals_exact_score_and_emotion_dimensions_in_details(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        from soul_tty.emotion.state import EmotionVector
+
+        vector = EmotionVector(
+            happiness=0.82,
+            calmness=0.66,
+            curiosity=0.71,
+            stress=0.18,
+            energy=0.74,
+        )
         with patch.object(terminal, "_console", console):
             console.print(
                 terminal._splash_panel(
                     persona,
                     runtime,
                     3,
-                    relationship_score=47,
+                    relationship_score=0.47,
                     relationship_tier="亲近",
                     show_details=True,
+                    emotion_mood="excited",
+                    emotion_intensity=0.75,
+                    emotion_vector=vector,
+                    relationship_session_count=8,
+                    relationship_event="共同玩笑",
                 )
             )
 
         rendered = output.getvalue()
-        self.assertIn("♡ 羁绊  亲近  47/100", rendered)
-        self.assertIn("人格：Serena", rendered)
-        self.assertIn("听觉：Sherpa-ONNX", rendered)
+        self.assertIn("♡ 亲密  亲近  47/100", rendered)
+        # 5 维情绪数值按 NN 形式展开
+        self.assertIn("愉悦 82", rendered)
+        self.assertIn("平静 66", rendered)
+        self.assertIn("好奇 71", rendered)
+        self.assertIn("压力 18", rendered)
+        self.assertIn("活力 74", rendered)
+        # 亲密进度：关系事件次数 + 上次事件
+        self.assertIn("共 8 次关系事件", rendered)
+        self.assertIn("上次：共同玩笑", rendered)
+        # Tab 详情模式下不再展开技术栈
+        self.assertNotIn("人格：Serena", rendered)
+        self.assertNotIn("听觉：Sherpa-ONNX", rendered)
 
     def test_relationship_voice_waits_until_dashboard_returns_to_listening(self):
         output = io.StringIO()
@@ -252,7 +276,7 @@ class TerminalUITests(unittest.TestCase):
             original = dashboard.greeting
 
             dashboard.set_relationship(
-                47,
+                0.47,
                 "亲近",
                 "warm",
                 "被你惦记着真好。",
@@ -267,7 +291,7 @@ class TerminalUITests(unittest.TestCase):
             dashboard.set_state("listening")
 
         self.assertEqual(dashboard.greeting, "被你惦记着真好。")
-        self.assertEqual(dashboard.relationship_score, 47)
+        self.assertEqual(dashboard.relationship_bond, 0.47)
         self.assertEqual(dashboard._pending_relationship_voice, "")
 
     def test_answer_header_returns_to_fixed_left_indent(self):
@@ -639,7 +663,36 @@ class TerminalUITests(unittest.TestCase):
             [("you", "消息 2"), ("you", "消息 3"), ("you", "消息 4")],
         )
 
-    def test_set_emotion_stores_snapshot_and_respects_safe_window(self):
+    def test_splash_renders_relationship_level_in_chinese(self):
+        """亲密 level 内部用英文键，HUD 展示层翻译为中文。"""
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        cases = [
+            ("stranger", "初识"),
+            ("acquaintance", "相熟"),
+            ("familiar", "熟悉"),
+            ("companion", "亲近"),
+            ("close", "默契"),
+            ("bonded", "挚友"),
+        ]
+        for english, chinese in cases:
+            output = io.StringIO()
+            console = Console(file=output, width=120, force_terminal=False)
+            with patch.object(terminal, "_console", console):
+                console.print(
+                    terminal._splash_panel(
+                        persona,
+                        runtime,
+                        3,
+                        relationship_score=0.5,
+                        relationship_tier=english,
+                    )
+                )
+            self.assertIn(
+                f"♡ 亲密  {chinese}",
+                output.getvalue(),
+                f"english={english!r} should render as {chinese!r}",
+            )
         from soul_tty.emotion.service import EmotionSnapshot
 
         output = io.StringIO()

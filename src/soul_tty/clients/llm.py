@@ -261,8 +261,8 @@ def generate_idle_emotion(
 def evaluate_relationship(
     model: str,
     display_name: str,
-    score: int,
-    tier: str,
+    bond: float,
+    level: str,
     mood: str,
     user_text: str,
     agent_text: str,
@@ -271,13 +271,15 @@ def evaluate_relationship(
 
     输出 schema（拆分三路状态）：
     {
-        "relationship_delta": {"score": -2..2},
+        "relationship_delta": {"bond": 0~0.03},
         "emotion_delta":      {happiness/calmness/curiosity/stress/energy: -0.3..+0.3},
         "expression":         "neutral" | "caring",
         "event":              str,
         "inner_voice":        str,
         "confidence":         0..1,
     }
+
+    bond 是 0~1 浮点数；单次最大增长 0.03，越接近 1 增长越慢。
     """
     payload = {
         "model": config.RELATIONSHIP_LLM_MODEL or model,
@@ -290,7 +292,8 @@ def evaluate_relationship(
                     "判断本轮是否出现关心、信任、真诚分享、共同玩笑、道歉、"
                     "侮辱或反复越界等关系事件。普通问答和观点不同不改变亲密度；"
                     "沉默和离开不扣分。只输出一个 JSON 对象，字段必须是："
-                    "relationship_delta 对象，包含 score 字段（-2 到 2 的整数）；"
+                    "relationship_delta 对象，包含 bond 字段（0 到 0.03 的浮点数，"
+                    "表示本轮对长期关系的小幅增量，越接近 1 增长越慢）；"
                     "emotion_delta 对象，包含 happiness/calmness/curiosity/"
                     "stress/energy 五个维度，每维是 -0.3 到 +0.3 的浮点数；"
                     "expression 字符串，取值为 neutral 或 caring，"
@@ -307,11 +310,11 @@ def evaluate_relationship(
             {
                 "role": "user",
                 "content": (
-                    f"角色：{display_name}\n当前亲密度：{score}\n"
-                    f"当前阶段：{tier}\n当前情绪：{mood}\n\n"
+                    f"角色：{display_name}\n当前羁绊强度：{bond:.2f}\n"
+                    f"当前阶段：{level}\n当前情绪：{mood}\n\n"
                     f"<dialogue>\n用户：{user_text}\n"
                     f"{display_name}：{agent_text}\n</dialogue>\n"
-                    "请同时输出 relationship_delta、emotion_delta、expression。"
+                    "请同时输出 relationship_delta.bond、emotion_delta、expression。"
                 ),
             },
         ],
