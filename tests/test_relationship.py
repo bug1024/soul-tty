@@ -234,3 +234,90 @@ def test_evaluate_relationship_system_prompt_mentions_emotion_delta():
     src = inspect.getsource(llm_mod.evaluate_relationship)
     assert "emotion_delta" in src
     assert "expression" in src
+
+
+# --- Task 13/14: apply_evaluation returns payload + emotion hook ---
+
+def test_apply_evaluation_returns_emotion_payload():
+    from src.soul_tty.relationship import (
+        RelationshipState,
+        apply_evaluation,
+    )
+
+    state = RelationshipState(score=10)
+    result = {
+        "event": "user shared",
+        "delta": 1,
+        "mood": "happy",
+        "inner_voice": "替你高兴",
+        "confidence": 0.85,
+        "emotion_delta": {"happiness": 0.15, "stress": -0.05},
+        "expression": "caring",
+    }
+    payload = apply_evaluation(state, result)
+    assert payload is not None
+    assert payload["relationship"].score == 11
+    assert payload["emotion_delta"] == {"happiness": 0.15, "stress": -0.05}
+    assert payload["expression"] == "caring"
+
+
+def test_relationship_service_calls_emotion_apply():
+    import time
+    import tempfile
+    from src.soul_tty.relationship import RelationshipService
+    from src.soul_tty.emotion.state import EmotionVector
+    from src.soul_tty.emotion.service import EmotionSnapshot
+
+    calls = []
+
+    class FakeEmotion:
+        baseline = EmotionVector(
+            happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+        )
+
+        def apply_delta(self, delta, *, expression_hint="neutral"):
+            calls.append((dict(delta), expression_hint))
+            return EmotionSnapshot(
+                baseline=self.baseline,
+                emotion=self.baseline,
+                mood="calm",
+                intensity=0.5,
+                expression=expression_hint,
+                should_update_prompt=False,
+                context_text="",
+            )
+
+    fake = FakeEmotion()
+
+    def fake_evaluator(state, turn):
+        return {
+            "delta": 1,
+            "mood": "happy",
+            "inner_voice": "替你高兴",
+            "confidence": 0.9,
+            "emotion_delta": {"happiness": 0.1},
+            "expression": "caring",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from pathlib import Path
+        svc = RelationshipService(
+            persona_id="serena",
+            evaluator=fake_evaluator,
+            on_update=None,
+            state_dir=Path(tmp),
+            queue_size=4,
+            idle_delay_s=0.0,
+            min_interval_s=0.0,
+        )
+        svc.emotion = fake
+        svc.start()
+        assert svc.submit("hi", "hello back") is True
+        for _ in range(50):
+            if calls:
+                break
+            time.sleep(0.05)
+        svc.stop()
+        assert len(calls) >= 1
+        assert calls[0][0] == {"happiness": 0.1}
+        assert calls[0][1] == "caring"

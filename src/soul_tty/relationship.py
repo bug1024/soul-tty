@@ -108,7 +108,16 @@ def save_state(path: Path, state: RelationshipState) -> None:
 def apply_evaluation(
     state: RelationshipState,
     result: dict[str, Any] | None,
-) -> RelationshipState | None:
+) -> dict[str, Any] | None:
+    """返回包含 relationship 更新和 emotion_delta 的 payload；confidence 不足则 None。
+
+    返回结构：
+    {
+        "relationship": RelationshipState,
+        "emotion_delta": dict[str, float] | {},
+        "expression": str,
+    }
+    """
     if not isinstance(result, dict):
         return None
     try:
@@ -128,7 +137,7 @@ def apply_evaluation(
     mood = str(result.get("mood", state.mood))
     if mood not in _MOODS:
         mood = state.mood
-    return RelationshipState(
+    new_relationship = RelationshipState(
         score=min(100, max(0, state.score + delta)),
         mood=mood,
         event=str(result.get("event", ""))[:80],
@@ -136,6 +145,28 @@ def apply_evaluation(
         session_count=state.session_count + 1,
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
+
+    # Emotion payload
+    raw_emotion = result.get("emotion_delta") or {}
+    emotion_delta: dict[str, float] = {}
+    if isinstance(raw_emotion, dict):
+        for dim in ("happiness", "calmness", "curiosity", "stress", "energy"):
+            value = raw_emotion.get(dim)
+            if value is None:
+                continue
+            try:
+                emotion_delta[dim] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+    expression_raw = str(result.get("expression", "neutral")).strip().lower()
+    expression = expression_raw if expression_raw in ("neutral", "caring") else "neutral"
+
+    return {
+        "relationship": new_relationship,
+        "emotion_delta": emotion_delta,
+        "expression": expression,
+    }
 
 
 class RelationshipService:
@@ -151,9 +182,11 @@ class RelationshipService:
         queue_size: int | None = None,
         idle_delay_s: float | None = None,
         min_interval_s: float | None = None,
+        emotion: object | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.on_update = on_update
+        self.emotion = emotion
         self.path = _state_path(
             persona_id,
             state_dir or config.SOUL_TTY_STATE_DIR,
@@ -281,9 +314,10 @@ class RelationshipService:
                     continue
                 if self._stop.is_set():
                     return
-                updated = apply_evaluation(current, result)
-                if updated is None:
+                updated_payload = apply_evaluation(current, result)
+                if updated_payload is None:
                     continue
+                updated = updated_payload["relationship"]
                 try:
                     save_state(self.path, updated)
                 except OSError:
@@ -293,6 +327,16 @@ class RelationshipService:
                 if self.on_update is not None:
                     try:
                         self.on_update(updated)
+                    except Exception:
+                        pass
+                # Emotion hook
+                emotion = getattr(self, "emotion", None)
+                if emotion is not None:
+                    try:
+                        emotion.apply_delta(
+                            updated_payload["emotion_delta"],
+                            expression_hint=updated_payload["expression"],
+                        )
                     except Exception:
                         pass
             finally:
