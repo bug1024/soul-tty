@@ -3,6 +3,21 @@
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ..emotion.state import DEFAULT_BASELINE, EmotionVector
+
+
+def _parse_mood_baseline(data: object) -> EmotionVector:
+    if not isinstance(data, dict):
+        return DEFAULT_BASELINE
+    values: dict[str, float] = {}
+    for dim in ("happiness", "calmness", "curiosity", "stress", "energy"):
+        raw = data.get(dim)
+        try:
+            values[dim] = float(raw)
+        except (TypeError, ValueError):
+            values[dim] = getattr(DEFAULT_BASELINE, dim)
+    return EmotionVector(**values)
+
 
 def _text(data: dict[str, Any], key: str, default: str = "") -> str:
     value = data.get(key, default)
@@ -26,6 +41,7 @@ class Personality:
     greeting: str
     farewell: str
     speaking_style: str = ""
+    mood_baseline: EmotionVector | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +213,9 @@ class Persona:
                 greeting=_text(personality_data, "greeting"),
                 farewell=_text(personality_data, "farewell", "再见。"),
                 speaking_style=_text(personality_data, "speaking_style"),
+                mood_baseline=_parse_mood_baseline(
+                    personality_data.get("mood_baseline")
+                ),
             ),
             voice=Voice(
                 backend=backend,

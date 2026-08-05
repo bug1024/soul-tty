@@ -98,3 +98,56 @@ class PersonaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Task 11: Persona mood_baseline ---
+
+from src.soul_tty.emotion.state import EmotionVector, DEFAULT_BASELINE
+
+
+def test_serena_loads_default_mood_baseline():
+    from src.soul_tty.personas.loader import load_persona
+
+    p = load_persona("serena")
+    # Either the explicit baseline or DEFAULT_BASELINE (both are valid)
+    assert p.personality.mood_baseline is not None
+    # serena.yaml sets baseline; verify expected values
+    assert p.personality.mood_baseline.happiness == 0.65
+    assert p.personality.mood_baseline.calmness == 0.75
+
+
+def test_personality_mood_baseline_override():
+    import tempfile
+    from src.soul_tty.personas.loader import load_persona
+
+    with tempfile.TemporaryDirectory() as tmp:
+        yaml_path = type("P", (), {})()  # dummy
+        import pathlib
+        yaml_path = pathlib.Path(tmp) / "test.yaml"
+        yaml_path.write_text(
+            "id: test\nname: Test\ndisplay_name: Test\n"
+            "personality:\n  system_prompt: ok\n"
+            "  mood_baseline:\n    happiness: 0.9\n    calmness: 0.1\n"
+            "    curiosity: 0.5\n    stress: 0.0\n    energy: 1.0\n",
+            encoding="utf-8",
+        )
+        p = load_persona(str(yaml_path))
+        assert p.personality.mood_baseline == EmotionVector(
+            happiness=0.9, calmness=0.1, curiosity=0.5, stress=0.0, energy=1.0
+        )
+
+
+def test_personality_default_baseline_when_missing():
+    import tempfile
+    import pathlib
+    from src.soul_tty.personas.loader import load_persona
+
+    with tempfile.TemporaryDirectory() as tmp:
+        yaml_path = pathlib.Path(tmp) / "test.yaml"
+        yaml_path.write_text(
+            "id: test\nname: Test\ndisplay_name: Test\n"
+            "personality:\n  system_prompt: ok\n",
+            encoding="utf-8",
+        )
+        p = load_persona(str(yaml_path))
+        assert p.personality.mood_baseline == DEFAULT_BASELINE
