@@ -905,15 +905,29 @@ def configure_presence(context: LaunchContext | None = None) -> None:
     _launch_context = context or LaunchContext()
 
 
-def update_relationship(state) -> None:
-    """接收关系 Worker 的鸭子类型状态，避免 UI 依赖旁路实现。"""
-    if _dashboard is not None:
-        _dashboard.set_relationship(
-            state.score,
-            state.tier,
-            state.mood,
-            state.inner_voice,
-        )
+def update_relationship(state, *, mood: str | None = None) -> None:
+    """接收关系 Worker 的鸭子类型状态，避免 UI 依赖旁路实现。
+
+    B 方案后关系状态不再持有 mood；调用方在每次旁路评估完成后，
+    把当前 EmotionService 的 mood 显式传进来，dashboard 仍能据此
+    渲染 idle presence hint。
+    """
+    if _dashboard is None:
+        return
+    resolved_mood = mood
+    if resolved_mood is None and _emotion_service is not None:
+        try:
+            resolved_mood = _emotion_service.snapshot().mood
+        except Exception:
+            resolved_mood = "calm"
+    if resolved_mood is None:
+        resolved_mood = "calm"
+    _dashboard.set_relationship(
+        state.score,
+        state.tier,
+        resolved_mood,
+        state.inner_voice,
+    )
 
 
 def update_emotion(snap) -> None:

@@ -30,17 +30,16 @@ class RelationshipStateTests(unittest.TestCase):
         state = RelationshipState(score=20, session_count=2)
         result = {
             "event": "真诚关心",
-            "delta": 99,
-            "mood": "warm",
+            "relationship_delta": {"score": 99},
             "inner_voice": "被你惦记着真好。",
             "confidence": 0.9,
         }
         with patch.object(config, "RELATIONSHIP_MAX_DELTA", 2):
-            updated = apply_evaluation(state, result)
+            payload = apply_evaluation(state, result)
 
-        self.assertIsNotNone(updated)
+        self.assertIsNotNone(payload)
+        updated = payload["relationship"]
         self.assertEqual(updated.score, 22)
-        self.assertEqual(updated.mood, "warm")
         self.assertEqual(updated.inner_voice, "被你惦记着真好。")
         self.assertEqual(updated.session_count, 3)
 
@@ -55,37 +54,36 @@ class RelationshipStateTests(unittest.TestCase):
     def test_rejects_non_finite_confidence_and_long_voice_over(self):
         state = RelationshipState(score=20)
         self.assertIsNone(
-            apply_evaluation(state, {"delta": 2, "confidence": "nan"})
+            apply_evaluation(
+                state, {"relationship_delta": {"score": 2}, "confidence": "nan"}
+            )
         )
-        updated = apply_evaluation(
+        payload = apply_evaluation(
             state,
             {
-                "delta": 0,
-                "mood": "calm",
+                "relationship_delta": {"score": 0},
                 "inner_voice": "这是一句明显超过界面允许长度的关系画外音文本",
                 "confidence": 0.9,
             },
         )
-        self.assertEqual(updated.inner_voice, "")
+        self.assertEqual(payload["relationship"].inner_voice, "")
 
     def test_rejects_mechanism_language_and_third_person_narration(self):
         state = RelationshipState(score=20)
         for voice in ("关系更甜蜜了。", "亲密度提升了。", "她似乎很开心。"):
-            updated = apply_evaluation(
+            payload = apply_evaluation(
                 state,
                 {
-                    "delta": 0,
-                    "mood": "warm",
+                    "relationship_delta": {"score": 0},
                     "inner_voice": voice,
                     "confidence": 0.9,
                 },
             )
-            self.assertEqual(updated.inner_voice, "")
+            self.assertEqual(payload["relationship"].inner_voice, "")
 
-    def test_persistent_relationship_resets_session_only_emotion_and_voice(self):
+    def test_persistent_relationship_resets_session_only_voice(self):
         state = RelationshipState(
             score=47,
-            mood="shy",
             event="共同玩笑",
             inner_voice="好像更懂你一点了。",
             session_count=8,
@@ -101,9 +99,7 @@ class RelationshipStateTests(unittest.TestCase):
         self.assertEqual(restored.session_count, state.session_count)
         self.assertEqual(restored.event, state.event)
         self.assertEqual(restored.updated_at, state.updated_at)
-        self.assertEqual(restored.mood, "calm")
         self.assertEqual(restored.inner_voice, "")
-        self.assertNotIn("mood", raw)
         self.assertNotIn("inner_voice", raw)
 
 
@@ -119,7 +115,6 @@ class RelationshipServiceTests(unittest.TestCase):
             return {
                 "event": "关心",
                 "delta": 1,
-                "mood": "warm",
                 "inner_voice": "被你惦记着真好。",
                 "confidence": 0.9,
             }
@@ -163,7 +158,6 @@ class RelationshipServiceTests(unittest.TestCase):
             persisted.score,
             config.RELATIONSHIP_INITIAL_SCORE + 2,
         )
-        self.assertEqual(persisted.mood, "calm")
 
     def test_evaluator_failure_is_silently_ignored(self):
         called = threading.Event()
@@ -197,7 +191,6 @@ class RelationshipServiceTests(unittest.TestCase):
             return {
                 "event": "连续交流",
                 "delta": 1,
-                "mood": "happy",
                 "inner_voice": "和你聊得很开心。",
                 "confidence": 0.9,
             }
@@ -227,11 +220,13 @@ if __name__ == "__main__":
 
 # --- Task 12: LLM prompt schema ---
 
-def test_evaluate_relationship_system_prompt_mentions_emotion_delta():
+def test_evaluate_relationship_system_prompt_declares_three_state_lanes():
     from src.soul_tty.clients import llm as llm_mod
     import inspect
 
     src = inspect.getsource(llm_mod.evaluate_relationship)
+    # 三路状态拆分：relationship_delta / emotion_delta / expression
+    assert "relationship_delta" in src
     assert "emotion_delta" in src
     assert "expression" in src
 
@@ -247,8 +242,7 @@ def test_apply_evaluation_returns_emotion_payload():
     state = RelationshipState(score=10)
     result = {
         "event": "user shared",
-        "delta": 1,
-        "mood": "happy",
+        "relationship_delta": {"score": 1},
         "inner_voice": "替你高兴",
         "confidence": 0.85,
         "emotion_delta": {"happiness": 0.15, "stress": -0.05},
@@ -291,8 +285,7 @@ def test_relationship_service_calls_emotion_apply():
 
     def fake_evaluator(state, turn):
         return {
-            "delta": 1,
-            "mood": "happy",
+            "relationship_delta": {"score": 1},
             "inner_voice": "替你高兴",
             "confidence": 0.9,
             "emotion_delta": {"happiness": 0.1},

@@ -139,27 +139,47 @@ def main() -> None:
             state: relationship.RelationshipState,
             turn: relationship.CompletedTurn,
         ) -> dict | None:
+            # 当前 mood 由 EmotionService 持有；评估时把它的快照喂给 LLM
+            # 当 prompt context，让打分参考 Soul 的真实情绪状态。
+            current_mood = (
+                emotion_service.snapshot().mood
+                if emotion_service is not None
+                else "calm"
+            )
             return llm.evaluate_relationship(
                 model,
                 persona.display_name,
                 state.score,
                 state.tier,
-                state.mood,
+                current_mood,
                 turn.user_text,
                 turn.agent_text,
             )
 
+        def on_relationship_update(state) -> None:
+            current_mood = (
+                emotion_service.snapshot().mood
+                if emotion_service is not None
+                else "calm"
+            )
+            terminal.update_relationship(state, mood=current_mood)
+
         relationship_service = relationship.RelationshipService(
             persona.id,
             evaluate,
-            terminal.update_relationship,
+            on_relationship_update,
             emotion=emotion_service,
         )
         relationship_state = relationship_service.state
+        initial_mood = (
+            emotion_service.snapshot().mood
+            if emotion_service is not None
+            else "calm"
+        )
         terminal.configure_relationship(
             relationship_state.score,
             relationship_state.tier,
-            relationship_state.mood,
+            initial_mood,
             relationship_state.inner_voice,
         )
         relationship.install(relationship_service)
@@ -176,6 +196,11 @@ def main() -> None:
                 if relationship_service is not None
                 else None
             )
+            current_mood = (
+                emotion_service.snapshot().mood
+                if emotion_service is not None
+                else "calm"
+            )
             return llm.generate_outfit_greeting(
                 model,
                 persona.display_name,
@@ -183,7 +208,7 @@ def main() -> None:
                 outfit.label,
                 outfit.description,
                 relationship_tier=state.tier if state is not None else "",
-                mood=state.mood if state is not None else "calm",
+                mood=current_mood,
                 expression=emotion_service.snapshot().expression if emotion_service is not None else "neutral",
             )
 
@@ -236,6 +261,11 @@ def main() -> None:
                 ):
                     return None
                 last_idle_llm_at = now
+                current_mood = (
+                    emotion_service.snapshot().mood
+                    if emotion_service is not None
+                    else "calm"
+                )
                 return llm.generate_idle_emotion(
                     model,
                     persona.display_name,
@@ -245,11 +275,7 @@ def main() -> None:
                         if relationship_service is not None
                         else ""
                     ),
-                    mood=(
-                        relationship_service.state.mood
-                        if relationship_service is not None
-                        else "calm"
-                    ),
+                    mood=current_mood,
                     expression=emotion_service.snapshot().expression if emotion_service is not None else "neutral",
                 )
 

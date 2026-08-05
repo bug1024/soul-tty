@@ -17,7 +17,6 @@ from . import config
 
 _STOP = object()
 _SAFE_ID = re.compile(r"[^0-9A-Za-z_.-]+")
-_MOODS = {"calm", "happy", "shy", "concerned", "upset", "warm"}
 _MECHANISM_VOICE = re.compile(
     r"(?:亲密度|关系|好感度|加分|扣分|分数|等级|阶段|事件|提升|下降|进度|她)"
 )
@@ -44,7 +43,6 @@ class CompletedTurn:
 @dataclass(frozen=True)
 class RelationshipState:
     score: int = 10
-    mood: str = "calm"
     event: str = ""
     inner_voice: str = ""
     session_count: int = 0
@@ -81,8 +79,7 @@ def load_state(path: Path) -> RelationshipState:
         score = min(100, max(0, int(data.get("score", 10))))
         return RelationshipState(
             score=score,
-            # 情绪与画外音只属于本次会话；关系分数和阶段才跨启动保存。
-            mood="calm",
+            # 画外音只属于本次会话；关系分数与事件才跨启动保存。
             event=str(data.get("event", ""))[:80],
             inner_voice="",
             session_count=max(0, int(data.get("session_count", 0))),
@@ -96,7 +93,6 @@ def save_state(path: Path, state: RelationshipState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     durable = asdict(state)
-    durable.pop("mood", None)
     durable.pop("inner_voice", None)
     temporary.write_text(
         json.dumps(durable, ensure_ascii=False, indent=2) + "\n",
@@ -111,11 +107,21 @@ def apply_evaluation(
 ) -> dict[str, Any] | None:
     """返回包含 relationship 更新和 emotion_delta 的 payload；confidence 不足则 None。
 
+    result schema 期望（v1 拆分三路状态）：
+    {
+        "relationship_delta": {"score": -2..2},
+        "emotion_delta":      {happiness/calmness/curiosity/stress/energy: -0.3..+0.3},
+        "expression":         "neutral" | "caring",
+        "event":              str,
+        "inner_voice":        str,
+        "confidence":         0..1,
+    }
+
     返回结构：
     {
         "relationship": RelationshipState,
         "emotion_delta": dict[str, float] | {},
-        "expression": str,
+        "expression":   str,
     }
     """
     if not isinstance(result, dict):
@@ -126,20 +132,23 @@ def apply_evaluation(
         return None
     if not math.isfinite(confidence) or confidence < config.RELATIONSHIP_MIN_CONFIDENCE:
         return None
+
+    # 关系 delta：优先 relationship_delta.score；兼容旧的扁平 delta 字段。
+    raw_relationship_delta = result.get("relationship_delta")
+    if isinstance(raw_relationship_delta, dict):
+        raw_score_delta = raw_relationship_delta.get("score", 0)
+    else:
+        raw_score_delta = result.get("delta", 0)
     try:
-        delta = int(result.get("delta", 0))
+        score_delta = int(raw_score_delta)
     except (TypeError, ValueError):
-        delta = 0
-    delta = min(
+        score_delta = 0
+    score_delta = min(
         config.RELATIONSHIP_MAX_DELTA,
-        max(-config.RELATIONSHIP_MAX_DELTA, delta),
+        max(-config.RELATIONSHIP_MAX_DELTA, score_delta),
     )
-    mood = str(result.get("mood", state.mood))
-    if mood not in _MOODS:
-        mood = state.mood
     new_relationship = RelationshipState(
-        score=min(100, max(0, state.score + delta)),
-        mood=mood,
+        score=min(100, max(0, state.score + score_delta)),
         event=str(result.get("event", ""))[:80],
         inner_voice=_clean_inner_voice(result.get("inner_voice", "")),
         session_count=state.session_count + 1,
