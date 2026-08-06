@@ -1159,6 +1159,9 @@ def _emotion_detail_text(vector) -> Text:
     return text
 
 
+_RELATIONSHIP_EVENT_DISPLAY_MAX = 40
+
+
 def _relationship_detail_text(
     interaction_count: int,
     recent_events: tuple[str, ...],
@@ -1166,13 +1169,18 @@ def _relationship_detail_text(
     """亲密详情行：关系事件次数 + 最近事件，给 Tab 详情行使用。
 
     默认只显示最近一次；超过 1 条时把更早的事件用「此前：N 次」汇总。
+    最近事件最多显示 40 字（事件存储上限是 80 字），极长事件由 Rich
+    的 overflow="ellipsis" 自动折叠成省略号，避免单行被拉爆。
     """
-    text = Text(style="dim")
+    text = Text(style="dim", no_wrap=True, overflow="ellipsis")
     bits: list[str] = []
     if interaction_count > 0:
         bits.append(f"共 {interaction_count} 次关系事件")
     if recent_events:
-        bits.append(f"上次：{recent_events[-1][:20]}")
+        last_event = recent_events[-1]
+        truncated = last_event[:_RELATIONSHIP_EVENT_DISPLAY_MAX]
+        suffix = "…" if len(last_event) > _RELATIONSHIP_EVENT_DISPLAY_MAX else ""
+        bits.append(f"上次：{truncated}{suffix}")
         if len(recent_events) > 1:
             bits.append(f"此前：{len(recent_events) - 1} 次")
     if not bits:

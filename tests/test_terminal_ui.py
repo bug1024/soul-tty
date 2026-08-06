@@ -719,5 +719,72 @@ class TerminalUITests(unittest.TestCase):
         self.assertEqual(dashboard.emotion_expression, "caring")
 
 
+class RelationshipDetailTextTests(unittest.TestCase):
+    """Tab 详情模式下的关系事件显示：避免硬截断吞掉事件内容。"""
+
+    def test_short_event_shown_fully(self):
+        """短事件（≤40 字）原样显示，不加省略号。"""
+        text = terminal._relationship_detail_text(
+            interaction_count=3,
+            recent_events=("共同玩笑",),
+        )
+        self.assertIn("上次：共同玩笑", text.plain)
+        self.assertNotIn("…", text.plain)
+
+    def test_medium_event_shown_fully(self):
+        """中等长度事件（接近 40 字）应当完整显示，不再被硬截断到 20 字。"""
+        event = "她认真听完你说的话并给出了真诚的回应"  # 19 字
+        text = terminal._relationship_detail_text(
+            interaction_count=5,
+            recent_events=(event,),
+        )
+        self.assertIn(f"上次：{event}", text.plain)
+        self.assertNotIn("…", text.plain)
+
+    def test_long_event_truncated_at_40_with_ellipsis(self):
+        """超过 40 字的事件显示前 40 字 + 省略号，避免单行被拉爆。
+
+        事件存储上限 80 字（apply_evaluation 里），detail 显示最多 40 字。
+        """
+        long_event = (
+            "她陪你梳理了那段过去很久的事情，"
+            "并且在你讲到一半的时候给了恰到好处的停顿，"
+            "让你有空间把整段话说完。"
+        )  # 47 字，超过 40 字
+        text = terminal._relationship_detail_text(
+            interaction_count=10,
+            recent_events=("先前事件", long_event),
+        )
+        self.assertIn(f"上次：{long_event[:40]}…", text.plain)
+        self.assertIn("此前：1 次", text.plain)
+
+    def test_first_meeting_fallback(self):
+        """无事件时显示「初次见面」兜底。"""
+        text = terminal._relationship_detail_text(
+            interaction_count=0,
+            recent_events=(),
+        )
+        self.assertIn("初次见面", text.plain)
+
+    def test_event_at_exact_40_chars_not_truncated(self):
+        """恰好 40 字事件不应被截断或加省略号。"""
+        event = "啊" * 40
+        text = terminal._relationship_detail_text(
+            interaction_count=1,
+            recent_events=(event,),
+        )
+        self.assertIn(f"上次：{event}", text.plain)
+        self.assertNotIn("…", text.plain)
+
+    def test_no_wrap_set_on_detail_text(self):
+        """Text 必须声明 no_wrap=True，否则 Rich 在窄终端上可能把整行换行。"""
+        text = terminal._relationship_detail_text(
+            interaction_count=1,
+            recent_events=("共同玩笑",),
+        )
+        self.assertTrue(text.no_wrap)
+        self.assertEqual(text.overflow, "ellipsis")
+
+
 if __name__ == "__main__":
     unittest.main()
