@@ -427,6 +427,59 @@ def test_should_update_prompt_on_mood_change():
     assert isinstance(snap.should_update_prompt, bool)
 
 
+def test_should_update_prompt_on_expression_change():
+    """spec §6.4：expression 标签变化（默认 → caring）必须触发 prompt 更新。
+
+    与 mood / intensity 完全无关：哪怕 emotion 没动，只要表达方式切换，
+    也应当让 Chat.update_system_prompt 把新段落写入活跃会话。
+    """
+    from src.soul_tty.emotion.service import EmotionService
+
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    # 基准：先做一次无变化的对齐，prev_* = mood=calm / intensity=0.5 / expression=neutral
+    svc.apply_delta({}, expression_hint="neutral")
+    # 现在只切 expression；mood 仍然是 calm、intensity 变化远小于 0.1
+    snap = svc.apply_delta({}, expression_hint="caring")
+    assert snap.should_update_prompt is True
+
+
+def test_should_update_prompt_stable_when_no_change():
+    """同 expression + 微弱 intensity 变化 → 不应触发。"""
+    from src.soul_tty.emotion.service import EmotionService
+
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.2,
+        delta_cap=0.3,
+        decay_rate=0.05,
+        intensity_update_threshold=0.1,
+    )
+    svc.apply_delta({}, expression_hint="neutral")
+    # 极小 delta → happiness 0.5 → 0.51；intensity 仍 0.5；mood 仍 calm；expression 仍 neutral
+    snap = svc.apply_delta({"happiness": 0.05}, expression_hint="neutral")
+    assert snap.should_update_prompt is False
+
+
 # --- Task 18: End-to-end smoke test ---
 
 def test_end_to_end_prompt_composition():

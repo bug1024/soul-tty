@@ -69,6 +69,8 @@ class EmotionService:
         )
         self._expression = "neutral"
         self._prev_mood, self._prev_intensity = resolver.resolve_mood(self._emotion)
+        # spec §6.4：mood / intensity / expression 任一变化都触发 prompt 热更新。
+        self._prev_expression = "neutral"
         self._lock = threading.RLock()
         self._last_activity = time.monotonic()
         self._stop = threading.Event()
@@ -81,7 +83,7 @@ class EmotionService:
     def snapshot(self) -> EmotionSnapshot:
         with self._lock:
             mood, intensity = resolver.resolve_mood(self._emotion)
-            should_update = self._should_update(mood, intensity)
+            should_update = self._should_update(mood, intensity, self._expression)
             return EmotionSnapshot(
                 baseline=self.baseline,
                 emotion=self._emotion,
@@ -121,12 +123,16 @@ class EmotionService:
                     pass
             self._prev_mood = snap.mood
             self._prev_intensity = snap.intensity
+            self._prev_expression = snap.expression
             return snap
 
-    def _should_update(self, mood: str, intensity: float) -> bool:
+    def _should_update(self, mood: str, intensity: float, expression: str) -> bool:
+        """spec §6.4：mood 切换 / |Δintensity|>阈值 / expression 切换 任一即触发。"""
         if mood != self._prev_mood:
             return True
         if abs(intensity - self._prev_intensity) > self._intensity_threshold:
+            return True
+        if expression != self._prev_expression:
             return True
         return False
 
@@ -175,6 +181,7 @@ class EmotionService:
                     pass
             self._prev_mood = snap.mood
             self._prev_intensity = snap.intensity
+            self._prev_expression = snap.expression
 
     def stop(self) -> None:
         self._stop.set()
