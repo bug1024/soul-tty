@@ -55,7 +55,7 @@ Soul-TTY 把两个意向并置：
 | **本地人格系统** | ✅ | YAML 描述人格、台词、形象、TTS 语气；不锁死，可热加载 |
 | **动态口型** | ✅ | 闭嘴 / 半开双缓存图，由实际播放 PCM 音量驱动切换 |
 | **动态台词** | ✅ | 启动欢迎、换装语、长时间安静后的陪伴短句均由 LLM 实时生成，超时回退本地短句 |
-| **会话记忆** | 🚧 | 当前只有单次会话的短期上下文；跨会话记忆将作为独立的 Memory Layer 实现 |
+| **会话记忆** | ✅ | 画像 / 偏好 / 经历三层分离，异步抽取 + 常驻段 + 按需召回 |
 | **全双工语音打断** | 🚧 | 实验开关 `BARGE_IN_ENABLED=1`；完整 AEC 状态机尚未稳定 |
 
 ---
@@ -101,26 +101,34 @@ Soul-TTY 把两个意向并置：
                      ▼
         ┌────────────────────────┐
         │    Reflection Brain    │  异步旁路：单 worker · 合并多轮 · 限频
-        │       (Async)          │
-        └──────┬─────────┬───────┘
+        │       (Async)          │  关系评估 → 记忆抽取 → 情绪更新（串行）
+        └──────┬──────────┬──────┘
                │         │
-               ▼         ▼
-     ┌──────────────┐  ┌──────────────────┐
-     │ Bond System  │  │  Emotion System  │   State Layer
-     │  长期 · 标量  │  │  短期 · 五维向量   │
-     │  跨启动持久化 │  │  会话内演化 + 衰减 │
-     └──────┬───────┘  └────────┬─────────┘
-            │                   │
-            └─────────┬─────────┘
-                      ▼
-        ┌────────────────────────┐
-        │   Expression Layer     │  表达层：把内部状态翻译成"怎么说话"
-        │  ───────────────────── │  Implemented:
-        │                        │  · system prompt 的 Emotion Context
-        │                        │  · TTS 语气指令
-        │                        │  Planned:
-        │                        │  · Avatar 表情与口型
-        └────────────────────────┘
+               ▼         │
+     ┌──────────────┐    │
+     │ Bond System  │    │
+     │  长期 · 标量  │    │
+     │  跨启动持久化 │    │
+     └──────┬───────┘    │
+            │            │
+            ▼            ▼
+     ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐
+     │ Memory Layer │  │  Emotion System  │  │   State Layer
+     │  三层分离     │  │  短期 · 五维向量   │  │
+     │  画像/偏好/经历│  │  会话内演化 + 衰减 │  │
+     └──────┬───────┘  └────────┬─────────┘  │
+            │                    │            │
+            └──────────┬─────────┘            │
+                       ▼                      │
+         ┌────────────────────────┐            │
+         │   Expression Layer     │◄───────────┘
+         │  ───────────────────── │
+         │  · [User Context] 常驻  │
+         │  · [Relevant Memories]  │
+         │  · Emotion Context      │
+         │  · TTS 语气指令         │
+         │  · Avatar 表情与口型 🚧 │
+         └────────────────────────┘
 ```
 
 ### 四层职责
@@ -128,13 +136,13 @@ Soul-TTY 把两个意向并置：
 | 层 | 职责 | 时延要求 |
 |---|---|---|
 | **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
-| **Reflection Brain** | 状态演化；异步、可合并、可丢弃 | 不阻塞对话 |
-| **State Layer** | Bond（跨启动持久化）+ Emotion（单次会话） | 无实时要求 |
-| **Expression Layer** | 状态 → 可感知表现；只在听 / 播 / 写三个安全时机刷新 | 安全时机 |
+| **Reflection Brain** | 关系评估 + 记忆抽取 + 情绪更新，串行；异步、可合并、可丢弃 | 不阻塞对话 |
+| **State Layer** | Bond（跨启动持久化）+ Emotion（单次会话）+ Memory（跨会话持久化） | 无实时要求 |
+| **Expression Layer** | 状态 → 可感知表现；[User Context] 常驻段 + [Relevant Memories] 临时段 + Emotion Context + TTS 语气 | 安全时机 |
 
 ### 为什么 Reflection 不在主路径上
 
-主对话只向一个有界内存队列投递 `(user_text, agent_text)`，随后立刻返回。后台单 worker 在用户空闲窗口 + 限频条件下把多轮合并成一次 LLM 调用。投递失败、LLM 失败、低 confidence、队列满，任何一种情况都只让状态保持不变——对话本身永远不受影响。
+主对话只向一个有界内存队列投递 `(user_text, agent_text)`，随后立刻返回。后台单 worker 在用户空闲窗口 + 限频条件下把多轮合并成一次 LLM 调用。关系评估、记忆抽取、情绪更新三者串行执行，共享同一个 idle 窗口和限频规则。投递失败、LLM 失败、低 confidence、队列满，任何一种情况都只让状态保持不变——对话本身永远不受影响。
 
 ### 为什么 Expression 是独立一层
 
@@ -150,7 +158,7 @@ Expression 是 *状态 → 表现* 的纯映射层，不持有任何状态：
 - **Emotion** 回答 *"我现在感觉怎么样？"* — 短期内部状态，单次会话内演化，随空闲衰减回归 baseline，默认不跨启动。
 - **Memory** 回答 *"之前发生过什么？"* — 长期经验沉淀，跨会话累积。
 
-两者时间尺度不同、存储位置不同、注入 LLM 的时机也不同：Emotion 实时热更新进 prompt，Memory 按上下文预算选择性注入。同理，**Bond 不能代替 Memory，Memory 也不能直接改写 Bond 或 Emotion**。
+两者时间尺度不同、存储位置不同、注入 LLM 的时机也不同：Emotion 实时热更新进 prompt，Memory 按阈值选择性注入（画像/偏好常驻、经历按需召回）。**Bond 不能代替 Memory，Memory 也不能直接改写 Bond 或 Emotion**。三者构成完整的状态三角：Bond 衡量关系深度，Emotion 反映当下心情，Memory 沉淀过往经验。
 
 ---
 
@@ -263,7 +271,132 @@ bond ← bond + delta × (1 - bond)
 
 ---
 
-## 7. Outfit & Modes
+## 7. Memory System
+
+### Concept
+
+Memory 回答 *"之前发生过什么？"* — 跨会话累积用户画像、交流偏好与共同经历，让 Agent 能在新一轮对话中"记得"你。它不是简单地把历史对话原文倒进 prompt，而是**抽取 → 存储 → 按需注入**：
+
+- 画像（profile）和偏好（preference）常驻 system prompt，作为 [User Context] 段落；
+- 经历（experience）只在用户提起过去相关话题时按需检索召回，作为临时 [Relevant Memories] 段注入。
+
+### Three Types
+
+| 类型 | 作用域 | 含义 | 示例 |
+|---|---|---|---|
+| **profile**（用户画像） | global | 关于用户的客观事实 | "用户是一名 AI 应用开发者，正在做终端语音助手项目" |
+| **preference**（交流偏好） | global | 用户喜欢怎样的交流方式 | "用户喜欢简洁直接的回复，不喜欢太长的解释" |
+| **experience**（共同经历） | persona | 用户与某个 Agent 的共同经历 | "用户和 Serena 聊过她的项目，Serena 给了架构建议" |
+
+**作用域隔离：** profile 和 preference 是 global 的——换人格依然有效。experience 绑定 persona——换人格不会继承上一人格的共同经历。
+
+### Extraction
+
+记忆抽取由 Reflection Worker 在后台异步完成，与关系评估、情绪更新串行执行：
+
+```
+Conversation Brain 投递 (user_text, agent_text)
+         │
+         ▼
+Reflection Worker 空闲窗口 + 限频（默认 120 秒）
+         │
+         ▼ 多轮合并为一次 LLM 调用
+extract_memories(model, known_facts, user_text, agent_text)
+         │
+         ▼ 返回 {memories: [{type, content, importance}]}
+service.remember_many(...)
+         │
+         ▼ 去重、门槛过滤、写入 SQLite
+```
+
+- **已知信息回灌：** 抽取时把已有记忆作为 `known_facts` 拼入 prompt，引导 LLM"只提取新的事实"，避免重复。
+- **静默降级：** LLM 调用失败、低 confidence、队列满都只让该轮不抽取，不阻塞对话。
+- **去重：** 新记忆与同类已有记忆的 bigram 重叠超过 0.8 则跳过。
+
+### Recall
+
+当用户说起"还记得之前那个……"时，Memory 系统按需检索相关经历：
+
+```
+用户："还记得我上次说的那个 AI 项目吗？"
+         │
+         ▼ 命中召回关键词（"还记得""之前""上次"等）
+is_recall_query → True
+         │
+         ▼ 按 persona 检索 experience 表
+search(query, memories)
+         │
+         ▼ bigram 相关性 > 0.2 门槛
+         ▼ 综合分排序取 top 3
+render_recall → [Relevant Memories] 段落
+         │
+         ▼ 作为临时 system message 注入本轮对话
+```
+
+**为什么不一直注入所有记忆？** 上下文窗口有限。常驻段只保留最重要的画像和偏好（默认最多 12 条），经历仅在用户主动提起时检索。检索不到时也不注入——宁可安静，也不错误唤起记忆。
+
+**检索算法：** V1 使用字符 bigram 重叠（零依赖），不引入 embedding 模型。V2 可替换为向量余弦而调用方不变。
+
+### Resident Context
+
+画像和偏好常驻在 system prompt 的 [User Context] 段落：
+
+```
+[User Context]
+关于用户：
+- 用户是一名 AI 应用开发者，正在做终端语音助手项目
+
+交流偏好：
+- 用户喜欢简洁直接的回复
+- 用户偏好中文交流
+```
+
+### CLI Management
+
+`soul-tty memory` 子命令提供运行时查看和管理：
+
+```bash
+# 列出全部记忆（按类型分组）
+uv run soul-tty memory
+
+# 按类型过滤
+uv run soul-tty memory list --type profile
+
+# 查看单条详情
+uv run soul-tty memory show 1
+
+# 删除单条
+uv run soul-tty memory forget 1
+
+# 清空全部（需二次确认）
+uv run soul-tty memory clear
+```
+
+### Design Principles
+
+- **Memory 不是控制权：** 它只向 Prompt 提供信息，不修改 Bond、Emotion 或任何其他状态。
+- **宁可不说，也不要说错：** 检索不到记忆时直接返回空——错误唤起比不唤起更糟糕。
+- **旁路写入：** 抽取永远是异步的，队列满、LLM 失败都不影响主对话。
+- **降级透明：** SQLite 打不开、文件损坏时 `available = False`，所有方法静默返回空值，行为与 `MEMORY_ENABLED=0` 一致。
+
+<details>
+<summary><b>Technical details</b></summary>
+
+- 实现位于 `src/soul_tty/memory/`：`models.py`（数据模型）、`store.py`（SQLite 存储）、`service.py`（业务装配）、`extractor.py`（LLM 抽取）、`retriever.py`（bigram 检索）、`prompt.py`（文本渲染）、`cli.py`（管理子命令）。
+- 存储使用 SQLite WAL 模式，每次操作新开连接后关闭，彻底避免线程安全。
+- 抽取间隔 `MEMORY_MIN_INTERVAL_S` 默认 120 秒，窗口内多轮合并为一次调用。
+- 单条记忆 importance 下限 `MEMORY_MIN_IMPORTANCE` 默认 0.7（0~1 标度）。
+- 去重阈值 `MEMORY_DEDUPE_THRESHOLD` 默认 0.8（bigram Jaccard 变体）。
+- 常驻上限 `MEMORY_MAX_RESIDENT` 默认 12 条。
+- 召回 top-k `MEMORY_RECALL_TOP_K` 默认 3 条。
+- 召回相关性门槛 `MEMORY_RECALL_MIN_RELEVANCE` 默认 0.2。
+- 时间衰减半衰期 `MEMORY_RECENCY_HALFLIFE_DAYS` 默认 180 天。
+
+</details>
+
+---
+
+## 8. Outfit & Modes
 
 换装不只是换一张图（运行截图见文首）。每个套装标注一个 `mode`，这个 mode 决定情绪系统如何解释"现在是哪种陪伴状态"：
 
@@ -279,7 +412,7 @@ bond ← bond + delta × (1 - bond)
 
 ---
 
-## 8. Technical Implementation
+## 9. Technical Implementation
 
 ```
 麦克风 (16kHz mono PCM)
@@ -321,6 +454,7 @@ bond ← bond + delta × (1 - bond)
        ▼
 ┌─ Reflection Brain ──────────────────────────────┐
 │  RelationshipService（bond · 单 worker · 合并评估）│
+│  MemoryService（三层记忆 · 异步抽取 · 按需召回）   │
 │  EmotionService（五维向量 · 平滑 · 空闲衰减）      │
 └─────────────────────────────────────────────────┘
 ```
@@ -329,7 +463,7 @@ bond ← bond + delta × (1 - bond)
 
 ---
 
-## 9. Project Structure
+## 10. Project Structure
 
 ```text
 src/soul_tty/
@@ -345,6 +479,14 @@ src/soul_tty/
 │   ├── resolver.py       #   收敛合法 Mood / Expression
 │   ├── prompt_builder.py #   向量 → 注入 LLM 的 context 文本
 │   └── updater.py        #   节流更新（强度阈值）
+├── memory/               # 长期记忆系统
+│   ├── models.py         #   Memory 数据模型（三类记忆、两种作用域）
+│   ├── store.py          #   SQLite 存储（WAL、每操作新连接）
+│   ├── service.py        #   MemoryService 业务装配
+│   ├── extractor.py      #   LLM 记忆抽取器
+│   ├── retriever.py      #   bigram 相关性检索
+│   ├── prompt.py         #   记忆 → 文本渲染（常驻 / 召回）
+│   └── cli.py            #   管理子命令 list/show/forget/clear
 ├── audio/                # 录音 + sherpa-onnx ASR + MLX TTS
 ├── clients/llm.py        # OpenAI 兼容 LLM 客户端
 ├── personas/             # YAML 人格加载、校验、运行时应用
@@ -360,7 +502,7 @@ docs/                     # 设计稿、规划文档
 
 ---
 
-## 10. Installation
+## 11. Installation
 
 ### 前置依赖
 
@@ -397,7 +539,7 @@ uv run soul-tty
 
 ---
 
-## 11. Configuration
+## 12. Configuration
 
 所有配置项都通过环境变量覆盖，完整默认值见 [`src/soul_tty/config.py`](./src/soul_tty/config.py)。
 
@@ -433,6 +575,21 @@ uv run soul-tty
 | Bond | `RELATIONSHIP_LLM_URL` | 同 `LLM_URL` | 评估服务；可指向独立小模型 |
 | Bond | `RELATIONSHIP_IDLE_DELAY_S` | `3` | 回答结束后等用户空闲多久再评估 |
 | Bond | `RELATIONSHIP_MIN_INTERVAL_S` | `60` | 两次评估最小间隔（窗口内多轮合并） |
+| Memory | `MEMORY_ENABLED` | `1` | 关闭后完全不抽取、不检索、不注入 |
+| Memory | `MEMORY_DB_PATH` | `~/.local/state/soul-tty/memory.db` | SQLite 存储路径 |
+| Memory | `MEMORY_LLM_URL` | 同 `AUX_LLM_URL` | 抽取服务；可指向独立小模型 |
+| Memory | `MEMORY_LLM_MODEL` | 同 `AUX_LLM_MODEL` | 抽取模型 id |
+| Memory | `MEMORY_LLM_TIMEOUT` | `8` | 抽取请求超时（秒） |
+| Memory | `MEMORY_LLM_MAX_TOKENS` | `256` | 抽取响应最大 token 数 |
+| Memory | `MEMORY_MIN_INTERVAL_S` | `120` | 两次抽取最小间隔（窗口内多轮合并） |
+| Memory | `MEMORY_BUFFER_TURNS` | `20` | 抽取缓冲区最大轮数 |
+| Memory | `MEMORY_MIN_TEXT_CHARS` | `20` | 用户文本不足此字符数时不触发抽取 |
+| Memory | `MEMORY_MIN_IMPORTANCE` | `0.7` | 记忆重要度下限（0~1，低于此丢弃） |
+| Memory | `MEMORY_DEDUPE_THRESHOLD` | `0.8` | 去重 bigram 重叠阈值 |
+| Memory | `MEMORY_MAX_RESIDENT` | `12` | 常驻 system prompt 的 global 记忆上限 |
+| Memory | `MEMORY_RECALL_TOP_K` | `3` | 每次召回返回最多条数 |
+| Memory | `MEMORY_RECALL_MIN_RELEVANCE` | `0.2` | 召回相关性门槛 |
+| Memory | `MEMORY_RECENCY_HALFLIFE_DAYS` | `180` | 记忆时间衰减半衰期（天） |
 | Emotion | `EMOTION_ENABLED` | `1` | 关闭则情绪系统不启动 |
 | Emotion | `EMOTION_EMA_RATE` | `0.2` | 平滑率 |
 | Emotion | `EMOTION_DECAY_INTERVAL_S` | `300` | 空闲衰减间隔（秒） |
@@ -440,7 +597,7 @@ uv run soul-tty
 | Emotion | `EMOTION_PERSIST` | `0` | 是否把情绪写盘 |
 | Dashboard | `DASHBOARD_DETAILS` | `0` | 启动时是否展开详情（运行中按 `Tab` 切换） |
 | Dashboard | `DASHBOARD_MAX_MESSAGES` | `300` | 可滚动消息上限 |
-| 状态 | `SOUL_TTY_STATE_DIR` | `~/.local/state/soul-tty` | 持久化目录（Bond、Emotion） |
+| 状态 | `SOUL_TTY_STATE_DIR` | `~/.local/state/soul-tty` | 持久化目录（Bond、Emotion、Memory） |
 
 ### 人格自定义
 
@@ -463,7 +620,7 @@ SOUL_TTY_PERSONA=my_persona uv run soul-tty         # 用环境变量选人格
 
 ---
 
-## 12. Development
+## 13. Development
 
 不需要麦克风也能验证 LLM ↔ TTS 链路：
 
@@ -489,7 +646,7 @@ uv run pytest
 
 ---
 
-## 13. Interaction Reference
+## 14. Interaction Reference
 
 | 操作 | 行为 |
 |---|---|
@@ -497,16 +654,26 @@ uv run pytest
 | `0` | 循环切换当前人格的头像套装 |
 | `Tab` | 展开 / 收起 Dashboard 详情：精确羁绊值、五维情绪值、互动次数 |
 | `Ctrl+C` | 退出（自动写回持久化状态） |
+| `soul-tty memory` | 列出全部记忆（按类型分组） |
+| `soul-tty memory list --type profile` | 按类型过滤列出记忆 |
+| `soul-tty memory show <id>` | 查看单条记忆详情 |
+| `soul-tty memory forget <id>` | 删除单条记忆 |
+| `soul-tty memory clear` | 清空全部记忆（需二次确认） |
 
 ---
 
-## 14. Roadmap
+## 15. Roadmap
 
-### Memory Layer
+### Memory Layer ✅
 
-- 跨会话记忆：短期上下文 / 跨会话摘要 / 长期用户事实三层分离
-- 经验检索：按上下文预算选择性注入，而非无限增长
-- 记忆治理：查看、修正、删除与一键清空
+V1 已完成。三层分离记忆（画像 / 偏好 / 经历）、异步抽取、常驻段 + 按需召回、CLI 管理均已实现。
+
+- ✅ 画像（profile）与偏好（preference）常驻 system prompt
+- ✅ 经历（experience）按用户召回词按需检索注入
+- ✅ 异步抽取由 Reflection Worker 旁路完成
+- ✅ 去重与 importance 门槛过滤 | 管理与治理 CLI
+- 🚧 embedding 检索（V2，替换当前 bigram 方案）
+- 🚧 手动编辑与修正记忆
 
 ### Expression Layer
 
@@ -525,7 +692,7 @@ uv run pytest
 
 ---
 
-## 15. License & Thanks
+## 16. License & Thanks
 
 **License：** 待定（开源筹备中）。
 
