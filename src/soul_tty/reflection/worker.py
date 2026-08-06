@@ -12,8 +12,10 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .. import config
 from .relationship import (
@@ -30,6 +32,12 @@ from .relationship import (
 
 _STOP = object()
 
+# 记忆抽取器签名：消费一批 turn，返回是否至少落库一条。
+# 失败/未抽取时返回 False，worker 据此保留 buffer 不动。
+MemoryExtractor = Callable[[list[CompletedTurn]], bool]
+# 抽取完成后触发，签名无参；通常用于让 system prompt 重新渲染常驻段。
+OnMemoryUpdated = Callable[[], None]
+
 
 class ReflectionWorker:
     """单 Worker 有界旁路；只管 bond 持久化，emotion/expression 透传给上层协调器。"""
@@ -40,15 +48,22 @@ class ReflectionWorker:
         evaluator: Evaluator,
         on_update: UpdateCallback | None = None,
         on_evaluation: EvaluationCallback | None = None,
+        memory_extractor: MemoryExtractor | None = None,
+        on_memory_updated: OnMemoryUpdated | None = None,
         *,
         state_dir: Path | None = None,
         queue_size: int | None = None,
         idle_delay_s: float | None = None,
         min_interval_s: float | None = None,
+        memory_min_interval_s: float | None = None,
+        memory_buffer_turns: int | None = None,
+        memory_min_text_chars: int | None = None,
     ) -> None:
         self.evaluator = evaluator
         self.on_update = on_update
         self.on_evaluation = on_evaluation
+        self.memory_extractor = memory_extractor
+        self.on_memory_updated = on_memory_updated
         self.path = state_path(
             persona_id,
             state_dir or config.SOUL_TTY_STATE_DIR,
@@ -67,6 +82,24 @@ class ReflectionWorker:
             if min_interval_s is None
             else min_interval_s
         )
+        self.memory_min_interval_s = (
+            config.MEMORY_MIN_INTERVAL_S
+            if memory_min_interval_s is None
+            else memory_min_interval_s
+        )
+        self.memory_min_text_chars = (
+            config.MEMORY_MIN_TEXT_CHARS
+            if memory_min_text_chars is None
+            else memory_min_text_chars
+        )
+        # 记忆抽取的待办轮次；与关系评估的 queue 解耦——queue 溢出丢轮
+        # 可以接受，记忆不能丢。每条 turn 配一个递增 seq。
+        # maxlen 天然防止无限增长。
+        self._memory_buffer: deque[tuple[int, CompletedTurn]] = deque(
+            maxlen=memory_buffer_turns or config.MEMORY_BUFFER_TURNS
+        )
+        self._memory_seq = 0
+        self._last_memory_at = 0.0
         self._last_activity = time.monotonic()
         self._last_evaluation = 0.0
         self._stop = threading.Event()
@@ -90,6 +123,9 @@ class ReflectionWorker:
         with self._lock:
             # 从完整回答结束开始等待空闲窗口，避免立刻与下一轮主对话争抢模型。
             self._last_activity = time.monotonic()
+            # 记忆 buffer：无条件追加；deque 在 maxlen 满了之后静默丢最旧
+            self._memory_seq += 1
+            self._memory_buffer.append((self._memory_seq, turn))
         try:
             self.queue.put_nowait(turn)
             return True
@@ -210,10 +246,90 @@ class ReflectionWorker:
                         self.on_evaluation(updated_payload)
                     except Exception:
                         pass
+                # 关系评估完成后串行跑记忆抽取；共享 idle 窗口，两次独立推理。
+                # 失败/未抽取都返回 False，buffer 不动，下次连带重试。
+                if self.memory_extractor is not None:
+                    self._maybe_extract_memory()
             finally:
                 self.queue.task_done()
 
+    def _memory_due(self) -> bool:
+        """是否到了抽取时机。
+
+        两条独立条件：
+        1. 距上次抽取 ≥ memory_min_interval_s（默认 120s）
+        2. buffer 里未抽取的用户文本累计 ≥ memory_min_text_chars
+
+        任意一条不满足就跳过——这避免「每轮都问 LLM」以及「嗯/好的也发 LLM」。
+        """
+        with self._lock:
+            if time.monotonic() - self._last_memory_at < self.memory_min_interval_s:
+                return False
+            if not self._memory_buffer:
+                return False
+            pending_chars = sum(
+                len(turn.user_text) for _, turn in self._memory_buffer
+            )
+            return pending_chars >= self.memory_min_text_chars
+
+    def _drain_memory_buffer(self) -> tuple[list[CompletedTurn], int]:
+        """取走 buffer 中所有 turn 与最大 seq。返回 (turns, max_seq)。
+
+        不真正清空 buffer——LLM 推理期间可能有新 turn 进来，
+        ack 由调用方按 max_seq 决定保留哪些。
+        """
+        with self._lock:
+            if not self._memory_buffer:
+                return [], 0
+            turns = [turn for _, turn in self._memory_buffer]
+            max_seq = max(seq for seq, _ in self._memory_buffer)
+            return turns, max_seq
+
+    def _ack_memory_extracted(self, max_seq: int) -> int:
+        """成功抽取后，移除 seq ≤ max_seq 的条目；返回实际移除条数。"""
+        with self._lock:
+            cap = self._memory_buffer.maxlen
+            kept = deque(
+                (seq, turn)
+                for seq, turn in self._memory_buffer
+                if seq > max_seq
+            )
+            # deque 的 maxlen 在构造时设定，不可写——必须新建
+            new_buffer: deque[tuple[int, CompletedTurn]] = deque(
+                kept, maxlen=cap
+            )
+            removed = len(self._memory_buffer) - len(new_buffer)
+            self._memory_buffer = new_buffer
+            return removed
+
+    def _maybe_extract_memory(self) -> None:
+        if not self._memory_due():
+            return
+        turns, max_seq = self._drain_memory_buffer()
+        if not turns or self.memory_extractor is None:
+            return
+        try:
+            landed = bool(self.memory_extractor(turns))
+        except Exception:
+            return  # 失败时 buffer 不动
+        with self._lock:
+            self._last_memory_at = time.monotonic()
+        if landed:
+            self._ack_memory_extracted(max_seq)
+            if self.on_memory_updated is not None:
+                try:
+                    self.on_memory_updated()
+                except Exception:
+                    pass
+
     def stop(self) -> None:
+        self._stop.set()
+        try:
+            self.queue.put_nowait(_STOP)
+        except queue.Full:
+            pass
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
         self._stop.set()
         try:
             self.queue.put_nowait(_STOP)
