@@ -6,8 +6,6 @@
 
 > 麦克风 → 流式识别 → 流式对话 → 流式语音，所有链路跑在你自己的机器上。
 
-![dashboard](docs/img/dashboard.png)
-
 ---
 
 ## 写在前面：什么是"终端之魂"
@@ -467,7 +465,7 @@ SOUL_TTY_PERSONA_DIR=/path/to/dir uv run soul-tty
 
 ## 路线图
 
-- **会话记忆** — 设计已起稿，见 [`docs/superpowers/specs/2026-08-05-emotion-system-design.md`](./docs/superpowers/specs/2026-08-05-emotion-system-design.md) 和 [`TODO.md`](./TODO.md)。
+- **会话记忆** — 设计已起稿，见 [`TODO.md`](./TODO.md)。
   短期上下文、跨会话摘要、稳定用户事实三层分离，按上下文预算选择性注入 LLM。
 - **稳定全双工打断** — 当前是实验开关；目标是从采集到识别到取消到恢复的完整状态机 + AEC 接入。
 - **更多人格与社区素材** — 鼓励通过 YAML + `assets/avatars/` 贡献新角色。
