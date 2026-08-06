@@ -68,7 +68,7 @@ EmotionService.apply_delta
        │  EMA 平滑（默认 0.2，避免单次突变）
        │  delta_cap 截断（防止 LLM 抖动污染）
        ▼
-EmotionVector（内存 / 持久化）
+EmotionVector（session state）
        │
        │  idle_decay：长时间无交互 → 缓慢回归 baseline
        │  （每 5 分钟按 0.05 衰减）
@@ -77,9 +77,9 @@ resolver → (mood, intensity, expression)
        │
        ▼
 Expression Layer
-   ├─ system prompt [Emotion Context] 段
-   ├─ TTS 语气指令（规划中）
-   └─ Avatar 表情（未来）
+   ├─ system prompt [Emotion Context] 段         ← Implemented
+   ├─ TTS 语气指令（Expression Mapper）           ← Implemented
+   └─ Avatar 表情与口型                          ← Planned（暂无设计资源）
 ```
 
 **当前实现状态：**
@@ -87,8 +87,8 @@ Expression Layer
 - ✅ 五维向量 + EMA + idle decay（已在 `src/soul_tty/emotion/`）
 - ✅ 收敛到 `mood` + `intensity` + `expression`（resolver）
 - ✅ 注入到 system prompt 的 `[Emotion Context]` 段
-- 🚧 驱动 TTS 语气指令（Expression Mapper → MLX_TTS_INSTRUCT）
-- 🚧 驱动 Avatar 表情与口型（后置）
+- ✅ 驱动 TTS 语气指令（Expression Mapper → MLX_TTS_INSTRUCT）
+- 🚧 驱动 Avatar 表情与口型（后置，等设计资源）
 
 ---
 
@@ -142,6 +142,56 @@ Expression Layer
 
 ---
 
+## Agent 架构
+
+```
+                    User
+                     │
+                     ▼
+        ┌────────────────────────┐
+        │   Conversation Brain   │  实时主对话：流式识别 → 流式回复 → 流式语音
+        │      (Realtime)        │  永远优先；任何状态计算不阻塞它
+        └────────────┬───────────┘
+                     │
+                     │ 每轮完整回答
+                     ▼
+        ┌────────────────────────┐
+        │    Reflection Brain    │  异步旁路：单 worker · 合并多轮 · 限频
+        │       (Async)          │
+        └──────┬─────────┬───────┘
+               │         │
+               ▼         ▼
+     ┌─────────────┐  ┌────────────────┐
+     │  Bond System│  │ Emotion System │  五维向量：happiness / calmness /
+     │  (羁绊)     │  │  (情绪)         │  curiosity / stress / energy
+     │ bond 持久化  │  │ EMA 平滑 + 衰减  │
+     │ 互动次数累积 │  │ mood + expression 收敛 │
+     └──────┬──────┘  └────────┬───────┘
+            │                  │
+            └────────┬─────────┘
+                     ▼
+        ┌────────────────────────┐
+        │   Expression Layer     │  表达层：把内部状态翻译成"怎么说话"
+        │  ───────────────────── │  Implemented:
+        │                        │  · system prompt 的 Emotion Context
+        │                        │  · TTS 语气指令（MLX_TTS_INSTRUCT）
+        │                        │  Planned:
+        │                        │  · Avatar 的口型 / 表情（等设计资源）
+        └────────────────────────┘
+```
+
+**四层职责：**
+
+| 层 | 职责 | 时延要求 |
+|---|---|---|
+| **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
+| **Reflection Brain** | 状态演化；异步、可合并、可丢弃 | 不阻塞对话 |
+| **State / Bond** | 长期关系状态；持久化 | 跨启动 |
+| **State / Emotion** | 短期内部状态；session 内 | 单次会话 |
+| **Expression** | 状态 → 可感知表现；只在听 / 播 / 写三个安全时机刷新 | 安全时机 |
+
+---
+
 ## 技术栈
 
 ```
@@ -191,50 +241,32 @@ Expression Layer
 
 ---
 
-## Agent 架构
+## Design Decisions
 
-```
-                    User
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │   Conversation Brain   │  实时主对话：流式识别 → 流式回复 → 流式语音
-        │      (Realtime)        │  永远优先；任何状态计算不阻塞它
-        └────────────┬───────────┘
-                     │
-                     │ 每轮完整回答
-                     ▼
-        ┌────────────────────────┐
-        │    Reflection Brain    │  异步旁路：单 worker · 合并多轮 · 限频
-        │       (Async)          │
-        └──────┬─────────┬───────┘
-               │         │
-               ▼         ▼
-     ┌─────────────┐  ┌────────────────┐
-     │  Bond System│  │ Emotion System │  五维向量：happiness / calmness /
-     │  (羁绊)     │  │  (情绪)         │  curiosity / stress / energy
-     │ bond 持久化  │  │ EMA 平滑 + 衰减  │
-     │ event 累积  │  │ mood + expression 收敛 │
-     └──────┬──────┘  └────────┬───────┘
-            │                  │
-            └────────┬─────────┘
-                     ▼
-        ┌────────────────────────┐
-        │   Expression Layer     │  表达层：把内部状态翻译成"怎么说话"
-        │  ───────────────────── │  → system prompt 的 Emotion Context
-        │                        │  → TTS 的语气指令（后续）
-        │                        │  → Avatar 的口型 / 表情（未来）
-        └────────────────────────┘
-```
+记录几个不会轻易改回去的取舍，避免未来接 Letta / 长期记忆层时被推翻。
 
-**四层职责：**
+### Why separate Emotion and Memory?
 
-| 层 | 职责 | 时延要求 |
-|---|---|---|
-| **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
-| **Reflection Brain** | 状态演化；异步、可合并、可丢弃 | 不阻塞对话 |
-| **State**（Bond / Emotion） | 跨会话记忆 + 当次情绪快照 | 持久化 |
-| **Expression** | 状态 → 可感知表现；只在听 / 播 / 写三个安全时机刷新 | 安全时机 |
+- **Emotion** 是短期内部状态：*"我现在感觉怎么样？"* — 单次会话内演化，会随 idle decay 回归 baseline，不跨启动。
+- **Memory** 是长期经验沉淀：*"之前发生过什么？"* — 跨会话累积，分短期上下文、跨会话摘要、长期事实三层。
+
+两者演化时间尺度不同，存储位置不同，注入 LLM 的时机也不同。Emotion 写在每个 `[Emotion Context]` 段里实时热更新，Memory 按上下文预算选择性注入。**Bond 不能代替 Memory，Memory 也不能直接改 Bond 或 Emotion**。
+
+### Why is Expression a separate layer?
+
+Expression 是 *状态 → 表现* 的纯映射层，不持有任何状态：
+
+- 输入：`{mood, intensity, expression}`
+- 输出：中文 TTS 指令、prompt 段落、未来的 avatar 参数
+
+这样换 TTS 后端（MLX → 别的）只影响 Expression Mapper，不影响 Emotion 本身；未来让 Avatar 接进来也是同一条链路的最后一节。
+
+### Why not have Bond evaluation on the main path?
+
+Bond / Emotion 评估都是**异步旁路**，永不阻塞主对话：
+- 主对话只投递 `(user_text, agent_text)` 到有界内存队列
+- 后台 worker 在空闲窗口 + 限频条件下合并多轮、调一次 LLM
+- LLM 失败 / 低 confidence / 队列满都只让状态不更新，不让对话中断
 
 ---
 

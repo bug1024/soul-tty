@@ -1175,7 +1175,7 @@ def _relationship_detail_text(
     text = Text(style="dim", no_wrap=True, overflow="ellipsis")
     bits: list[str] = []
     if interaction_count > 0:
-        bits.append(f"共 {interaction_count} 次关系事件")
+        bits.append(f"共 {interaction_count} 次互动")
     if recent_events:
         last_event = recent_events[-1]
         truncated = last_event[:_RELATIONSHIP_EVENT_DISPLAY_MAX]

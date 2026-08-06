@@ -250,8 +250,8 @@ class TerminalUITests(unittest.TestCase):
         self.assertIn("好奇 71", rendered)
         self.assertIn("压力 18", rendered)
         self.assertIn("活力 74", rendered)
-        # 亲密进度：关系事件次数 + 上次事件
-        self.assertIn("共 8 次关系事件", rendered)
+        # 亲密进度：互动次数 + 上次事件
+        self.assertIn("共 8 次互动", rendered)
         self.assertIn("上次：共同玩笑", rendered)
         # Tab 详情模式下不再展开技术栈
         self.assertNotIn("人格：Serena", rendered)
