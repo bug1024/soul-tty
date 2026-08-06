@@ -8,11 +8,10 @@ import threading
 import wave
 from collections.abc import Callable
 
-from . import config, reflection
+from . import config, prompt, reflection
 from .audio import asr, capture, tts
 from .clients import llm
 from .ui import terminal
-from .personas.loader import apply_persona
 
 # 全局 Chat 实例引用，供 terminal.py 换模式时热更新 system prompt
 _active_chat: llm.Chat | None = None
@@ -43,11 +42,8 @@ def emit_emotion_update(emotion_service, snap) -> None:
     """Re-build Emotion Context and hot-update active Chat system_prompt."""
     if _active_chat is None:
         return
-    persona = getattr(terminal, "_current", lambda: None)()
-    if persona is None:
-        return
-    apply_persona(persona, emotion_service=emotion_service)
-    _active_chat.update_system_prompt(config.SYSTEM_PROMPT)
+    prompt.builder().set_section("emotion", snap.context_text)
+    _active_chat.update_system_prompt(prompt.refresh())
 
 # ASR 在静音/噪声段上的典型幻觉文本，直接丢弃不送 LLM。
 HALLUCINATIONS = (

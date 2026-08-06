@@ -746,16 +746,14 @@ if __name__ == "__main__":
 
 # --- Task 15: system_prompt composition ---
 
-def test_apply_persona_with_emotion_appends_context():
-    import os
-    os.environ.pop("SYSTEM_PROMPT", None)
-    from soul_tty.personas.loader import load_persona, apply_persona
+def _fresh_emotion_service():
     from soul_tty.emotion.service import EmotionService
+    from soul_tty.personas.loader import load_persona
 
-    p = load_persona("serena")
-    svc = EmotionService(
+    persona = load_persona("serena")
+    return persona, EmotionService(
         persona_id="serena",
-        baseline=p.personality.mood_baseline,
+        baseline=persona.personality.mood_baseline,
         state_dir=None,
         jitter=0.0,
         seed=1,
@@ -764,16 +762,75 @@ def test_apply_persona_with_emotion_appends_context():
         decay_rate=0.05,
         intensity_update_threshold=0.1,
     )
-    apply_persona(p, emotion_service=svc)
+
+
+def test_emotion_section_appears_in_system_prompt():
+    import os
+    os.environ.pop("SYSTEM_PROMPT", None)
+    from soul_tty import prompt
+    from soul_tty.personas.loader import apply_persona
+
+    persona, svc = _fresh_emotion_service()
+    prompt.builder().set_section("emotion", None)
+    apply_persona(persona)
+    prompt.builder().set_section("emotion", svc.render_context())
+    prompt.refresh()
+
     assert "[Emotion Context]" in config.SYSTEM_PROMPT
     assert "当前情绪状态：" in config.SYSTEM_PROMPT
 
 
-def test_apply_persona_without_emotion_unchanged():
+def test_apply_persona_alone_has_no_emotion_section():
     import os
     os.environ.pop("SYSTEM_PROMPT", None)
-    from soul_tty.personas.loader import load_persona, apply_persona
+    from soul_tty import prompt
+    from soul_tty.personas.loader import apply_persona, load_persona
 
-    p = load_persona("serena")
-    apply_persona(p, emotion_service=None)
+    prompt.builder().set_section("emotion", None)
+    apply_persona(load_persona("serena"))
     assert "[Emotion Context]" not in config.SYSTEM_PROMPT
+
+
+def test_outfit_switch_preserves_emotion_section():
+    """换装会重新 apply_persona；改造前这会把 Emotion Context 整段抹掉。"""
+    import os
+    os.environ.pop("SYSTEM_PROMPT", None)
+    from soul_tty import prompt
+    from soul_tty.personas.loader import apply_persona
+
+    persona, svc = _fresh_emotion_service()
+    apply_persona(persona)
+    prompt.builder().set_section("emotion", svc.render_context())
+    prompt.refresh()
+    assert "[Emotion Context]" in config.SYSTEM_PROMPT
+
+    # terminal.py 换装时只调用 apply_persona(persona)，不传任何状态服务
+    apply_persona(persona.wearing("work"))
+
+    assert "[Emotion Context]" in config.SYSTEM_PROMPT
+    assert "专注模式" in config.SYSTEM_PROMPT
+
+
+def test_emit_emotion_update_pushes_section_without_persona_lookup():
+    import os
+    os.environ.pop("SYSTEM_PROMPT", None)
+    from soul_tty import prompt
+    from soul_tty.personas.loader import apply_persona
+
+    persona, svc = _fresh_emotion_service()
+    apply_persona(persona)
+
+    class FakeChat:
+        def __init__(self):
+            self.prompt = ""
+
+        def update_system_prompt(self, value):
+            self.prompt = value
+
+    chat = FakeChat()
+    with patch.object(main_module, "_active_chat", chat):
+        main_module.emit_emotion_update(svc, svc.snapshot())
+
+    assert "[Emotion Context]" in chat.prompt
+    assert chat.prompt == config.SYSTEM_PROMPT
+

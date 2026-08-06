@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from . import config, conversation, presence, reflection
+from . import config, conversation, presence, prompt, reflection
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
 from .personas.models import AvatarOutfit
@@ -109,7 +109,9 @@ def main() -> None:
             decay_interval_s=config.EMOTION_DECAY_INTERVAL_S,
             idle_threshold_s=config.EMOTION_IDLE_THRESHOLD_S,
         )
-        apply_persona(persona, emotion_service=emotion_service)
+        apply_persona(persona)
+        prompt.builder().set_section("emotion", emotion_service.render_context())
+        prompt.refresh()
         emotion_service.start_decay_thread()
         terminal.configure_emotion(emotion_service)
         # TTS 链路：每段回答开始时取一次 emotion snapshot 作为 instruct，

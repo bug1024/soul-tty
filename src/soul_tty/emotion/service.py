@@ -97,6 +97,13 @@ class EmotionService:
                 ),
             )
 
+    def render_context(self) -> str:
+        """当前情绪对应的 Prompt 文本段（不含 [Emotion Context] 标题）。
+
+        供调用方写入 SystemPromptBuilder；EmotionService 本身不依赖 builder。
+        """
+        return self.snapshot().context_text
+
     def current_tts_instruct(self) -> str:
         """当前 emotion / expression 对应的 TTS 指令文本。
 
