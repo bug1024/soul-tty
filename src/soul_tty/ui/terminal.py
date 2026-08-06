@@ -231,7 +231,7 @@ class Dashboard:
         relationship_voice = (
             _relationship_profile[3] if _relationship_profile is not None else ""
         )
-        self.relationship_evaluation_count = (
+        self.relationship_interaction_count = (
             _relationship_profile[4] if _relationship_profile is not None else 0
         )
         self.relationship_recent_events: tuple[str, ...] = (
@@ -478,7 +478,7 @@ class Dashboard:
             emotion_intensity=self.emotion_intensity,
             emotion_expression=self.emotion_expression,
             emotion_vector=self.emotion_vector,
-            relationship_evaluation_count=self.relationship_evaluation_count,
+            relationship_interaction_count=self.relationship_interaction_count,
             relationship_recent_events=self.relationship_recent_events,
         )
 
@@ -750,7 +750,7 @@ class Dashboard:
         mood: str,
         inner_voice: str = "",
         *,
-        evaluation_count: int = 0,
+        interaction_count: int = 0,
         recent_events: tuple[str, ...] = (),
     ) -> None:
         """保存旁路结果；画外音只在空闲聆听状态安全切换。"""
@@ -758,7 +758,7 @@ class Dashboard:
             self.relationship_bond = bond
             self.relationship_level = level
             self.relationship_mood = mood
-            self.relationship_evaluation_count = evaluation_count
+            self.relationship_interaction_count = interaction_count
             self.relationship_recent_events = recent_events
             if self._idle_emotion_active:
                 self.presence_hint = _idle_presence_hint(
@@ -924,12 +924,12 @@ def configure_relationship(
     level: str = "",
     mood: str = "calm",
     inner_voice: str = "",
-    evaluation_count: int = 0,
+    interaction_count: int = 0,
     recent_events: tuple[str, ...] = (),
 ) -> None:
     global _relationship_profile
     _relationship_profile = (
-        (bond, level, mood, inner_voice, evaluation_count, recent_events)
+        (bond, level, mood, inner_voice, interaction_count, recent_events)
         if bond is not None
         else None
     )
@@ -968,7 +968,7 @@ def update_relationship(state, *, mood: str | None = None) -> None:
         state.level,
         resolved_mood,
         state.inner_voice,
-        evaluation_count=state.evaluation_count,
+        interaction_count=state.interaction_count,
         recent_events=state.recent_events,
     )
 
@@ -1160,7 +1160,7 @@ def _emotion_detail_text(vector) -> Text:
 
 
 def _relationship_detail_text(
-    evaluation_count: int,
+    interaction_count: int,
     recent_events: tuple[str, ...],
 ) -> Text:
     """亲密详情行：关系事件次数 + 最近事件，给 Tab 详情行使用。
@@ -1169,8 +1169,8 @@ def _relationship_detail_text(
     """
     text = Text(style="dim")
     bits: list[str] = []
-    if evaluation_count > 0:
-        bits.append(f"共 {evaluation_count} 次关系事件")
+    if interaction_count > 0:
+        bits.append(f"共 {interaction_count} 次关系事件")
     if recent_events:
         bits.append(f"上次：{recent_events[-1][:20]}")
         if len(recent_events) > 1:
@@ -1224,7 +1224,7 @@ def _splash_panel(
     emotion_intensity: float = 0.0,
     emotion_expression: str = "neutral",
     emotion_vector=None,
-    relationship_evaluation_count: int = 0,
+    relationship_interaction_count: int = 0,
     relationship_recent_events: tuple[str, ...] = (),
 ) -> Panel:
     primary = persona.appearance.primary_color
@@ -1291,7 +1291,7 @@ def _splash_panel(
         _emotion_detail_text(emotion_vector) if show_details else Text()
     )
     relationship_detail = (
-        _relationship_detail_text(relationship_evaluation_count, relationship_recent_events)
+        _relationship_detail_text(relationship_interaction_count, relationship_recent_events)
         if show_details
         else Text()
     )

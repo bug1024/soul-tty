@@ -56,7 +56,11 @@ class RelationshipState:
     # 最近关系事件描述，FIFO 队列；上限由 RELATIONSHIP_MAX_RECENT_EVENTS 控制。
     recent_events: tuple[str, ...] = ()
     inner_voice: str = ""
-    evaluation_count: int = 0
+    # Number of meaningful interaction evaluations.
+    # 由后台评估器在每轮评估（无论 confidence 是否足够）后 +1。
+    # 这不是「用户说了多少句话」，也不是「evaluator 跑了多少次」，
+    # 而是「被 Relationship Analyzer 认可并记录的有效互动次数」。
+    interaction_count: int = 0
     updated_at: str = ""
 
     @property
@@ -126,7 +130,16 @@ def load_state(path: Path) -> RelationshipState:
         # 画外音只属于本次会话；bond 与事件才跨启动保存。
         recent_events=recent_events,
         inner_voice="",
-        evaluation_count=max(0, int(data.get("evaluation_count", 0))),
+        # 兼容旧字段 evaluation_count，新数据写入 interaction_count。
+        interaction_count=max(
+            0,
+            int(
+                data.get(
+                    "interaction_count",
+                    data.get("evaluation_count", 0),
+                )
+            ),
+        ),
         updated_at=str(data.get("updated_at", "")),
     )
 
@@ -215,9 +228,9 @@ def apply_evaluation(
         bond=new_bond,
         recent_events=new_events,
         inner_voice=_clean_inner_voice(result.get("inner_voice", "")),
-        # evaluation_count 由 RelationshipService 在每轮评估时统一递增，
+        # interaction_count 由 RelationshipService 在每轮评估时统一递增，
         # apply_evaluation 不再触碰它。
-        evaluation_count=state.evaluation_count,
+        interaction_count=state.interaction_count,
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
 
@@ -395,12 +408,12 @@ class RelationshipService:
                     continue
                 if self._stop.is_set():
                     return
-                # 每轮评估 +1：无论 confidence 够不够，HUD 上的「关系事件」计数都该往上走。
+                # 每轮评估 +1：无论 confidence 够不够，HUD 上的「互动次数」计数都该往上走。
                 incremented = RelationshipState(
                     bond=current.bond,
                     recent_events=current.recent_events,
                     inner_voice=current.inner_voice,
-                    evaluation_count=current.evaluation_count + 1,
+                    interaction_count=current.interaction_count + 1,
                     updated_at=datetime.now().astimezone().isoformat(
                         timespec="seconds"
                     ),

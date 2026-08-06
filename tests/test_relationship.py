@@ -33,7 +33,7 @@ class RelationshipStateTests(unittest.TestCase):
         self.assertEqual(level_for(1.5), "bonded")
 
     def test_applies_only_confident_bounded_llm_evaluation(self):
-        state = RelationshipState(bond=0.20, evaluation_count=2)
+        state = RelationshipState(bond=0.20, interaction_count=2)
         result = {
             "event": "真诚关心",
             "relationship_delta": {"bond": 99},
@@ -49,9 +49,9 @@ class RelationshipStateTests(unittest.TestCase):
         # 0.20 + (0.03 * 0.9) * (1 - 0.20) = 0.2216
         self.assertAlmostEqual(updated.bond, 0.2216, places=4)
         self.assertEqual(updated.inner_voice, "被你惦记着真好。")
-        # evaluation_count 由 RelationshipService 在每轮评估时统一递增；
+        # interaction_count 由 RelationshipService 在每轮评估时统一递增；
         # apply_evaluation 不再触碰它。
-        self.assertEqual(updated.evaluation_count, 2)
+        self.assertEqual(updated.interaction_count, 2)
 
     def test_bond_delta_scales_with_confidence(self):
         """同样 delta，confidence 越高 bond 增长越大；不破坏边际递减。"""
@@ -116,7 +116,7 @@ class RelationshipStateTests(unittest.TestCase):
             bond=0.47,
             recent_events=("共同玩笑",),
             inner_voice="好像更懂你一点了。",
-            evaluation_count=8,
+            interaction_count=8,
             updated_at="2026-08-03T12:00:00+08:00",
         )
         with TemporaryDirectory() as directory:
@@ -126,7 +126,7 @@ class RelationshipStateTests(unittest.TestCase):
             restored = load_state(path)
 
         self.assertEqual(restored.bond, state.bond)
-        self.assertEqual(restored.evaluation_count, state.evaluation_count)
+        self.assertEqual(restored.interaction_count, state.interaction_count)
         self.assertEqual(restored.recent_events, state.recent_events)
         self.assertEqual(restored.updated_at, state.updated_at)
         self.assertEqual(restored.inner_voice, "")
@@ -138,7 +138,7 @@ class RelationshipStateTests(unittest.TestCase):
             path = Path(directory) / "legacy_score.json"
             path.write_text(
                 json.dumps(
-                    {"score": 75, "event": "老数据", "evaluation_count": 5},
+                    {"score": 75, "event": "老数据", "interaction_count": 5},
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -147,13 +147,37 @@ class RelationshipStateTests(unittest.TestCase):
             # 75 / 100 = 0.75
             self.assertAlmostEqual(restored.bond, 0.75, places=4)
             self.assertEqual(restored.recent_events, ("老数据",))
-            self.assertEqual(restored.evaluation_count, 5)
+            self.assertEqual(restored.interaction_count, 5)
             # 内存迁移不写回原文件
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertIn("score", raw)
             self.assertNotIn("bond", raw)
 
-    def test_recent_events_field_round_trips_through_disk(self):
+    def test_legacy_evaluation_count_field_migrates_to_interaction_count(self):
+        """旧 JSON 用 evaluation_count → 启动加载时映射为 interaction_count。"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.json"
+            path.write_text(
+                json.dumps(
+                    {"bond": 0.30, "evaluation_count": 7},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            restored = load_state(path)
+        self.assertAlmostEqual(restored.bond, 0.30, places=4)
+        self.assertEqual(restored.interaction_count, 7)
+
+    def test_interaction_count_field_round_trips_through_disk(self):
+        """interaction_count 经 save/load 完整保留数值。"""
+        state = RelationshipState(bond=0.20, interaction_count=42)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "relationships" / "serena.json"
+            save_state(path, state)
+            restored = load_state(path)
+        self.assertEqual(restored.interaction_count, 42)
+
+    def test_recent_events_round_trips_through_disk(self):
         """recent_events 列表经 save/load 完整保留顺序与内容。"""
         state = RelationshipState(
             bond=0.20,
@@ -379,8 +403,8 @@ class RelationshipServiceTests(unittest.TestCase):
         self.assertIn("第1轮：第一问", evaluated[0].user_text)
         self.assertIn("第2轮：第二答", evaluated[0].agent_text)
 
-    def test_evaluation_count_increments_per_evaluation_regardless_of_confidence(self):
-        """每轮 LLM 评估都让 evaluation_count +1（不管 confidence 够不够）。"""
+    def test_interaction_count_increments_per_evaluation_regardless_of_confidence(self):
+        """每轮 LLM 评估都让 interaction_count +1（不管 confidence 够不够）。"""
         updated = threading.Event()
 
         def evaluate(state, turn):
@@ -403,14 +427,14 @@ class RelationshipServiceTests(unittest.TestCase):
                 idle_delay_s=0,
                 min_interval_s=0,
             )
-            self.assertEqual(service.state.evaluation_count, 0)
+            self.assertEqual(service.state.interaction_count, 0)
             service.start()
             self.assertTrue(service.submit("hi", "hello back"))
             self.assertTrue(updated.wait(timeout=1))
             service.stop()
 
-        # 即便 confidence 不足，evaluation_count 也应该 +1
-        self.assertEqual(service.state.evaluation_count, 1)
+        # 即便 confidence 不足，interaction_count 也应该 +1
+        self.assertEqual(service.state.interaction_count, 1)
         # bond 不变：低 confidence 不扣分也不加分
         self.assertEqual(service.state.bond, config.RELATIONSHIP_INITIAL_BOND)
 

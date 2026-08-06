@@ -205,7 +205,7 @@ def main() -> None:
             relationship_state.level,
             initial_mood,
             relationship_state.inner_voice,
-            relationship_state.evaluation_count,
+            relationship_state.interaction_count,
             relationship_state.recent_events,
         )
         relationship.install(relationship_service)
