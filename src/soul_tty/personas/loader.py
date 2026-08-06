@@ -124,7 +124,8 @@ def apply_persona(persona: Persona, emotion_service=None) -> None:
     emotion_service 不为 None 时，追加 [Emotion Context] 段落。
     """
     if "SYSTEM_PROMPT" not in os.environ:
-        base = f"你的名字是\"{persona.display_name}\"。\n{persona.personality.system_prompt}"
+        # 中文排版用全角引号；用 \u 转义避免与 f-string 自身引号冲突。
+        base = f"你的名字是“{persona.display_name}”。\n{persona.personality.system_prompt}"
         avatar = persona.appearance.avatar
         mode = avatar.outfit.mode if avatar else "companion"
         modifier = _MODE_MODIFIERS.get(mode, _MODE_MODIFIERS["companion"])
