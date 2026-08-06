@@ -635,6 +635,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             "第一句。第二句！",
             ANY,
             main_module.terminal.audio_level,
+            instruct="",
         )
 
 

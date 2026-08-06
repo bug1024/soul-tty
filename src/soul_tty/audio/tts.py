@@ -174,12 +174,25 @@ def _trim_trailing_silence(
             return
 
 
+def _resolve_instruct(instruct: str | None) -> str:
+    """非空覆盖 config 默认值；空串或 None 时回退到 persona 默认。"""
+    if instruct:
+        return instruct
+    return config.MLX_TTS_INSTRUCT
+
+
 def _synthesize_mlx_segment(
     text: str,
     cancel: threading.Event | None,
     client: httpx.Client,
+    *,
+    instruct: str = "",
 ) -> Iterator[bytes]:
-    """合成一个完整句，并为随机采样退化设置硬上限。"""
+    """合成一个完整句，并为随机采样退化设置硬上限。
+
+    `instruct` 为本次回答的 TTS 指令（来自 EmotionService.current_tts_instruct）；
+    空串时回退到 config.MLX_TTS_INSTRUCT（persona 默认）。
+    """
     payload = {
         "model": config.MLX_TTS_MODEL,
         "input": text,
@@ -195,8 +208,9 @@ def _synthesize_mlx_segment(
     }
     if config.MLX_TTS_VOICE:
         payload["voice"] = config.MLX_TTS_VOICE
-        if config.MLX_TTS_INSTRUCT:
-            payload["instruct"] = config.MLX_TTS_INSTRUCT
+        effective = _resolve_instruct(instruct)
+        if effective:
+            payload["instruct"] = effective
     else:
         raise RuntimeError("MLX_TTS_VOICE 不能为空；音色克隆后端已移除")
     with client.stream(
@@ -217,9 +231,16 @@ def _synthesize_mlx_segment(
 
 
 def synthesize_mlx_stream(
-    text: str, cancel: threading.Event | None = None
+    text: str,
+    cancel: threading.Event | None = None,
+    *,
+    instruct: str = "",
 ) -> Iterator[bytes]:
-    """调用常驻 MLX Qwen3-TTS，返回 24kHz int16 裸 PCM。"""
+    """调用常驻 MLX Qwen3-TTS，返回 24kHz int16 裸 PCM。
+
+    `instruct` 传入 EmotionService.current_tts_instruct() 结果；
+    一段回答内不应变化，避免同一句话中途换语气。
+    """
     segments = _split_mlx_text(text)
     if not segments:
         return
@@ -228,23 +249,31 @@ def synthesize_mlx_stream(
         for segment in segments:
             if cancel is not None and cancel.is_set():
                 return
-            yield from _synthesize_mlx_segment(segment, cancel, client)
+            yield from _synthesize_mlx_segment(
+                segment, cancel, client, instruct=instruct
+            )
 
 
 def synthesize_stream(
-    text: str, cancel: threading.Event | None = None
+    text: str,
+    cancel: threading.Event | None = None,
+    *,
+    instruct: str = "",
 ) -> Iterator[bytes]:
-    yield from synthesize_mlx_stream(text, cancel)
+    yield from synthesize_mlx_stream(text, cancel, instruct=instruct)
 
 
 def speak(
     text: str,
     cancel: threading.Event | None = None,
     on_audio_level: Callable[[float], None] | None = None,
+    *,
+    instruct: str = "",
 ) -> None:
     """整段合成并播放:服务端按段流式返回 PCM,边收边播。
 
     与按句流水线相比,整段送合成能保留跨句韵律,听感更连贯流畅。
+    `instruct` 同 synthesize_stream：空串时回退 persona 默认。
     """
     if config.TTS_BACKEND == "macos":
         if on_audio_level is not None:
@@ -260,7 +289,7 @@ def speak(
         samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
     ) as stream:
         try:
-            for pcm in synthesize_stream(text, cancel):
+            for pcm in synthesize_stream(text, cancel, instruct=instruct):
                 if pcm:
                     _write_metered_pcm(stream, pcm, meter)
         finally:
@@ -293,15 +322,20 @@ class StreamingSpeaker:
     """流式播报器:say() 送入句子,后台线程合成并按序播放。
 
     用作上下文管理器,退出时等待队列里剩余的句子播报完毕。
+    `instruct` 在构造时锁住，整段回答共享同一份 TTS 指令，
+    避免同一句话念到一半突然换语气。
     """
 
     def __init__(
         self,
         cancel: threading.Event | None = None,
         on_audio_level: Callable[[float], None] | None = None,
+        *,
+        instruct: str = "",
     ):
         self._cancel = cancel or threading.Event()
         self._on_audio_level = on_audio_level
+        self._instruct = instruct
         self._sent_q: queue.Queue = queue.Queue()
         self._audio_q: queue.Queue = queue.Queue(maxsize=8)
         target = self._macos_loop if config.TTS_BACKEND == "macos" else self._synth_loop
@@ -353,7 +387,9 @@ class StreamingSpeaker:
             if s is _SENTINEL:
                 break
             try:
-                for pcm in synthesize_stream(s, self._cancel):
+                for pcm in synthesize_stream(
+                    s, self._cancel, instruct=self._instruct
+                ):
                     if not self._put_audio(pcm):
                         break
             except Exception as e:
