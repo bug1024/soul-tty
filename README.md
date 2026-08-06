@@ -1,6 +1,9 @@
 # Soul TTY · 终端之魂
 
-> **本地、低延迟、可陪伴的语音对话伙伴。**
+> **Soul-TTY is a local AI companion with real-time voice interaction, persistent personality, emotion state, and relationship evolution.**
+>
+> **Soul-TTY 是一个运行在终端中的本地 AI 伙伴，具备实时语音、人格、情绪状态和关系成长能力。**
+
 > 麦克风 → 流式识别 → 流式对话 → 流式语音，所有链路跑在你自己的机器上。
 
 ![dashboard](docs/img/dashboard.png)
@@ -33,11 +36,95 @@
 | **动态口型** | ✅ | 闭嘴 / 半开双缓存图，由实际播放 PCM 体积驱动切换；音量未跨阈值不重绘 |
 | **动态台词** | ✅ | 启动欢迎、换装语、长时间安静后的陪伴短句均由 LLM 实时生成；超时回退本地短句，不阻塞界面 |
 | **五维情绪体系** | ✅ | happiness / calmness / curiosity / stress / energy 五维向量，EMA 平滑 + 空闲自然衰减 |
-| **亲密成长（羁绊）** | ✅ | 后台非阻塞旁路评估 bond（边际递减）；欢迎区显示阶段，按 `Tab` 看精确分值 |
+| **Bond System（羁绊）** | ✅ | 后台非阻塞旁路评估 bond（边际递减）；欢迎区显示阶段，按 `Tab` 看精确分值 |
 | **三套装 + 三种模式** | ✅ | companion（默认）/ late_night（深夜）/ focused（工作），每套装映射一种行为语气 |
 | **本地人格系统** | ✅ | YAML 描述人格、台词、形象、TTS 语气；不锁死，可热加载 |
 | **会话记忆** | 🚧 | 设计中 — 见 [TODO.md](./TODO.md)。当前只有短期上下文，跨会话记忆将在新层实现 |
 | **全双工语音打断** | 🚧 | 实验开关 `BARGE_IN_ENABLED=1`；完整 AEC 状态机尚未稳定 |
+
+---
+
+## Emotion System
+
+Soul-TTY 不使用简单情绪标签，而是维护一组**连续状态**，让"心情"是一个有过程、有惯性、会自己恢复的过程。
+
+**五维向量：**
+
+| 维度 | 含义 | 极端高 | 极端低 |
+|---|---|---|---|
+| **happiness** | 愉悦度 | 兴高采烈 | 心情低落 |
+| **calmness** | 平静度 | 心如止水 | 焦躁不安 |
+| **curiosity** | 好奇度 | 主动探索 | 无聊放空 |
+| **stress** | 压力值 | 紧绷应激 | 完全放松 |
+| **energy** | 活力值 | 兴奋充沛 | 疲倦低迷 |
+
+**状态变化路径：**
+
+```
+LLM 评估（旁路）
+       │
+       │  每轮 emotion_delta（5 维 -0.3~+0.3）
+       ▼
+EmotionService.apply_delta
+       │
+       │  EMA 平滑（默认 0.2，避免单次突变）
+       │  delta_cap 截断（防止 LLM 抖动污染）
+       ▼
+EmotionVector（内存 / 持久化）
+       │
+       │  idle_decay：长时间无交互 → 缓慢回归 baseline
+       │  （每 5 分钟按 0.05 衰减）
+       ▼
+resolver → (mood, intensity, expression)
+       │
+       ▼
+Expression Layer
+   ├─ system prompt [Emotion Context] 段
+   ├─ TTS 语气指令（规划中）
+   └─ Avatar 表情（未来）
+```
+
+**当前实现状态：**
+
+- ✅ 五维向量 + EMA + idle decay（已在 `src/soul_tty/emotion/`）
+- ✅ 收敛到 `mood` + `intensity` + `expression`（resolver）
+- ✅ 注入到 system prompt 的 `[Emotion Context]` 段
+- 🚧 驱动 TTS 语气指令（Expression Mapper → MLX_TTS_INSTRUCT）
+- 🚧 驱动 Avatar 表情与口型（后置）
+
+---
+
+## Bond System
+
+"Bond"（羁绊）是 Soul-TTY 对"长期陪伴关系"的命名。**注意**：在 README 内部统一称 Bond，不混用 relationship / intimacy / 关系。
+
+**与 Emotion 的边界：**
+
+| | Bond | Emotion |
+|---|---|---|
+| 维度 | 单一标量 `bond ∈ [0, 1]` | 5 维向量 |
+| 时间尺度 | 跨启动持久化 | 当次会话内存（可持久化但默认不写盘） |
+| 增长方式 | 边际递减 `bond + delta * (1 - bond)` | EMA 平滑 + 衰减 |
+| 触发 | LLM 评估确认有"关心/共同玩笑/信任"等事件 | 任意情绪 delta |
+| 显示 | 按 Tab 看精确分值 + 阶段标签 | Dashboard 五维条形 + mood 文案 |
+
+**评估节奏：**
+
+- 每轮完整回答结束后，主流程只向有界内存队列投递问答
+- 后台单 worker 在空闲窗口 + 限频条件下合并多轮 → 调用 LLM
+- LLM 输出 `relationship_delta.bond` + `emotion_delta` + `expression`（三路分离）
+- 投递失败 / LLM 失败 / 低 confidence 都不会改变状态
+
+**阶段映射：**
+
+| bond | 阶段 |
+|---|---|
+| 0.00 – 0.09 | stranger |
+| 0.10 – 0.29 | acquaintance |
+| 0.30 – 0.49 | familiar |
+| 0.50 – 0.69 | companion |
+| 0.70 – 0.89 | close |
+| 0.90 – 1.00 | bonded |
 
 ---
 
@@ -96,13 +183,69 @@
        │
        │  (异步旁路)
        ▼
-┌─ 关系 + 情绪后台 ───────────────────────────────┐
+┌─ Bond + Emotion 后台 ───────────────────────────┐
 │  RelationshipService（bond · 单 worker · 合并评估）│
 │  EmotionService（五维向量 · EMA · 空闲衰减）       │
 └─────────────────────────────────────────────────┘
 ```
 
 **为什么是这套技术栈：** 全本地、Apple Silicon 友好（MLX）、延迟可压到亚秒级、整条链路没有云依赖。
+
+---
+
+## Agent 架构
+
+```
+                    User
+                     │
+                     ▼
+        ┌────────────────────────┐
+        │   Conversation Brain   │  实时主对话：流式识别 → 流式回复 → 流式语音
+        │      (Realtime)        │  永远优先；任何状态计算不阻塞它
+        └────────────┬───────────┘
+                     │
+                     │ 每轮完整回答
+                     ▼
+        ┌────────────────────────┐
+        │    Reflection Brain    │  异步旁路：单 worker · 合并多轮 · 限频
+        │       (Async)          │
+        └──────┬─────────┬───────┘
+               │         │
+               ▼         ▼
+     ┌─────────────┐  ┌────────────────┐
+     │  Bond System│  │ Emotion System │  五维向量：happiness / calmness /
+     │  (羁绊)     │  │  (情绪)         │  curiosity / stress / energy
+     │ bond 持久化  │  │ EMA 平滑 + 衰减  │
+     │ event 累积  │  │ mood + expression 收敛 │
+     └──────┬──────┘  └────────┬───────┘
+            │                  │
+            └────────┬─────────┘
+                     ▼
+        ┌────────────────────────┐
+        │   Expression Layer     │  表达层：把内部状态翻译成"怎么说话"
+        │  ───────────────────── │  → system prompt 的 Emotion Context
+        │                        │  → TTS 的语气指令（后续）
+        │                        │  → Avatar 的口型 / 表情（未来）
+        └────────────────────────┘
+```
+
+**四层职责：**
+
+| 层 | 职责 | 时延要求 |
+|---|---|---|
+| **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
+| **Reflection Brain** | 状态演化；异步、可合并、可丢弃 | 不阻塞对话 |
+| **State**（Bond / Emotion） | 跨会话记忆 + 当次情绪快照 | 持久化 |
+| **Expression** | 状态 → 可感知表现；只在听 / 播 / 写三个安全时机刷新 | 安全时机 |
+
+---
+
+## 核心设计原则
+
+- **主对话链路优先** — 任何状态计算、持久化、旁路评估都不能阻塞回复；旁路失败也不影响对话继续。
+- **状态异步演化** — Bond / Emotion 在后台 worker 中评估；冷却窗口内的多轮会合并为一次 LLM 调用。
+- **本地优先** — 语音、推理、合成全部跑在你机器上；对话内容不离开本机；可换模型、可换声音、可换人格。
+- **表现与状态分离** — Persona / Emotion / Expression 各自独立演进；Bond 不能代替记忆，记忆也不能直接改 Bond。
 
 ---
 
@@ -134,6 +277,40 @@ assets/avatars/           # 768×768 原创像素风角色图
 docs/                     # 设计稿、规划文档
 TODO.md                   # 路线图（会话记忆、稳定语音打断）
 ```
+
+---
+
+## Roadmap
+
+**已交付 ✅**
+
+- 实时语音对话（ASR + LLM + TTS 全链路流式）
+- 五维情绪体系（EMA 平滑 + idle decay）
+- Bond System（边际递减 + 三路状态分离）
+- 三种模式 × 三套装（companion / late_night / focused）
+- 动态口型 + 动态台词 + 启动节奏
+- 本地人格系统（YAML 可热加载）
+
+**下一阶段 🚧**
+
+1. **Emotion → Prompt / TTS 消费链**（C）
+   - C1 Prompt：[Emotion Context] 段已落地，下一步让 emotion delta 实时触发 prompt 热更新
+   - C2 TTS：Emotion Mapper → MLX_TTS_INSTRUCT（V1 走文本指令，不让 TTS 知道 emotion enum）
+   - C3 Avatar：Avatar 表情与口型（后置）
+
+2. **会话记忆（Memory Layer）**
+   - 短期上下文 / 跨会话摘要 / 长期用户事实 三层分离
+   - 见 [TODO.md](./TODO.md) 设计稿
+
+3. **稳定全双工打断**
+   - 从 `BARGE_IN_ENABLED=1` 实验开关做成完整状态机 + AEC 接入
+
+**暂不做 ❌**
+
+- 更多目录拆分（当前结构已经够清晰）
+- 复杂 Avatar 状态机（先让声音和语言体现状态）
+- 权限式亲密解锁（Bond 是连续梯度，不是游戏进度条）
+- 拆 ReflectionService / EmotionService / ExpressionService 命名重构（代码稳定，重命名收益有限）
 
 ---
 
@@ -199,7 +376,7 @@ uv run soul-tty --file /path/to/16k_mono.wav  # 用本地音频跑 ASR→LLM→T
 |---|---|
 | 说话 | 显示 `◉ 正在聆听` 后直接开口；sherpa partial 实时滚动，0.6s 静音后提交 |
 | `0` | 循环切换当前人格的头像套装 |
-| `Tab` | 展开 / 收起 Dashboard 详情：精确羁绊值、五维情绪值、关系事件次数 |
+| `Tab` | 展开 / 收起 Dashboard 详情：精确羁绊值、五维情绪值、互动次数 |
 | `Ctrl+C` | 退出（自动写回持久化状态） |
 
 ---
@@ -274,7 +451,7 @@ SOUL_TTY_PERSONA_DIR=/path/to/dir uv run soul-tty
 | 情绪 | `EMOTION_DECAY_RATE` | `0.05` | 每轮衰减幅度 |
 | Dashboard | `DASHBOARD_DETAILS` | `0` | 启动时是否展开详情（运行中按 `Tab` 切换） |
 | Dashboard | `DASHBOARD_MAX_MESSAGES` | `300` | 可滚动消息上限 |
-| 状态 | `SOUL_TTY_STATE_DIR` | `~/.local/state/soul-tty` | 持久化目录（关系、情绪） |
+| 状态 | `SOUL_TTY_STATE_DIR` | `~/.local/state/soul-tty` | 持久化目录（Bond、Emotion） |
 
 ---
 
@@ -283,7 +460,7 @@ SOUL_TTY_PERSONA_DIR=/path/to/dir uv run soul-tty
 - **全本地优先** — 语音、推理、合成都在你机器上完成；没有任何对话内容离开本机。
 - **链路上每一段都"敢降级"** — LLM 失败、TTS 失败、羁绊评估失败，永远不会让对话停下来。
 - **表现层只服务一个判断** — 这个角色在你身边，是不是更像一个活物。
-- **状态分层，互不污染** — 短期上下文 / 跨会话摘要 / 长期记忆 / 亲密值 / 情绪各自独立存储，关系不能代替记忆，记忆也不能直接改亲密值。
+- **状态分层，互不污染** — 短期上下文 / 跨会话摘要 / 长期记忆 / Bond / Emotion 各自独立存储，Bond 不能代替记忆，记忆也不能直接改 Bond。
 - **实现克制** — 所有"P0 漂亮但能拖两周"的功能（稳定 AEC、真跨会话记忆）都明确放进 `TODO.md`，不悄悄做一半。
 
 ---
