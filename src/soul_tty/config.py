@@ -30,21 +30,35 @@ SHERPA_VAD_GATE_ENABLED = os.environ.get("SHERPA_VAD_GATE_ENABLED", "1") not in 
 )
 SHERPA_VAD_PRE_ROLL_MS = int(os.environ.get("SHERPA_VAD_PRE_ROLL_MS", "300"))
 SHERPA_VAD_TRIGGER_MS = int(os.environ.get("SHERPA_VAD_TRIGGER_MS", "120"))
-# 辅助 LLM（欢迎语、空闲情绪、关系评估）保持直连，避免污染主会话记忆。
+# ---------------------------------------------------------------------------
+# LLM 端点：`LLM_URL` 默认服务于主对话；`AUX_LLM_URL` 独立服务于辅助请求。
+# 两个端点都按 OpenAI Chat Completions 协议工作，不附带任何专属 header。
+# 用户可以把它们指向同一个服务，也可以把辅助请求单独跑在小模型上，
+# 让"主对话的算力"和"辅助请求的算力"互不抢资源。
+# ---------------------------------------------------------------------------
+
+# 主对话 LLM：用于 Chat 的流式回答。多轮上下文、热更新 system prompt、
+# 流式 token 切句、重复截断等都发生在这条链路上。
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8180").rstrip("/")
-# 只有正式 Chat 经过记忆代理；兼容已经使用的 LLM_BASE_URL 环境变量。
-LLM_PROXY_URL = os.environ.get(
-    "LLM_PROXY_URL",
-    os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8096/hermes/default"),
-).rstrip("/")
-LLM_MODEL = os.environ.get(
-    "LLM_MODEL", "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
-)  # 空 = 自动取 /v1/models 第一个
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_TEAM_ID = os.environ.get("LLM_TEAM_ID", "")
-LLM_AGENT_ID = os.environ.get("LLM_AGENT_ID", "")
-# 会话 ID 默认在每次启动时生成；显式设置可用于恢复指定会话。
-LLM_CONVERSATION_ID = os.environ.get("LLM_CONVERSATION_ID", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "")  # 空 = 自动取 /v1/models 第一个
+
+# 辅助 LLM：每次启动只发一两个一次性请求，且都不进入正式对话历史：
+#   1. 启动欢迎语（短句）
+#   2. 换装动态台词（短句）
+#   3. 长时间空闲时的陪伴短句（短句）
+# 留空时回退到主 LLM；典型用法是指向一个常驻小模型以彻底隔离算力竞争。
+AUX_LLM_URL_RAW = os.environ.get("AUX_LLM_URL", "").rstrip("/")
+AUX_LLM_MODEL_RAW = os.environ.get("AUX_LLM_MODEL", "")
+
+
+def _resolve_aux_url() -> str:
+    """辅助 URL 留空时回退到主 LLM；延迟求值方便测试与运行时切换。"""
+    return AUX_LLM_URL_RAW or LLM_URL
+
+
+def _resolve_aux_model() -> str:
+    """辅助模型留空时回退到主 LLM；延迟求值方便测试与运行时切换。"""
+    return AUX_LLM_MODEL_RAW or LLM_MODEL
 
 # 音频采集
 SAMPLE_RATE = 16000

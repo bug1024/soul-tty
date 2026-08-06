@@ -1,10 +1,17 @@
-"""LLM 客户端:多轮对话历史 + OpenAI 兼容流式输出。"""
+"""LLM 客户端:多轮对话历史 + OpenAI 兼容流式输出。
+
+两个端点、两种用法：
+- 主对话 (`Chat`) → `LLM_URL` / `LLM_MODEL`
+- 辅助请求（欢迎语、换装、idle、关系评估）→ `AUX_LLM_URL` / `AUX_LLM_MODEL`
+
+两个端点都按 OpenAI Chat Completions 协议工作，没有任何专属 header。
+用户可以指向同一个服务，也可以把辅助请求单独跑在小模型上。
+"""
 
 import json
 import re
 import threading
 import unicodedata
-import uuid
 from collections.abc import Iterator
 
 import httpx
@@ -29,46 +36,19 @@ def _tail_is_repeating(text: str) -> bool:
     return False
 
 
-def start_conversation() -> str:
-    """校验记忆代理配置，并为本次进程准备唯一会话 ID。"""
-    required = {
-        "LLM_API_KEY": config.LLM_API_KEY,
-        "LLM_TEAM_ID": config.LLM_TEAM_ID,
-        "LLM_AGENT_ID": config.LLM_AGENT_ID,
-    }
-    missing = [name for name, value in required.items() if not value]
-    if missing:
-        raise RuntimeError(
-            "记忆代理配置缺失: "
-            + ", ".join(missing)
-            + "。请从 Memory Panel 获取 user_key、team_id 和 agent_id。"
-        )
-    if not config.LLM_CONVERSATION_ID:
-        config.LLM_CONVERSATION_ID = f"soul-tty-{uuid.uuid4()}"
-    return config.LLM_CONVERSATION_ID
+def pick_model(url: str, configured: str = "") -> str:
+    """从 `url` 上的 `/v1/models` 取第一个可用模型 id。
 
-
-def _proxy_headers() -> dict[str, str]:
-    """构建代理所需的请求头，包含认证和会话标识。"""
-    return {
-        "Authorization": f"Bearer {config.LLM_API_KEY}",
-        "x-team-id": config.LLM_TEAM_ID,
-        "x-agent-id": config.LLM_AGENT_ID,
-        "x-conversation-id": config.LLM_CONVERSATION_ID,
-        "x-session-init-enabled": "false",
-    }
-
-
-def pick_model() -> str:
-    """从 llama router 取第一个可用模型 id。"""
-    if config.LLM_MODEL:
-        return config.LLM_MODEL
+    `configured` 非空时直接返回（跳过网络请求）。主/辅 LLM 共用同一份逻辑。
+    """
+    if configured:
+        return configured
     with httpx.Client(timeout=10) as client:
-        resp = client.get(f"{config.LLM_URL}/v1/models")
+        resp = client.get(f"{url}/v1/models")
         resp.raise_for_status()
     models = resp.json().get("data", [])
     if not models:
-        raise RuntimeError(f"{config.LLM_URL} 没有可用模型,请检查 llama 服务")
+        raise RuntimeError(f"{url} 没有可用模型,请检查 LLM 服务")
     return models[0]["id"]
 
 
@@ -139,7 +119,7 @@ def generate_greeting(
     }
     with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
         response = client.post(
-            f"{config.LLM_URL}/v1/chat/completions",
+            f"{config._resolve_aux_url()}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -195,7 +175,7 @@ def generate_outfit_greeting(
     }
     with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
         response = client.post(
-            f"{config.LLM_URL}/v1/chat/completions",
+            f"{config._resolve_aux_url()}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -247,7 +227,7 @@ def generate_idle_emotion(
     }
     with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
         response = client.post(
-            f"{config.LLM_URL}/v1/chat/completions",
+            f"{config._resolve_aux_url()}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -360,7 +340,11 @@ class Chat:
     def ask_stream(
         self, text: str, cancel: threading.Event | None = None
     ) -> Iterator[str]:
-        """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。"""
+        """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。
+
+        走主 LLM（LLM_URL），纯 OpenAI Chat Completions 协议，
+        不附带任何专属 header。
+        """
         self.last_stop_reason = None
         self.messages.append({"role": "user", "content": text})
         payload = {
@@ -378,26 +362,18 @@ class Chat:
         pending = ""
         recent_sentences: list[str] = []
         stop_generation = False
-        _log = open("/tmp/soul_tty_debug.log", "a")
-        _log.write(f"\n[REQUEST] POST {config.LLM_PROXY_URL}/v1/chat/completions\nheaders={_proxy_headers()}\n")
         with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
             with client.stream(
                 "POST",
-                f"{config.LLM_PROXY_URL}/v1/chat/completions",
+                f"{config.LLM_URL}/v1/chat/completions",
                 json=payload,
-                headers=_proxy_headers(),
             ) as resp:
-                _log.write(f"[RESP STATUS] {resp.status_code}\n")
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     if cancel is not None and cancel.is_set():
                         break
                     if not line.startswith("data:"):
-                        _log.write(f"[SKIP] {line!r}\n")
-                        _log.flush()
                         continue
-                    _log.write(f"[DATA] {line!r}\n")
-                    _log.flush()
                     data = line[5:].strip()
                     if data == "[DONE]":
                         break
@@ -410,9 +386,6 @@ class Chat:
                         token = delta.get("content") or delta.get("reasoning_content") or ""
                     else:
                         token = delta if isinstance(delta, str) else ""
-                    if not token:
-                        continue
-                    token = delta.get("content") or ""
                     if not token:
                         continue
                     pending += token
@@ -442,8 +415,6 @@ class Chat:
             parts.append(pending)
             yield pending
         answer = "".join(parts).strip()
-        _log.write(f"[DONE] answer={answer!r}\n")
-        _log.close()
         if answer:
             # 被插话时保留已经说出的部分，下一轮上下文才与人真正听到的一致。
             self.messages.append({"role": "assistant", "content": answer})

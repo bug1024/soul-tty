@@ -114,15 +114,21 @@ def main() -> None:
         terminal.configure_emotion(emotion_service)
 
     try:
-        llm.start_conversation()
-    except RuntimeError as exc:
-        parser.error(str(exc))
-
-    try:
-        model = llm.pick_model()
+        main_model = llm.pick_model(config.LLM_URL, config.LLM_MODEL)
     except Exception as exc:
-        print(f"LLM 服务不可用: {exc}", file=sys.stderr)
+        print(f"主 LLM 服务不可用: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+
+    # 辅助 LLM 默认走主 LLM（同 URL/同 model）；只有用户显式配置了不同的
+    # AUX_LLM_URL 才单独去 auto-discover 一个独立模型，避免无谓请求。
+    aux_model = main_model
+    aux_url = config._resolve_aux_url()
+    aux_model_name = config._resolve_aux_model()
+    if aux_url != config.LLM_URL or aux_model_name != config.LLM_MODEL:
+        try:
+            aux_model = llm.pick_model(aux_url, aux_model_name)
+        except Exception:
+            aux_model = main_model
 
     launch_context = (
         presence.LaunchContext()
@@ -147,7 +153,7 @@ def main() -> None:
                 else "calm"
             )
             return llm.evaluate_relationship(
-                model,
+                aux_model,
                 persona.display_name,
                 state.bond,
                 state.level,
@@ -220,7 +226,7 @@ def main() -> None:
                 else "calm"
             )
             return llm.generate_outfit_greeting(
-                model,
+                aux_model,
                 persona.display_name,
                 terminal.day_period(),
                 outfit.label,
@@ -233,7 +239,7 @@ def main() -> None:
     terminal.configure_outfit_greetings(outfit_greeting_generator)
 
     dashboard_started = terminal.splash(
-        model=model,
+        model=main_model,
         tts=_tts_description(),
     )
     if (
@@ -250,7 +256,7 @@ def main() -> None:
         def refresh_greeting() -> None:
             try:
                 greeting = llm.generate_greeting(
-                    model,
+                    aux_model,
                     persona.display_name,
                     period,
                     relationship_tier=(
@@ -285,7 +291,7 @@ def main() -> None:
                     else "calm"
                 )
                 return llm.generate_idle_emotion(
-                    model,
+                    aux_model,
                     persona.display_name,
                     terminal.day_period(),
                     relationship_tier=(
@@ -298,7 +304,7 @@ def main() -> None:
                 )
 
         terminal.start_idle_emotions(idle_generator)
-    chat = llm.Chat(model)
+    chat = llm.Chat(main_model)
     try:
         if args.text:
             conversation.answer_text(chat, args.text)

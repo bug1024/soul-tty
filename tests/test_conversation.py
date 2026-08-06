@@ -36,40 +36,6 @@ class ConversationPolicyTests(unittest.TestCase):
         self.assertFalse(_is_probable_echo("等一下，换个话题", spoken))
 
 
-class ProxyConversationTests(unittest.TestCase):
-    def test_requires_every_proxy_identity_field(self):
-        with patch.multiple(
-            config,
-            LLM_API_KEY="user-key",
-            LLM_TEAM_ID="team-id",
-            LLM_AGENT_ID="",
-            LLM_CONVERSATION_ID="",
-        ):
-            with self.assertRaisesRegex(RuntimeError, "LLM_AGENT_ID"):
-                llm_client.start_conversation()
-
-    def test_generates_one_session_id_and_builds_complete_headers(self):
-        with patch.multiple(
-            config,
-            LLM_API_KEY="user-key",
-            LLM_TEAM_ID="team-id",
-            LLM_AGENT_ID="agent-id",
-            LLM_CONVERSATION_ID="",
-        ):
-            conversation_id = llm_client.start_conversation()
-            self.assertTrue(conversation_id.startswith("soul-tty-"))
-            self.assertEqual(llm_client.start_conversation(), conversation_id)
-            self.assertEqual(
-                llm_client._proxy_headers(),
-                {
-                    "Authorization": "Bearer user-key",
-                    "x-team-id": "team-id",
-                    "x-agent-id": "agent-id",
-                    "x-conversation-id": conversation_id,
-                },
-            )
-
-
 class FakeResponse:
     def raise_for_status(self):
         pass
@@ -176,29 +142,60 @@ class ChatCancellationTests(unittest.TestCase):
 
     @patch("soul_tty.clients.llm.httpx.Client", RepeatingClient)
     def test_stops_repeated_sentence_loop_and_sets_generation_limits(self):
-        with patch.multiple(
-            config,
-            LLM_API_KEY="user-key",
-            LLM_TEAM_ID="team-id",
-            LLM_AGENT_ID="agent-id",
-            LLM_CONVERSATION_ID="conversation-id",
-        ):
+        with patch.object(config, "LLM_URL", "http://main-llm.test"):
             chat = Chat("test")
             answer = "".join(chat.ask_stream("讲故事"))
-        payload = RepeatingClient.request[2]["json"]
-        headers = RepeatingClient.request[2]["headers"]
+            captured_url = RepeatingClient.request[1]
+            captured_headers = RepeatingClient.request[2].get("headers", {})
+            payload = RepeatingClient.request[2]["json"]
 
         self.assertEqual(chat.last_stop_reason, "repetition")
         self.assertEqual(answer.count("你还诚实吗"), 1)
         self.assertEqual(
-            RepeatingClient.request[1],
-            f"{config.LLM_PROXY_URL}/v1/chat/completions",
+            captured_url,
+            "http://main-llm.test/v1/chat/completions",
         )
-        self.assertNotIn("x-task-id", headers)
-        self.assertEqual(headers["x-conversation-id"], "conversation-id")
+        # 主 Chat 走纯 OpenAI 协议：不发送任何专属 header。
+        self.assertNotIn("Authorization", captured_headers)
+        self.assertNotIn("x-team-id", captured_headers)
+        self.assertNotIn("x-agent-id", captured_headers)
+        self.assertNotIn("x-conversation-id", captured_headers)
         self.assertEqual(payload["max_tokens"], config.LLM_MAX_TOKENS)
         self.assertEqual(payload["repeat_penalty"], config.LLM_REPEAT_PENALTY)
         self.assertEqual(chat.messages[-1]["content"], answer)
+
+    @patch("soul_tty.clients.llm.httpx.Client", RepeatingClient)
+    def test_main_chat_routes_to_llm_url(self):
+        """主 Chat 走 LLM_URL，与辅助 LLM 完全解耦。"""
+        with patch.object(config, "LLM_URL", "http://main-llm.test"):
+            chat = Chat("main-model")
+            list(chat.ask_stream("hi"))
+            main_url = RepeatingClient.request[1]
+
+        self.assertEqual(main_url, "http://main-llm.test/v1/chat/completions")
+
+    @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
+    def test_auxiliary_greeting_routes_to_aux_llm_url_independently(self):
+        """辅助请求走 AUX_LLM_URL，与主 Chat 端点解耦。"""
+        with patch.object(
+            config, "AUX_LLM_URL_RAW", "http://aux-llm.test"
+        ), patch.object(config, "AUX_LLM_MODEL_RAW", "aux-model"):
+            llm_client.generate_greeting("aux-model", "Serena", "夜")
+            aux_url = GreetingClient.request[0]
+            aux_payload = GreetingClient.request[1]["json"]
+
+        self.assertEqual(aux_url, "http://aux-llm.test/v1/chat/completions")
+        self.assertEqual(aux_payload["model"], "aux-model")
+
+    def test_aux_llm_url_falls_back_to_main_when_empty(self):
+        """AUX_LLM_URL 留空时回退到主 LLM_URL，方便单一服务部署。"""
+        from soul_tty import config
+        with patch.object(config, "LLM_URL", "http://main-llm.test"), \
+             patch.object(config, "AUX_LLM_URL_RAW", ""):
+            self.assertEqual(config._resolve_aux_url(), "http://main-llm.test")
+        with patch.object(config, "LLM_MODEL", "main-model"), \
+             patch.object(config, "AUX_LLM_MODEL_RAW", ""):
+            self.assertEqual(config._resolve_aux_model(), "main-model")
 
 
 class GreetingGenerationTests(unittest.TestCase):
@@ -217,7 +214,7 @@ class GreetingGenerationTests(unittest.TestCase):
         self.assertEqual(greeting, "晚上好，我把月光留给你。")
         self.assertEqual(
             GreetingClient.request[0],
-            f"{config.LLM_URL}/v1/chat/completions",
+            f"{config._resolve_aux_url()}/v1/chat/completions",
         )
         self.assertNotIn("headers", GreetingClient.request[1])
         self.assertFalse(payload["stream"])
