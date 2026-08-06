@@ -428,18 +428,31 @@ class Chat:
         self.messages[0] = {"role": "system", "content": prompt}
 
     def ask_stream(
-        self, text: str, cancel: threading.Event | None = None
+        self,
+        text: str,
+        cancel: threading.Event | None = None,
+        *,
+        recall: str = "",
     ) -> Iterator[str]:
         """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。
+
+        `recall` 是本轮临时检索到的 [Relevant Memories] 段。临时插在
+        最后一条 user 消息之前：这样：
+        - 不进 system prompt：保留 prompt KV cache 前缀
+        - 不进 self.messages：避免随 MAX_HISTORY 滚动污染长上下文
+        - 不变 KV cache 稳定前缀：只重算末尾两条
 
         走主 LLM（LLM_URL），纯 OpenAI Chat Completions 协议，
         不附带任何专属 header。
         """
         self.last_stop_reason = None
         self.messages.append({"role": "user", "content": text})
+        messages = self.messages
+        if recall:
+            messages = [*self.messages[:-1], {"role": "system", "content": recall}, self.messages[-1]]
         payload = {
             "model": self.model,
-            "messages": self.messages,
+            "messages": messages,
             "stream": True,
             "temperature": config.LLM_TEMPERATURE,
             "top_p": config.LLM_TOP_P,

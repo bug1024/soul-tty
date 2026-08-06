@@ -18,6 +18,9 @@ _active_chat: llm.Chat | None = None
 # Emotion 注入：cli.py 把 EmotionService.current_tts_instruct 绑到这里；
 # 每段 LLM 回答开始时取一次快照，整段播放期间保持同一份 TTS 指令。
 _emotion_instruct_provider: Callable[[], str] | None = None
+# Memory recall：cli.py 把 MemoryService.recall 绑到这里；
+# 每次主对话取一次，命中召回词时返回临时 [Relevant Memories] 段。
+_recall_provider: Callable[[str], str] | None = None
 
 
 def set_emotion_instruct_provider(
@@ -28,12 +31,31 @@ def set_emotion_instruct_provider(
     _emotion_instruct_provider = provider
 
 
+def set_recall_provider(provider: Callable[[str], str] | None) -> None:
+    """cli.py 在 MemoryService 启动后调用；None 表示关闭 recall 注入。
+
+    provider 接受用户文本、返回 [Relevant Memories] 段或空串。
+    """
+    global _recall_provider
+    _recall_provider = provider
+
+
 def _current_tts_instruct() -> str:
     provider = _emotion_instruct_provider
     if provider is None:
         return ""
     try:
         return provider() or ""
+    except Exception:
+        return ""
+
+
+def _current_recall(user_text: str) -> str:
+    provider = _recall_provider
+    if provider is None:
+        return ""
+    try:
+        return provider(user_text) or ""
     except Exception:
         return ""
 
@@ -63,13 +85,15 @@ def _print_answer(
     speaker: tts.StreamingSpeaker | None = None,
     cancel: threading.Event | None = None,
     on_token: Callable[[str], None] | None = None,
+    *,
+    recall: str = "",
 ) -> str:
     """流式打印 LLM 回答;给了 speaker 就按句切分实时送 TTS。"""
     terminal.answer_start()
     parts = []
     buf = ""
     playback_started = False
-    for token in chat.ask_stream(text, cancel):
+    for token in chat.ask_stream(text, cancel, recall=recall):
         terminal.answer_chunk(token)
         parts.append(token)
         if on_token is not None:
@@ -103,13 +127,19 @@ def _answer(
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
     # Provider 未注册时（emotion 关闭）回退到 config.MLX_TTS_INSTRUCT。
     instruct = _current_tts_instruct()
+    # 本轮检索到的相关记忆；临时插入，不进 system prompt / 不进 history。
+    recall = _current_recall(text)
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
         with tts.StreamingSpeaker(
             cancel, terminal.audio_level, instruct=instruct
         ) as speaker:
-            answer = _print_answer(chat, text, speaker, cancel, on_token)
+            answer = _print_answer(
+                chat, text, speaker, cancel, on_token, recall=recall
+            )
     else:
-        answer = _print_answer(chat, text, cancel=cancel, on_token=on_token)
+        answer = _print_answer(
+            chat, text, cancel=cancel, on_token=on_token, recall=recall
+        )
         if config.TTS_ENABLED and answer and not cancel.is_set():
             try:
                 terminal.speaking()

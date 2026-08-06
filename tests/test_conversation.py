@@ -553,7 +553,9 @@ class HalfDuplexRegressionTests(unittest.TestCase):
 class FakeStreamingChat:
     last_stop_reason = None
 
-    def ask_stream(self, text, cancel):
+    def ask_stream(self, text, cancel, *, recall=""):
+        # recall 是临时 system message，测试不消费它，只确认不会让 mock 崩
+        del recall
         yield "第一句。"
         yield "第二句！"
 
