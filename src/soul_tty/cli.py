@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from . import config, conversation, presence, relationship
+from . import config, conversation, presence, reflection
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
 from .personas.models import AvatarOutfit
@@ -147,8 +147,8 @@ def main() -> None:
     if config.RELATIONSHIP_ENABLED:
 
         def evaluate(
-            state: relationship.RelationshipState,
-            turn: relationship.CompletedTurn,
+            state: reflection.RelationshipState,
+            turn: reflection.CompletedTurn,
         ) -> dict | None:
             # 当前 mood 由 EmotionService 持有；评估时把它的快照喂给 LLM
             # 当 prompt context，让打分参考 Soul 的真实情绪状态。
@@ -176,7 +176,7 @@ def main() -> None:
             terminal.update_relationship(state, mood=current_mood)
 
         def on_evaluation_result(payload: dict) -> None:
-            """RelationshipService 把 apply_evaluation 的 payload 抛上来；这里分发到 emotion/expression。"""
+            """ReflectionWorker 把 apply_evaluation 的 payload 抛上来；这里分发到 emotion/expression。"""
             if emotion_service is None:
                 return
             emotion_delta = payload.get("emotion_delta") or {}
@@ -193,7 +193,7 @@ def main() -> None:
             except Exception:
                 pass
 
-        relationship_service = relationship.RelationshipService(
+        relationship_service = reflection.ReflectionWorker(
             persona.id,
             evaluate,
             on_relationship_update,
@@ -213,7 +213,7 @@ def main() -> None:
             relationship_state.interaction_count,
             relationship_state.recent_events,
         )
-        relationship.install(relationship_service)
+        reflection.install(relationship_service)
         relationship_service.start()
     else:
         terminal.configure_relationship()
@@ -322,7 +322,7 @@ def main() -> None:
     except KeyboardInterrupt:
         terminal.goodbye()
     finally:
-        relationship.close()
+        reflection.close()
         if emotion_service is not None:
             emotion_service.stop()
         terminal.close()

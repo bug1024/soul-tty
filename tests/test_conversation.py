@@ -597,7 +597,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             patch.object(main_module.terminal, "answer_start"),
             patch.object(main_module.terminal, "answer_chunk"),
             patch.object(main_module.terminal, "answer_end"),
-            patch.object(main_module.relationship, "record_turn") as record,
+            patch.object(main_module.reflection, "record_turn") as record,
         ):
             answer = main_module._answer(FakeStreamingChat(), "你好")
 
@@ -612,7 +612,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             patch.object(main_module.terminal, "answer_start"),
             patch.object(main_module.terminal, "answer_chunk"),
             patch.object(main_module.terminal, "answer_end"),
-            patch.object(main_module.relationship, "record_turn") as record,
+            patch.object(main_module.reflection, "record_turn") as record,
         ):
             main_module._answer(FakeStreamingChat(), "你好", cancel)
 
@@ -627,7 +627,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             patch.object(main_module.terminal, "answer_end"),
             patch.object(main_module.terminal, "speaking"),
             patch.object(main_module.tts, "speak") as speak_mock,
-            patch.object(main_module.relationship, "record_turn"),
+            patch.object(main_module.reflection, "record_turn"),
         ):
             main_module._answer(FakeStreamingChat(), "你好")
 

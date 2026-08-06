@@ -7,9 +7,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from soul_tty import config
-from soul_tty.relationship import (
+from soul_tty.reflection import (
     CompletedTurn,
-    RelationshipService,
+    ReflectionWorker,
     RelationshipState,
     apply_evaluation,
     level_for,
@@ -49,7 +49,7 @@ class RelationshipStateTests(unittest.TestCase):
         # 0.20 + (0.03 * 0.9) * (1 - 0.20) = 0.2216
         self.assertAlmostEqual(updated.bond, 0.2216, places=4)
         self.assertEqual(updated.inner_voice, "被你惦记着真好。")
-        # interaction_count 由 RelationshipService 在每轮评估时统一递增；
+        # interaction_count 由 ReflectionWorker 在每轮评估时统一递增；
         # apply_evaluation 不再触碰它。
         self.assertEqual(updated.interaction_count, 2)
 
@@ -293,7 +293,7 @@ class RelationshipStateTests(unittest.TestCase):
         self.assertGreater(low.bond - 0.05, high.bond - 0.90)
 
 
-class RelationshipServiceTests(unittest.TestCase):
+class ReflectionWorkerTests(unittest.TestCase):
     def test_llm_evaluation_runs_off_the_main_path(self):
         entered = threading.Event()
         release = threading.Event()
@@ -310,7 +310,7 @@ class RelationshipServiceTests(unittest.TestCase):
             }
 
         with TemporaryDirectory() as directory:
-            service = RelationshipService(
+            service = ReflectionWorker(
                 "serena",
                 evaluate,
                 lambda state: updated.set(),
@@ -357,7 +357,7 @@ class RelationshipServiceTests(unittest.TestCase):
             raise RuntimeError("temporary model failure")
 
         with TemporaryDirectory() as directory:
-            service = RelationshipService(
+            service = ReflectionWorker(
                 "serena",
                 evaluate,
                 state_dir=Path(directory),
@@ -386,7 +386,7 @@ class RelationshipServiceTests(unittest.TestCase):
             }
 
         with TemporaryDirectory() as directory:
-            service = RelationshipService(
+            service = ReflectionWorker(
                 "serena",
                 evaluate,
                 state_dir=Path(directory),
@@ -418,7 +418,7 @@ class RelationshipServiceTests(unittest.TestCase):
             }
 
         with TemporaryDirectory() as directory:
-            service = RelationshipService(
+            service = ReflectionWorker(
                 "serena",
                 evaluate,
                 lambda state: updated.set(),
@@ -459,7 +459,7 @@ def test_evaluate_relationship_system_prompt_declares_three_state_lanes():
 # --- Task 13/14: apply_evaluation returns payload + emotion hook ---
 
 def test_apply_evaluation_returns_emotion_payload():
-    from src.soul_tty.relationship import (
+    from src.soul_tty.reflection import (
         RelationshipState,
         apply_evaluation,
     )
@@ -484,10 +484,10 @@ def test_apply_evaluation_returns_emotion_payload():
 
 
 def test_relationship_service_dispatches_evaluation_payload_to_coordinator():
-    """RelationshipService 不再直接管 emotion；payload 透传给 on_evaluation 协调器。"""
+    """ReflectionWorker 不再直接管 emotion；payload 透传给 on_evaluation 协调器。"""
     import time
     import tempfile
-    from src.soul_tty.relationship import RelationshipService
+    from src.soul_tty.reflection import ReflectionWorker
 
     payloads = []
 
@@ -505,7 +505,7 @@ def test_relationship_service_dispatches_evaluation_payload_to_coordinator():
 
     with tempfile.TemporaryDirectory() as tmp:
         from pathlib import Path
-        svc = RelationshipService(
+        svc = ReflectionWorker(
             persona_id="serena",
             evaluator=fake_evaluator,
             on_update=None,
