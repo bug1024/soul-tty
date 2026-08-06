@@ -17,6 +17,7 @@ from .state import (
     new_session_id,
     save_emotion_state,
 )
+from .tts_mapping import build_tts_instruct
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,19 @@ class EmotionService:
                 context_text=build_emotion_context(
                     mood, intensity, expression=self._expression
                 ),
+            )
+
+    def current_tts_instruct(self) -> str:
+        """当前 emotion / expression 对应的 TTS 指令文本。
+
+        调用方应在每次 TTS 播报前取一次快照；同一段回答内不应再变，
+        否则会出现同一句话念到一半突然换语气的问题。
+        calm + neutral 返回空串，让 persona 默认值生效。
+        """
+        with self._lock:
+            mood, intensity = resolver.resolve_mood(self._emotion)
+            return build_tts_instruct(
+                mood, intensity, expression=self._expression
             )
 
     def apply_delta(

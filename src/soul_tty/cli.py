@@ -112,6 +112,11 @@ def main() -> None:
         apply_persona(persona, emotion_service=emotion_service)
         emotion_service.start_decay_thread()
         terminal.configure_emotion(emotion_service)
+        # TTS 链路：每段回答开始时取一次 emotion snapshot 作为 instruct，
+        # 整段播放期间锁定同一份指令，避免同一句话中途换语气。
+        conversation.set_emotion_instruct_provider(
+            emotion_service.current_tts_instruct
+        )
 
     try:
         main_model = llm.pick_model(config.LLM_URL, config.LLM_MODEL)

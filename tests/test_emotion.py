@@ -480,6 +480,65 @@ def test_should_update_prompt_stable_when_no_change():
     assert snap.should_update_prompt is False
 
 
+def test_current_tts_instruct_calm_neutral_returns_empty():
+    """默认 calm + neutral → 空串，让 persona 默认 instruct 生效。"""
+    from src.soul_tty.emotion.service import EmotionService
+
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+    )
+    assert svc.current_tts_instruct() == ""
+
+
+def test_current_tts_instruct_caring_overrides():
+    """caring expression 强制覆盖 mood 默认 instruct。"""
+    from src.soul_tty.emotion.service import EmotionService
+
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.5, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+    )
+    svc.apply_delta({}, expression_hint="caring")
+    text = svc.current_tts_instruct()
+    assert "温柔" in text or "关切" in text
+
+
+def test_current_tts_instruct_happy_returns_instruct():
+    """切到 happy mood 后返回上扬风格指令。"""
+    from src.soul_tty.emotion.service import EmotionService
+
+    baseline = EmotionVector(
+        happiness=0.5, calmness=0.5, curiosity=0.5, stress=0.2, energy=0.5
+    )
+    svc = EmotionService(
+        persona_id="serena",
+        baseline=baseline,
+        state_dir=None,
+        jitter=0.0,
+        seed=1,
+        ema_rate=0.6,  # 加快收敛，让一次 delta 就足以切 mood
+    )
+    svc.apply_delta({"happiness": 0.3, "energy": 0.3}, expression_hint="neutral")
+    text = svc.current_tts_instruct()
+    # mood 可能落在 happy 或 excited；任意一种都应有非空 instruct
+    assert text != ""
+    assert ("开心" in text or "上扬" in text
+            or "兴奋" in text or "激动" in text)
+
+
 # --- Task 18: End-to-end smoke test ---
 
 def test_end_to_end_prompt_composition():
