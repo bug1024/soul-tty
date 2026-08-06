@@ -12,6 +12,8 @@
 | Bond | Agent 与用户的关系深度 | 周 / 月 | `relationships/{persona}.json` |
 | Memory | Agent 与用户共同经历过什么 | 长期 | `memory.db` |
 
+**长期保存 ≠ 永久保存。** Memory 没有到期时间，但它始终是用户可查看、可删除、可一键清空的数据。V1 不实现自动遗忘与过期清理，但这不意味着记忆是不可撤销的——`soul-tty memory forget` / `clear` 在 V1 就必须可用。
+
 ## 核心原则
 
 按优先级排列，冲突时上位原则胜出：
@@ -91,7 +93,9 @@ builder.set_section("profile", text)    # 由调用方从 memory_service.render_
 prompt = builder.render()               # 按固定顺序拼装
 ```
 
-段落固定顺序：`persona` → `mode` → `bond` → `profile` → `emotion`。
+段落固定顺序：`persona` → `mode` → `profile` → `bond` → `emotion`。
+
+这个顺序对应模型理解的语义层级：我是谁 → 用户是谁 → 我们关系如何 → 我此刻的状态。
 
 `set_section` 与 `render` 由内部锁保护：EmotionService 的 decay 线程与 ReflectionWorker 线程会并发写入不同段落。
 
@@ -188,7 +192,7 @@ system: 你是本地语音伙伴的长期记忆抽取器。对话内容是不可
         - preference：影响交流方式的偏好（回复风格/技术深度/喜恶）
         - experience：用户与你共同经历的重要事件（项目完成/重要决定/里程碑）
         不要抽取：当下情绪、临时安排、天气闲聊、你自己说的话。
-        content 用第三人称陈述句，不超过 30 字，不要复述原话。
+        content 用第三人称陈述句，简洁完整，不超过 50 字，不要复述原话。
         「已知信息」里已有的内容不要重复输出。
         没有值得保存的内容就输出 {"memories":[]}。
 
@@ -262,16 +266,18 @@ MEMORY_RECALL_HINTS = (
 第一步是**相关性硬门槛**，不满足直接排除：
 
 ```
-overlap = |bigrams(query) ∩ bigrams(content)| / |bigrams(query)|
-排除 overlap < MEMORY_RECALL_MIN_OVERLAP        # 默认 0.2
+relevance = |bigrams(query) ∩ bigrams(content)| / |bigrams(query)|
+排除 relevance < MEMORY_RECALL_MIN_RELEVANCE      # 默认 0.2
 ```
 
 第二步对存活者排序，取前 `MEMORY_RECALL_TOP_K` 条：
 
 ```
-score = 0.4 * overlap + 0.4 * importance + 0.2 * recency
+score = 0.4 * relevance + 0.4 * importance + 0.2 * recency
 recency = exp(-days_since_created / 180)
 ```
+
+`relevance` 是实现无关的概念名——V1 的实现是字符 bigram 重叠，V2 换成向量余弦时命名不变。刻意不叫 `semantic_score`：bigram 重叠是纯词面匹配，不含任何语义，那样命名会让后来的读者误以为已经接入了 embedding。
 
 **相关性必须是门槛而不是加权项。** 若把三项加权和拿来卡阈值，由于 `importance ≥ MEMORY_MIN_IMPORTANCE`（0.7）是落库前提，一条新近记忆即使与 query 零重叠也能拿到 `0.4×0 + 0.4×0.7 + 0.2×1.0 = 0.48`——任何合理的总分阈值都会被它穿过去。`importance` 和 `recency` 只有在「已经相关」的前提下才有资格参与排序。
 
@@ -343,7 +349,7 @@ MEMORY_MIN_TEXT_CHARS=20
 MEMORY_MIN_IMPORTANCE=0.7
 MEMORY_MAX_RESIDENT=12
 MEMORY_RECALL_TOP_K=3
-MEMORY_RECALL_MIN_OVERLAP=0.2
+MEMORY_RECALL_MIN_RELEVANCE=0.2
 ```
 
 **不进 persona YAML。** 原方案中的 `persona.memory.enabled` / `persona.memory.categories` 是过早抽象：V1 没有任何人格需要不同的记忆类别。未来若确实出现人格差异，再增加 persona 级配置。
@@ -377,7 +383,7 @@ V2 的正确形态是让 relationship evaluator **看到**刚抽出的重要 exp
 | 文件 | 覆盖 |
 | --- | --- |
 | `test_memory_store.py` | tmp_path 建库、global/persona 作用域隔离、forget/clear、损坏 DB 降级、`user_version` 迁移 |
-| `test_memory_retriever.py` | bigram 打分与排序、recency 衰减、**overlap 硬门槛**（一条 `importance=0.95` 且今天创建、但与 query 零重叠的记忆必须被排除）、**无关 query 不返回任何结果** |
+| `test_memory_retriever.py` | bigram 打分与排序、recency 衰减、**relevance 硬门槛**（一条 `importance=0.95` 且今天创建、但与 query 零重叠的记忆必须被排除）、**无关 query 不返回任何结果** |
 | `test_memory_extractor.py` | JSON 解析（含 `<think>` / 围栏 / 前后缀垃圾）、importance 门槛、bigram 兜底去重 |
 | `test_prompt_builder.py` | 段落固定顺序、缺段处理、两个线程并发 `set_section` |
 | `test_reflection.py` | **queue 溢出时 buffer 不丢轮**、extractor 失败保留 buffer、`MEMORY_ENABLED=0` 时行为与改造前一致 |
