@@ -7,6 +7,25 @@
 麦克风 → 流式识别 → 流式对话 → 流式语音，整条链路没有云依赖。
 `uv run soul-tty` 之后，你对着终端说话，她就醒了。
 
+<p align="center">
+  <img src="assets/screenshots/serena-0.png" alt="Soul-TTY 运行截图：启动后的对话界面" width="900">
+</p>
+
+**换装即换人格。** 每套装映射一种行为语气，按 `0` 循环切换：
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="assets/screenshots/serena-3.png" alt="默认装 companion"></td>
+    <td align="center" width="33%"><img src="assets/screenshots/serena-2.png" alt="深夜装 late_night"></td>
+    <td align="center" width="33%"><img src="assets/screenshots/serena-1.png" alt="工作装 focused"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>默认装</b> · <code>companion</code><br><sub>标准陪伴形态，情绪中性、活力在线</sub></td>
+    <td align="center"><b>深夜装</b> · <code>late_night</code><br><sub>情绪基线压低、节奏放缓</sub></td>
+    <td align="center"><b>工作装</b> · <code>focused</code><br><sub>警觉度上升、好奇度拉高、不跑题</sub></td>
+  </tr>
+</table>
+
 ---
 
 ## 1. What is Soul-TTY
@@ -246,7 +265,7 @@ bond ← bond + delta × (1 - bond)
 
 ## 7. Outfit & Modes
 
-换装不只是换一张图。每个套装标注一个 `mode`，这个 mode 决定情绪系统如何解释"现在是哪种陪伴状态"：
+换装不只是换一张图（运行截图见文首）。每个套装标注一个 `mode`，这个 mode 决定情绪系统如何解释"现在是哪种陪伴状态"：
 
 | 套装 | mode | 含义 | 适合 |
 |---|---|---|---|
