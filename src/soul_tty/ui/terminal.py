@@ -231,11 +231,11 @@ class Dashboard:
         relationship_voice = (
             _relationship_profile[3] if _relationship_profile is not None else ""
         )
-        self.relationship_session_count = (
+        self.relationship_evaluation_count = (
             _relationship_profile[4] if _relationship_profile is not None else 0
         )
-        self.relationship_event = (
-            _relationship_profile[5] if _relationship_profile is not None else ""
+        self.relationship_recent_events: tuple[str, ...] = (
+            _relationship_profile[5] if _relationship_profile is not None else ()
         )
         # 情绪系统：初值从 EmotionService 快照拉一次，
         # 后续由 set_emotion 接收 on_update 回调热更新。
@@ -478,8 +478,8 @@ class Dashboard:
             emotion_intensity=self.emotion_intensity,
             emotion_expression=self.emotion_expression,
             emotion_vector=self.emotion_vector,
-            relationship_session_count=self.relationship_session_count,
-            relationship_event=self.relationship_event,
+            relationship_evaluation_count=self.relationship_evaluation_count,
+            relationship_recent_events=self.relationship_recent_events,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -750,16 +750,16 @@ class Dashboard:
         mood: str,
         inner_voice: str = "",
         *,
-        session_count: int = 0,
-        event: str = "",
+        evaluation_count: int = 0,
+        recent_events: tuple[str, ...] = (),
     ) -> None:
         """保存旁路结果；画外音只在空闲聆听状态安全切换。"""
         with self._lock:
             self.relationship_bond = bond
             self.relationship_level = level
             self.relationship_mood = mood
-            self.relationship_session_count = session_count
-            self.relationship_event = event
+            self.relationship_evaluation_count = evaluation_count
+            self.relationship_recent_events = recent_events
             if self._idle_emotion_active:
                 self.presence_hint = _idle_presence_hint(
                     mood,
@@ -924,12 +924,12 @@ def configure_relationship(
     level: str = "",
     mood: str = "calm",
     inner_voice: str = "",
-    session_count: int = 0,
-    event: str = "",
+    evaluation_count: int = 0,
+    recent_events: tuple[str, ...] = (),
 ) -> None:
     global _relationship_profile
     _relationship_profile = (
-        (bond, level, mood, inner_voice, session_count, event)
+        (bond, level, mood, inner_voice, evaluation_count, recent_events)
         if bond is not None
         else None
     )
@@ -968,8 +968,8 @@ def update_relationship(state, *, mood: str | None = None) -> None:
         state.level,
         resolved_mood,
         state.inner_voice,
-        session_count=state.session_count,
-        event=state.event,
+        evaluation_count=state.evaluation_count,
+        recent_events=state.recent_events,
     )
 
 
@@ -1160,16 +1160,21 @@ def _emotion_detail_text(vector) -> Text:
 
 
 def _relationship_detail_text(
-    session_count: int,
-    event: str,
+    evaluation_count: int,
+    recent_events: tuple[str, ...],
 ) -> Text:
-    """亲密详情行：关系事件次数 + 最近事件，给 Tab 详情行使用。"""
+    """亲密详情行：关系事件次数 + 最近事件，给 Tab 详情行使用。
+
+    默认只显示最近一次；超过 1 条时把更早的事件用「此前：N 次」汇总。
+    """
     text = Text(style="dim")
     bits: list[str] = []
-    if session_count > 0:
-        bits.append(f"共 {session_count} 次关系事件")
-    if event:
-        bits.append(f"上次：{event[:20]}")
+    if evaluation_count > 0:
+        bits.append(f"共 {evaluation_count} 次关系事件")
+    if recent_events:
+        bits.append(f"上次：{recent_events[-1][:20]}")
+        if len(recent_events) > 1:
+            bits.append(f"此前：{len(recent_events) - 1} 次")
     if not bits:
         bits.append("初次见面")
     text.append("  " + " · ".join(bits))
@@ -1219,8 +1224,8 @@ def _splash_panel(
     emotion_intensity: float = 0.0,
     emotion_expression: str = "neutral",
     emotion_vector=None,
-    relationship_session_count: int = 0,
-    relationship_event: str = "",
+    relationship_evaluation_count: int = 0,
+    relationship_recent_events: tuple[str, ...] = (),
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -1286,7 +1291,7 @@ def _splash_panel(
         _emotion_detail_text(emotion_vector) if show_details else Text()
     )
     relationship_detail = (
-        _relationship_detail_text(relationship_session_count, relationship_event)
+        _relationship_detail_text(relationship_evaluation_count, relationship_recent_events)
         if show_details
         else Text()
     )

@@ -148,6 +148,10 @@ RELATIONSHIP_MIN_CONFIDENCE = float(
 RELATIONSHIP_LLM_MAX_TOKENS = int(
     os.environ.get("RELATIONSHIP_LLM_MAX_TOKENS", "96")
 )
+# 最近关系事件保留条数（FIFO）；超过则丢最旧的，避免无限增长。
+RELATIONSHIP_MAX_RECENT_EVENTS = int(
+    os.environ.get("RELATIONSHIP_MAX_RECENT_EVENTS", "20")
+)
 
 # 实时情绪系统（multi-dim emotion with EMA smoothing + idle decay）
 EMOTION_ENABLED = os.environ.get("EMOTION_ENABLED", "1") not in (

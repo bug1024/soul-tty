@@ -33,7 +33,7 @@ class RelationshipStateTests(unittest.TestCase):
         self.assertEqual(level_for(1.5), "bonded")
 
     def test_applies_only_confident_bounded_llm_evaluation(self):
-        state = RelationshipState(bond=0.20, session_count=2)
+        state = RelationshipState(bond=0.20, evaluation_count=2)
         result = {
             "event": "真诚关心",
             "relationship_delta": {"bond": 99},
@@ -45,12 +45,33 @@ class RelationshipStateTests(unittest.TestCase):
 
         self.assertIsNotNone(payload)
         updated = payload["relationship"]
-        # 边际递减：0.20 + 0.03 * (1 - 0.20) = 0.224
-        self.assertAlmostEqual(updated.bond, 0.224, places=4)
+        # 边际递减 + confidence 缩放：
+        # 0.20 + (0.03 * 0.9) * (1 - 0.20) = 0.2216
+        self.assertAlmostEqual(updated.bond, 0.2216, places=4)
         self.assertEqual(updated.inner_voice, "被你惦记着真好。")
-        # session_count 由 RelationshipService 在每轮评估时统一递增；
+        # evaluation_count 由 RelationshipService 在每轮评估时统一递增；
         # apply_evaluation 不再触碰它。
-        self.assertEqual(updated.session_count, 2)
+        self.assertEqual(updated.evaluation_count, 2)
+
+    def test_bond_delta_scales_with_confidence(self):
+        """同样 delta，confidence 越高 bond 增长越大；不破坏边际递减。"""
+        result = {
+            "relationship_delta": {"bond": 0.03},
+            "event": "",
+            "inner_voice": "",
+            "confidence": 0.9,
+        }
+        with patch.object(config, "RELATIONSHIP_MAX_DELTA", 0.03):
+            full = apply_evaluation(RelationshipState(bond=0.20), result)
+        # 同样 delta 在 confidence=0.7 时只产生 7/9 效果（仍高于 MIN_CONFIDENCE）
+        result["confidence"] = 0.7
+        with patch.object(config, "RELATIONSHIP_MAX_DELTA", 0.03):
+            half = apply_evaluation(RelationshipState(bond=0.20), result)
+        # 0.20 + 0.03*0.9*(1-0.20) = 0.2216
+        self.assertAlmostEqual(full["relationship"].bond, 0.2216, places=4)
+        # 0.20 + 0.03*0.7*(1-0.20) = 0.2168
+        self.assertAlmostEqual(half["relationship"].bond, 0.2168, places=4)
+        self.assertGreater(full["relationship"].bond, half["relationship"].bond)
 
     def test_rejects_low_confidence_evaluation(self):
         with patch.object(config, "RELATIONSHIP_MIN_CONFIDENCE", 0.65):
@@ -93,9 +114,9 @@ class RelationshipStateTests(unittest.TestCase):
     def test_persistent_relationship_resets_session_only_voice(self):
         state = RelationshipState(
             bond=0.47,
-            event="共同玩笑",
+            recent_events=("共同玩笑",),
             inner_voice="好像更懂你一点了。",
-            session_count=8,
+            evaluation_count=8,
             updated_at="2026-08-03T12:00:00+08:00",
         )
         with TemporaryDirectory() as directory:
@@ -105,8 +126,8 @@ class RelationshipStateTests(unittest.TestCase):
             restored = load_state(path)
 
         self.assertEqual(restored.bond, state.bond)
-        self.assertEqual(restored.session_count, state.session_count)
-        self.assertEqual(restored.event, state.event)
+        self.assertEqual(restored.evaluation_count, state.evaluation_count)
+        self.assertEqual(restored.recent_events, state.recent_events)
         self.assertEqual(restored.updated_at, state.updated_at)
         self.assertEqual(restored.inner_voice, "")
         self.assertNotIn("inner_voice", raw)
@@ -117,7 +138,7 @@ class RelationshipStateTests(unittest.TestCase):
             path = Path(directory) / "legacy_score.json"
             path.write_text(
                 json.dumps(
-                    {"score": 75, "event": "老数据", "session_count": 5},
+                    {"score": 75, "event": "老数据", "evaluation_count": 5},
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -125,12 +146,110 @@ class RelationshipStateTests(unittest.TestCase):
             restored = load_state(path)
             # 75 / 100 = 0.75
             self.assertAlmostEqual(restored.bond, 0.75, places=4)
-            self.assertEqual(restored.event, "老数据")
-            self.assertEqual(restored.session_count, 5)
+            self.assertEqual(restored.recent_events, ("老数据",))
+            self.assertEqual(restored.evaluation_count, 5)
             # 内存迁移不写回原文件
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertIn("score", raw)
             self.assertNotIn("bond", raw)
+
+    def test_recent_events_field_round_trips_through_disk(self):
+        """recent_events 列表经 save/load 完整保留顺序与内容。"""
+        state = RelationshipState(
+            bond=0.20,
+            recent_events=("关心", "共同玩笑", "信任"),
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "relationships" / "serena.json"
+            save_state(path, state)
+            restored = load_state(path)
+        self.assertEqual(restored.recent_events, ("关心", "共同玩笑", "信任"))
+
+    def test_recent_events_capped_at_max(self):
+        """append 超出 RELATIONSHIP_MAX_RECENT_EVENTS 时丢最旧的。"""
+        from soul_tty import config as cfg
+        with patch.object(cfg, "RELATIONSHIP_MAX_RECENT_EVENTS", 3):
+            state = RelationshipState(bond=0.20, recent_events=("a", "b"))
+            payload = apply_evaluation(
+                state,
+                {
+                    "relationship_delta": {"bond": 0.0},
+                    "event": "c",
+                    "inner_voice": "",
+                    "confidence": 0.9,
+                },
+            )
+            updated = payload["relationship"]
+            self.assertEqual(updated.recent_events, ("a", "b", "c"))
+
+            payload = apply_evaluation(
+                updated,
+                {
+                    "relationship_delta": {"bond": 0.0},
+                    "event": "d",
+                    "inner_voice": "",
+                    "confidence": 0.9,
+                },
+            )
+            updated = payload["relationship"]
+            # 上限 3，最老的 "a" 被丢
+            self.assertEqual(updated.recent_events, ("b", "c", "d"))
+
+    def test_apply_evaluation_skips_blank_event(self):
+        """event 字段为空字符串时不追加，保持 recent_events 不变。"""
+        state = RelationshipState(bond=0.20, recent_events=("x",))
+        payload = apply_evaluation(
+            state,
+            {
+                "relationship_delta": {"bond": 0.0},
+                "event": "",
+                "inner_voice": "",
+                "confidence": 0.9,
+            },
+        )
+        self.assertEqual(payload["relationship"].recent_events, ("x",))
+
+    def test_expression_passes_through_without_hardcoded_default(self):
+        """expression 不再 hardcode：LLM 输出什么就透传什么；缺省传空串。"""
+        state = RelationshipState(bond=0.10)
+
+        # 已知合法值（caring）正常透传
+        payload = apply_evaluation(
+            state,
+            {
+                "relationship_delta": {"bond": 0.0},
+                "event": "",
+                "inner_voice": "",
+                "confidence": 0.9,
+                "expression": "caring",
+            },
+        )
+        self.assertEqual(payload["expression_state"], {"style": "caring"})
+
+        # 未知值也透传；ExpressionService.resolve() 才是收敛层
+        payload = apply_evaluation(
+            state,
+            {
+                "relationship_delta": {"bond": 0.0},
+                "event": "",
+                "inner_voice": "",
+                "confidence": 0.9,
+                "expression": "playful",
+            },
+        )
+        self.assertEqual(payload["expression_state"], {"style": "playful"})
+
+        # 缺省 / 空值：透传空串而非硬编码 "neutral"
+        payload = apply_evaluation(
+            state,
+            {
+                "relationship_delta": {"bond": 0.0},
+                "event": "",
+                "inner_voice": "",
+                "confidence": 0.9,
+            },
+        )
+        self.assertEqual(payload["expression_state"], {"style": ""})
 
     def test_bond_delta_follows_diminishing_returns(self):
         """同样 delta=0.03，bond 越高增长越少（边际递减）。"""
@@ -143,10 +262,10 @@ class RelationshipStateTests(unittest.TestCase):
         with patch.object(config, "RELATIONSHIP_MAX_DELTA", 0.03):
             low = apply_evaluation(low_state, result)["relationship"]
             high = apply_evaluation(high_state, result)["relationship"]
-        # 0.05 + 0.03*(1-0.05) = 0.0785
-        self.assertAlmostEqual(low.bond, 0.0785, places=4)
-        # 0.90 + 0.03*(1-0.90) = 0.903
-        self.assertAlmostEqual(high.bond, 0.903, places=4)
+        # 0.05 + 0.03*0.9*(1-0.05) = 0.07565
+        self.assertAlmostEqual(low.bond, 0.07565, places=4)
+        # 0.90 + 0.03*0.9*(1-0.90) = 0.9027
+        self.assertAlmostEqual(high.bond, 0.9027, places=4)
         self.assertGreater(low.bond - 0.05, high.bond - 0.90)
 
 
@@ -260,8 +379,8 @@ class RelationshipServiceTests(unittest.TestCase):
         self.assertIn("第1轮：第一问", evaluated[0].user_text)
         self.assertIn("第2轮：第二答", evaluated[0].agent_text)
 
-    def test_session_count_increments_per_evaluation_regardless_of_confidence(self):
-        """每轮 LLM 评估都让 session_count +1（不管 confidence 够不够）。"""
+    def test_evaluation_count_increments_per_evaluation_regardless_of_confidence(self):
+        """每轮 LLM 评估都让 evaluation_count +1（不管 confidence 够不够）。"""
         updated = threading.Event()
 
         def evaluate(state, turn):
@@ -284,14 +403,14 @@ class RelationshipServiceTests(unittest.TestCase):
                 idle_delay_s=0,
                 min_interval_s=0,
             )
-            self.assertEqual(service.state.session_count, 0)
+            self.assertEqual(service.state.evaluation_count, 0)
             service.start()
             self.assertTrue(service.submit("hi", "hello back"))
             self.assertTrue(updated.wait(timeout=1))
             service.stop()
 
-        # 即便 confidence 不足，session_count 也应该 +1
-        self.assertEqual(service.state.session_count, 1)
+        # 即便 confidence 不足，evaluation_count 也应该 +1
+        self.assertEqual(service.state.evaluation_count, 1)
         # bond 不变：低 confidence 不扣分也不加分
         self.assertEqual(service.state.bond, config.RELATIONSHIP_INITIAL_BOND)
 
@@ -332,8 +451,9 @@ def test_apply_evaluation_returns_emotion_payload():
     }
     payload = apply_evaluation(state, result)
     assert payload is not None
-    # 边际递减：0.10 + 0.01 * (1 - 0.10) = 0.109
-    assert abs(payload["relationship"].bond - 0.109) < 1e-6
+    # 边际递减 + confidence 缩放：
+    # 0.10 + (0.01 * 0.85) * (1 - 0.10) = 0.10765
+    assert abs(payload["relationship"].bond - 0.10765) < 1e-6
     assert payload["emotion_delta"] == {"happiness": 0.15, "stress": -0.05}
     # expression 改为 expression_state 包 dict，给未来扩展留位
     assert payload["expression_state"] == {"style": "caring"}

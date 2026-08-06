@@ -53,9 +53,10 @@ class CompletedTurn:
 @dataclass(frozen=True)
 class RelationshipState:
     bond: float = 0.05
-    event: str = ""
+    # 最近关系事件描述，FIFO 队列；上限由 RELATIONSHIP_MAX_RECENT_EVENTS 控制。
+    recent_events: tuple[str, ...] = ()
     inner_voice: str = ""
-    session_count: int = 0
+    evaluation_count: int = 0
     updated_at: str = ""
 
     @property
@@ -107,12 +108,25 @@ def load_state(path: Path) -> RelationshipState:
     else:
         bond = _clamp_unit(config.RELATIONSHIP_INITIAL_BOND)
 
+    # 兼容旧字段 event (str) → recent_events (tuple)；旧数据读到后
+    # 自动折成单元素 tuple，下次写入会升级到 recent_events 字段。
+    legacy_event = str(data.get("event", "")).strip()[:80]
+    raw_events = data.get("recent_events")
+    if isinstance(raw_events, list):
+        recent_events = tuple(
+            str(item).strip()[:80] for item in raw_events if item
+        )
+    elif legacy_event:
+        recent_events = (legacy_event,)
+    else:
+        recent_events = ()
+
     return RelationshipState(
         bond=bond,
         # 画外音只属于本次会话；bond 与事件才跨启动保存。
-        event=str(data.get("event", ""))[:80],
+        recent_events=recent_events,
         inner_voice="",
-        session_count=max(0, int(data.get("session_count", 0))),
+        evaluation_count=max(0, int(data.get("evaluation_count", 0))),
         updated_at=str(data.get("updated_at", "")),
     )
 
@@ -179,17 +193,31 @@ def apply_evaluation(
         config.RELATIONSHIP_MAX_DELTA,
         max(0.0, bond_delta),
     )
+    # 用 confidence 缩放：低置信度评估的 delta 按比例缩小，
+    # 让 LLM 的"自我怀疑"也反映到 bond 变化上（不会到 0，但接近 0）。
+    bond_delta = bond_delta * confidence
 
     # 边际递减：new = old + delta * (1 - old)。即使 0.9 也不会快速增长。
     new_bond = _clamp_unit(state.bond + bond_delta * (1.0 - state.bond))
 
+    # 把本轮事件 append 到 recent_events 尾部，超出上限丢最旧的。
+    new_event = str(result.get("event", "")).strip()[:80]
+    if new_event:
+        events = [*state.recent_events, new_event]
+        cap = config.RELATIONSHIP_MAX_RECENT_EVENTS
+        if cap > 0 and len(events) > cap:
+            events = events[-cap:]
+        new_events: tuple[str, ...] = tuple(events)
+    else:
+        new_events = state.recent_events
+
     new_relationship = RelationshipState(
         bond=new_bond,
-        event=str(result.get("event", ""))[:80],
+        recent_events=new_events,
         inner_voice=_clean_inner_voice(result.get("inner_voice", "")),
-        # session_count 由 RelationshipService 在每轮评估时统一递增，
+        # evaluation_count 由 RelationshipService 在每轮评估时统一递增，
         # apply_evaluation 不再触碰它。
-        session_count=state.session_count,
+        evaluation_count=state.evaluation_count,
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
 
@@ -206,10 +234,11 @@ def apply_evaluation(
             except (TypeError, ValueError):
                 continue
 
-    # Expression：包成 dict 给未来 voice_style / avatar_expression 留位。
-    # 当前只透传 style；ExpressionService 负责收敛合法值。
-    expression_raw = str(result.get("expression", "neutral")).strip().lower()
-    style = expression_raw or "neutral"
+    # Expression：透传 LLM 输出的字符串（已 strip + lower），
+    # 不在这里硬编码默认值；ExpressionService.resolve() 负责收敛合法值。
+    # 缺省传空串，让 ExpressionService 决定回退，而不是这里预设。
+    expression_raw = str(result.get("expression", "")).strip().lower()
+    style = expression_raw
 
     return {
         "relationship": new_relationship,
@@ -369,9 +398,9 @@ class RelationshipService:
                 # 每轮评估 +1：无论 confidence 够不够，HUD 上的「关系事件」计数都该往上走。
                 incremented = RelationshipState(
                     bond=current.bond,
-                    event=current.event,
+                    recent_events=current.recent_events,
                     inner_voice=current.inner_voice,
-                    session_count=current.session_count + 1,
+                    evaluation_count=current.evaluation_count + 1,
                     updated_at=datetime.now().astimezone().isoformat(
                         timespec="seconds"
                     ),

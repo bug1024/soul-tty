@@ -176,8 +176,10 @@ def main() -> None:
                 return
             emotion_delta = payload.get("emotion_delta") or {}
             expression_state = payload.get("expression_state") or {}
-            style = expression_state.get("style", "neutral")
-            if not emotion_delta and style == "neutral":
+            style = expression_state.get("style", "")
+            # 既无情绪变化、又无 expression 信号时跳过 apply_delta；
+            # 空串是"LLM 没明确表态"的占位，由 ExpressionService 决定回退。
+            if not emotion_delta and not style:
                 return
             try:
                 # EmotionService.apply_delta 内部会把 expression_hint 转给
@@ -203,8 +205,8 @@ def main() -> None:
             relationship_state.level,
             initial_mood,
             relationship_state.inner_voice,
-            relationship_state.session_count,
-            relationship_state.event,
+            relationship_state.evaluation_count,
+            relationship_state.recent_events,
         )
         relationship.install(relationship_service)
         relationship_service.start()

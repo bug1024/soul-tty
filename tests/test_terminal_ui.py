@@ -237,8 +237,8 @@ class TerminalUITests(unittest.TestCase):
                     emotion_mood="excited",
                     emotion_intensity=0.75,
                     emotion_vector=vector,
-                    relationship_session_count=8,
-                    relationship_event="共同玩笑",
+                    relationship_evaluation_count=8,
+                    relationship_recent_events=("共同玩笑",),
                 )
             )
 
