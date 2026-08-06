@@ -33,8 +33,8 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["personas", "outfits"],
-        help="列出可用人格或当前人格的头像套装",
+        choices=["personas", "outfits", "memory"],
+        help="列出可用人格、当前人格的头像套装，或管理 Memory",
     )
     parser.add_argument(
         "--persona",
@@ -53,12 +53,23 @@ def main() -> None:
     )
     parser.add_argument("--file", help="用 WAV 文件测 ASR->LLM 链路")
     parser.add_argument("--text", help="跳过 ASR 直测 LLM（含 TTS 播放）")
+    parser.add_argument(
+        "subargs",
+        nargs="*",
+        help="传给子命令的参数（仅 memory 使用）",
+    )
     args = parser.parse_args()
 
     if args.command == "personas":
         for persona in available_personas():
             print(f"{persona.id:<12} {persona.display_name}  {persona.tagline}")
         return
+
+    if args.command == "memory":
+        from .memory.cli import run_memory
+
+        rc = run_memory(args.subargs)
+        raise SystemExit(rc)
 
     try:
         persona = load_persona(args.persona)
@@ -202,6 +213,55 @@ def main() -> None:
             on_evaluation_result,
         )
         relationship_state = relationship_service.state
+
+        # 把 Memory 接入同一条反思旁路。共享 idle 窗口、独立推理：
+        # 关系评估后串行调用一次 memory_extractor，buffer 与 queue 解耦。
+        memory_service = None
+        if config.MEMORY_ENABLED:
+            from .memory.extractor import extract_from_turns
+            from .memory.service import MemoryService
+
+            memory_service = MemoryService(config.MEMORY_DB_PATH)
+
+            def memory_extractor(turns):
+                return extract_from_turns(
+                    memory_service,
+                    persona_id=persona.id,
+                    display_name=persona.display_name,
+                    model=aux_model,
+                    turns=turns,
+                )
+
+            def on_memory_updated() -> None:
+                """抽取真正落库后才重渲染 [User Context] 常驻段。"""
+                if not memory_service.available:
+                    return
+                prompt.builder().set_section(
+                    "profile", memory_service.render_resident_context()
+                )
+                prompt.refresh()
+                conversation_active = getattr(
+                    conversation, "_active_chat", None
+                )
+                if conversation_active is not None:
+                    conversation_active.update_system_prompt(prompt.refresh())
+
+            relationship_service.memory_extractor = memory_extractor
+            relationship_service.on_memory_updated = on_memory_updated
+
+            # 启动时把已有 global 记忆写到 prompt builder 里
+            if memory_service.available:
+                prompt.builder().set_section(
+                    "profile", memory_service.render_resident_context()
+                )
+                prompt.refresh()
+
+            # 主对话每轮走 service.recell，按需注入临时 recall 段
+            conversation.set_recall_provider(
+                lambda user_text, _pid=persona.id: memory_service.recall(
+                    user_text, persona_id=_pid
+                )
+            )
         initial_mood = (
             emotion_service.snapshot().mood
             if emotion_service is not None
