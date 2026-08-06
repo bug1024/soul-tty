@@ -52,6 +52,30 @@ def pick_model(url: str, configured: str = "") -> str:
     return models[0]["id"]
 
 
+def _parse_json_object(text: str) -> dict | None:
+    """从旁路 LLM 的原始响应里取出顶层 JSON 对象。
+
+    本地小模型的输出常带三种污染，逐层剥掉：
+    1. `<think>...</think>` 思考标签
+    2. Markdown 代码围栏
+    3. JSON 前后的自然语言闲聊
+
+    取不出合法的顶层对象时返回 None，调用方按「本轮无结果」处理。
+    """
+    if not text:
+        return None
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match is None:
+        return None
+    try:
+        result = json.loads(match.group(0))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
 def _display_width(text: str) -> int:
     return sum(
         2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
@@ -315,16 +339,7 @@ def evaluate_relationship(
         text = response.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         return None
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if match is None:
-        return None
-    try:
-        result = json.loads(match.group(0))
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return result if isinstance(result, dict) else None
+    return _parse_json_object(text)
 
 
 class Chat:
