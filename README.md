@@ -340,7 +340,7 @@ Soul TTY 是一段 **Python 进程**，但完整跑起来还需要几个外部�
 ### 2. 安装并启动
 
 ```bash
-git clone https://github.com/<your-org>/soul-tty.git
+git clone https://github.com/bug1024/soul-tty.git
 cd soul-tty
 uv sync                    # 自动创建 .venv 并安装依赖
 ```
@@ -381,13 +381,13 @@ uv run soul-tty --file /path/to/16k_mono.wav  # 用本地音频跑 ASR→LLM→T
 
 ## 人格与扩展
 
-默认人格是 `serena`（紫色未来感中文女声），同时内置更克制的 `assistant`：
+默认人格是 `serena`（紫色未来感中文女声）。其它人格通过 YAML 在
+`personas/` 目录或 `SOUL_TTY_PERSONA_DIR` 自定义目录下添加即可：
 
 ```bash
 uv run soul-tty personas                   # 列出可用人格
-uv run soul-tty --persona assistant        # 切换人格
 uv run soul-tty --persona serena --name 小夜   # 临时改名（也注入 LLM）
-SOUL_TTY_PERSONA=assistant uv run soul-tty
+SOUL_TTY_PERSONA=my_persona uv run soul-tty     # 用环境变量选人格
 ```
 
 人格文件位于 `personas/*.yaml`，可定义：

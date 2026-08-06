@@ -11,7 +11,7 @@ class PersonaTests(unittest.TestCase):
     def test_lists_builtin_personas(self):
         self.assertEqual(
             {persona.id for persona in available_personas()},
-            {"assistant", "serena"},
+            {"serena"},
         )
 
     def test_loads_and_renames_serena(self):
@@ -50,7 +50,7 @@ class PersonaTests(unittest.TestCase):
             load_persona("serena").wearing("missing")
 
     def test_applies_persona_defaults(self):
-        persona = load_persona("assistant")
+        persona = load_persona("serena")
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(config, "SYSTEM_PROMPT", "old"),
@@ -61,15 +61,12 @@ class PersonaTests(unittest.TestCase):
             apply_persona(persona)
             self.assertTrue(
                 config.SYSTEM_PROMPT.startswith(
-                    f"你的名字是“小助理”。\n{persona.personality.system_prompt}"
+                    f"你的名字是“{persona.display_name}”。\n{persona.personality.system_prompt}"
                 )
             )
             self.assertIn("你处于陪伴模式", config.SYSTEM_PROMPT)
             self.assertEqual(config.TTS_BACKEND, "mlx")
             self.assertEqual(config.MLX_TTS_VOICE, "Serena")
-            self.assertEqual(
-                config.MLX_TTS_INSTRUCT, "用清晰、自然、从容的语气说"
-            )
 
     def test_environment_keeps_priority_over_persona(self):
         persona = load_persona("serena")
