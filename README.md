@@ -13,7 +13,7 @@
   <img src="assets/screenshots/serena-0.png" alt="Soul-TTY 运行截图：启动后的对话界面" width="900">
 </p>
 
-**换装即换人格。** 每套装映射一种行为语气，按 `0` 循环切换：
+**换装不只是换图，也是在切换陪伴模式。** 每套装映射一种行为语气，按 `0` 循环切换：
 
 <table>
   <tr>
@@ -43,7 +43,7 @@ Soul-TTY 把两个意向并置：
 
 区别于纯对话式方案，Soul-TTY 在对话历史之外显式维护 Emotion、Bond 和 Memory 三类持续演化的内部状态——情绪是五维连续向量，关系是跨启动持久化的标量，两者共同决定她下一句话怎么说、用什么语气说。
 
-这和许多 AI 陪伴项目的做法有本质区别：
+Soul-TTY 的不同不在于第一次提出 Emotion / Bond / Memory 这些概念——一些优秀的陪伴项目已经开始考虑类似的维度。真正的区别在于：**把三者显式拆成不同时间尺度的状态，并与实时对话主路径解耦。**
 
 - **情绪不是标签。** Soul-TTY 没有"开心/难过/生气"这种瞬时表情标签，而是一个五维连续向量（happiness / calmness / curiosity / stress / energy），有平滑、有惯性、会随时间自然衰减。情绪不是用来控制 Live2D 表情的，而是用来决定她怎么说话、用什么语气。
 - **Bond 不是游戏数值。** 没有"送礼 +10 好感度"的机制。Bond 是一个边际递减的连续梯度，只在真实的关心和共同经历中缓慢增长，越往后越难涨。它不是用来解锁功能的进度条。
@@ -95,7 +95,7 @@ Soul-TTY 把两个意向并置：
 
 ### Local first
 
-语音、推理、合成全部跑在你机器上，对话内容不离开本机。可换模型、可换声音、可换人格。
+语音、推理、合成默认全部跑在你机器上，对话内容不离开本机。同时支持将 LLM 服务指向外部 OpenAI-compatible endpoint。可换模型、可换声音、可换人格。
 
 ---
 
@@ -114,7 +114,9 @@ Soul-TTY 把两个意向并置：
                          ▼
         ┌──────────────────────────────────────┐
         │          Reflection Brain            │  异步旁路：单 worker · 合并多轮 · 限频
-        │             (Async)                  │  串行：关系评估 → 记忆抽取 → 情绪更新
+        │             (Async)                  │  共享调度，不共享推理：
+        │                                      │  ├── 关系/情绪联合评估（LLM 调用 #1）
+        │                                      │  └── 记忆抽取（LLM 调用 #2）
         └────────────────┬─────────────────────┘
                          │
                          │ 串行写入三个状态层
@@ -149,7 +151,7 @@ Soul-TTY 把两个意向并置：
 | 层 | 职责 | 时延要求 |
 |---|---|---|
 | **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
-| **Reflection Brain** | 关系评估 + 记忆抽取 + 情绪更新，串行；异步、可合并、可丢弃 | 不阻塞对话 |
+| **Reflection Brain** | 关系/情绪联合评估 + 记忆抽取，两次独立 LLM 调用；异步、可合并、可丢弃 | 不阻塞对话 |
 | **State Layer** | Bond（跨启动持久化）+ Emotion（单次会话）+ Memory（跨会话持久化） | 无实时要求 |
 | **Expression Layer** | 状态 → 可感知表现；[User Context] 常驻段 + [Relevant Memories] 临时段 + Emotion Context + TTS 语气 | 安全时机 |
 
@@ -586,7 +588,9 @@ uv run soul-tty
 | TTS | `MLX_TTS_VOICE` | `Serena` | Qwen3-TTS 内置音色 |
 | TTS | `MLX_TTS_INSTRUCT` | `""` | 可选语气指令，如 `用温柔、亲切的语气说` |
 | TTS | `TTS_WHOLE_ANSWER` | `1` | `1`=完整回答后播报；`0`=按句流水线播报（首音更快） |
-| Bond | `RELATIONSHIP_ENABLED` | `1` | 关闭后完全不评估 |
+| 反射 | `REFLECTION_ENABLED` | `1` | 旁路总开关；关闭后 Bond/Emotion/Memory 异步处理全部停用 |
+| 反射 | `BOND_ENABLED` | `1` | 关系评估子开关；关闭后评估结果不落库，Memory/Emotion 不受影响 |
+| Bond | `RELATIONSHIP_ENABLED` | 同 `REFLECTION_ENABLED` | 旧名兼容 |
 | Bond | `RELATIONSHIP_LLM_URL` | 同 `LLM_URL` | 评估服务；可指向独立小模型 |
 | Bond | `RELATIONSHIP_IDLE_DELAY_S` | `3` | 回答结束后等用户空闲多久再评估 |
 | Bond | `RELATIONSHIP_MIN_INTERVAL_S` | `60` | 两次评估最小间隔（窗口内多轮合并） |
@@ -657,7 +661,7 @@ uv run soul-tty outfits     # 列出当前人格的套装
 uv run pytest
 ```
 
-测试覆盖音频链路、对话切句、情绪系统、Bond 旁路、人格加载、启动节奏、Avatar 渲染与终端 UI。
+测试覆盖音频链路、对话切句、情绪系统、Bond 旁路、Memory 系统、人格加载、启动节奏、Avatar 渲染与终端 UI。
 
 ---
 

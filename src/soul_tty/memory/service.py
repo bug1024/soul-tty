@@ -146,6 +146,7 @@ class MemoryService:
                 persona_id=persona_id,
                 types=(TYPE_EXPERIENCE,),
                 limit=recent_experience,
+                order_by="id DESC",
             )
         )
         return [

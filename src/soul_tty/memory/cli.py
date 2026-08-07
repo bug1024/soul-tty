@@ -72,6 +72,7 @@ def _show(service: MemoryService, memory_id: int) -> int:
 def _forget(service: MemoryService, memory_id: int) -> int:
     if service.delete(memory_id):
         print(f"已删除记忆 {memory_id}")
+        print("注意：运行中的 Soul-TTY 需重启后刷新常驻用户上下文。")
         return 0
     print(f"未找到记忆 {memory_id}", file=sys.stderr)
     return 1
@@ -89,6 +90,7 @@ def _clear(service: MemoryService) -> int:
         return 0
     removed = service.clear()
     print(f"已清空 {removed} 条记忆")
+    print("注意：运行中的 Soul-TTY 需重启后刷新常驻用户上下文。")
     return 0
 
 

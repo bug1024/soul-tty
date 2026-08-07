@@ -157,7 +157,7 @@ def main() -> None:
 
     relationship_state = None
     relationship_service = None
-    if config.RELATIONSHIP_ENABLED:
+    if config.REFLECTION_ENABLED:
 
         def evaluate(
             state: reflection.RelationshipState,
@@ -181,12 +181,19 @@ def main() -> None:
             )
 
         def on_relationship_update(state) -> None:
+            if not config.BOND_ENABLED:
+                return
             current_mood = (
                 emotion_service.snapshot().mood
                 if emotion_service is not None
                 else "calm"
             )
             terminal.update_relationship(state, mood=current_mood)
+            # 同步更新 Bond Context 到 system prompt
+            prompt.builder().set_section(
+                "bond", reflection.render_bond_context(state)
+            )
+            prompt.refresh()
 
         def on_evaluation_result(payload: dict) -> None:
             """ReflectionWorker 把 apply_evaluation 的 payload 抛上来；这里分发到 emotion/expression。"""
@@ -213,6 +220,13 @@ def main() -> None:
             on_evaluation_result,
         )
         relationship_state = relationship_service.state
+
+        # 初始 Bond Context 注入 system prompt
+        if config.BOND_ENABLED:
+            prompt.builder().set_section(
+                "bond", reflection.render_bond_context(relationship_state)
+            )
+            prompt.refresh()
 
         # 把 Memory 接入同一条反思旁路。共享 idle 窗口、独立推理：
         # 关系评估后串行调用一次 memory_extractor，buffer 与 queue 解耦。

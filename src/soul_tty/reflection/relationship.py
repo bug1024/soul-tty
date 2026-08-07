@@ -71,6 +71,47 @@ Evaluator = Callable[[RelationshipState, CompletedTurn], dict[str, Any] | None]
 UpdateCallback = Callable[[RelationshipState], None]
 
 
+def render_bond_context(state: RelationshipState | None) -> str:
+    """把关系阶段翻译成行为语义文本，供 [Bond Context] 段落注入 prompt。
+
+    不给 raw bond=0.47，只给行为语义——让 LLM 理解关系阶段而不是数字。
+    """
+    if state is None:
+        return ""
+    tier = state.level
+    _TIER_BEHAVIOR: dict[str, str] = {
+        "stranger": (
+            "你和用户还不熟悉。保持礼貌、客气，"
+            "不要表现出过度的亲密或自来熟。"
+        ),
+        "acquaintance": (
+            "你和用户开始有了一些接触，但关系还很浅。"
+            "可以比陌生人稍微自然一点，但仍保持适度的距离感。"
+        ),
+        "familiar": (
+            "你和用户已经比较熟悉了，有过一些共同交流。"
+            "表现得自然、放松，可以偶尔开轻松的玩笑，"
+            "但不要刻意强调关系或提及 bond 数值。"
+        ),
+        "companion": (
+            "你和用户是稳定的陪伴关系。"
+            "可以自然流露关心和亲近感，"
+            "适度引用共同经历，但不要过度亲密。"
+        ),
+        "close": (
+            "你和用户非常亲近，彼此信任。"
+            "可以表现温暖、默契，自然地引用共同经历，"
+            "但仍然保持自然的语气，不要刻意煽情。"
+        ),
+        "bonded": (
+            "你和用户之间有着深厚的羁绊。"
+            "可以表达真实的温暖和信任感，"
+            "坦然引用共同经历，语气自然、真诚。"
+        ),
+    }
+    return _TIER_BEHAVIOR.get(tier, "")
+
+
 def _clean_inner_voice(value: Any) -> str:
     if not isinstance(value, str):
         return ""

@@ -118,8 +118,18 @@ LLM_IDLE_EMOTION_MIN_INTERVAL_S = float(
     os.environ.get("LLM_IDLE_EMOTION_MIN_INTERVAL_S", "600")
 )
 
-# 亲密成长旁路。默认可共用主 LLM；若追求完全隔离延迟，指向独立小模型服务。
-RELATIONSHIP_ENABLED = os.environ.get("RELATIONSHIP_ENABLED", "1") not in (
+# 反思旁路总开关。关闭后整个 ReflectionWorker 不启动，Bond/Emotion/Memory 的
+# 异步处理全部停用。
+# 兼容旧版环境变量名 RELATIONSHIP_ENABLED——新代码优先读 REFLECTION_ENABLED。
+_REFLECTION_RAW = os.environ.get("REFLECTION_ENABLED") or os.environ.get(
+    "RELATIONSHIP_ENABLED", "1"
+)
+REFLECTION_ENABLED = _REFLECTION_RAW not in ("0", "false", "False")
+RELATIONSHIP_ENABLED = REFLECTION_ENABLED  # 旧名兼容
+
+# Bond 子开关。关闭后 ReflectionWorker 仍运行（Memory/Emotion 不受影响），
+# 但关系评估结果不落库、不更新 Dashboard。
+BOND_ENABLED = os.environ.get("BOND_ENABLED", "1") not in (
     "0",
     "false",
     "False",

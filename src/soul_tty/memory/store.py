@@ -167,10 +167,11 @@ class MemoryStore:
         persona_id: str | None = None,
         types: tuple[str, ...] | None = None,
         limit: int | None = None,
+        order_by: str = "importance DESC, id DESC",
     ) -> list[Memory]:
         """按作用域与类型过滤；`scope=None` 表示不限作用域。
 
-        排序固定为 importance DESC, id DESC，调用方需要别的顺序自行重排。
+        排序默认 importance DESC, id DESC，调用方可传入自定义 ORDER BY 子句。
         """
         if not self.available:
             return []
@@ -186,7 +187,7 @@ class MemoryStore:
             clauses.append(f"type IN ({', '.join('?' * len(types))})")
             params.extend(types)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        tail = " ORDER BY importance DESC, id DESC"
+        tail = f" ORDER BY {order_by}"
         if limit is not None:
             tail += " LIMIT ?"
             params.append(int(limit))
