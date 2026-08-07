@@ -1,8 +1,10 @@
 # Soul-TTY · 终端之魂
 
+> **Most AI companions try to bring AI into a virtual world. Soul-TTY explores the opposite: bringing a small digital life into the developer's world — the terminal.**
+>
 > **Soul-TTY is a local AI companion and agent architecture experiment — real-time voice in your terminal, backed by a persistent personality, an emotion state, and a relationship that evolves.**
 >
-> **Soul-TTY 是一个运行在终端中的本地 AI 伙伴，也是一个探索状态化 Agent 架构的开源项目：实时语音、人格、情绪状态与关系成长，全部跑在你自己的机器上。**
+> **Soul-TTY 是一个属于技术人的本地 AI 伙伴，也是一个探索状态化 Agent 架构的开源项目：实时语音、人格、情绪状态与关系成长，全部跑在你自己的机器上。**
 
 麦克风 → 流式识别 → 流式对话 → 流式语音，整条链路没有云依赖。
 `uv run soul-tty` 之后，你对着终端说话，她就醒了。
@@ -35,7 +37,11 @@ Soul-TTY 把两个意向并置：
 - **Soul** — 一个有情绪、有温度、会成长的角色。她知道现在是深夜，知道你已经问过几次同一个问题，知道你说"工作装"的时候其实想专注。
 - **TTY** — 没有窗口、没有按钮、没有花哨动画。**一个终端就够了。**
 
-它不是"另一个 ChatGPT 客户端"。区别在于：普通 CLI 助手每一轮都是无状态的文本生成，上下文窗口一关就什么都不剩；Soul-TTY 在对话之外维护一组**持续演化的内部状态**——情绪是五维连续向量，关系是跨启动持久化的标量，两者共同决定她下一句话怎么说、用什么语气说。
+市面上不缺 AI 陪伴项目，但它们大多跑在浏览器里，依赖 Live2D 和 Electron 窗口，目标是创造一个看得见的虚拟角色。Soul-TTY 选择了相反的方向——不是把 AI 请进一个虚拟世界，而是在开发者的世界里安置一个小小的数字生命。你的伙伴就住在 `$SHELL` 里，和你的 git、vim、`ls` 待在同一个地方。
+
+这不是技术妥协，而是技术人独有的浪漫。终端不是缺少 UI——终端本身就是一种身份表达。
+
+区别于纯对话式方案，Soul-TTY 在对话历史之外显式维护 Emotion、Bond 和 Memory 三类持续演化的内部状态——情绪是五维连续向量，关系是跨启动持久化的标量，两者共同决定她下一句话怎么说、用什么语气说。
 
 因此这个项目同时是两件事：
 
@@ -142,7 +148,7 @@ Soul-TTY 把两个意向并置：
 
 ### 为什么 Reflection 不在主路径上
 
-主对话只向一个有界内存队列投递 `(user_text, agent_text)`，随后立刻返回。后台单 worker 在用户空闲窗口 + 限频条件下把多轮合并成一次 LLM 调用。关系评估、记忆抽取、情绪更新三者串行执行，共享同一个 idle 窗口和限频规则。投递失败、LLM 失败、低 confidence、队列满，任何一种情况都只让状态保持不变——对话本身永远不受影响。
+主对话只向一个有界内存队列投递 `(user_text, agent_text)`，随后立刻返回。后台单 worker 在用户空闲窗口 + 限频条件下把多轮合并成一次 LLM 调用。关系评估、记忆抽取、情绪更新三者串行执行，**共享 idle window / worker，独立 minimum interval**（关系评估默认 60 秒，记忆抽取默认 120 秒）。投递失败、LLM 失败、低 confidence、队列满，任何一种情况都只让状态保持不变——对话本身永远不受影响。
 
 ### 为什么 Expression 是独立一层
 
@@ -261,7 +267,7 @@ bond ← bond + delta × (1 - bond)
 <details>
 <summary><b>Technical details</b></summary>
 
-- 实现位于 `src/soul_tty/relationship.py`。
+- 实现位于 `src/soul_tty/reflection/relationship.py`。
 - 单 worker + 有界队列（`RELATIONSHIP_QUEUE_SIZE`，默认 4），队列满即丢弃，不反压主链路。
 - 回答结束后等待 `RELATIONSHIP_IDLE_DELAY_S`（默认 3 秒）确认用户空闲；两次评估最小间隔 `RELATIONSHIP_MIN_INTERVAL_S`（默认 60 秒），窗口内多轮合并为一次调用。
 - 单次 delta 上限 `RELATIONSHIP_MAX_DELTA`（默认 `0.03`），置信度低于 `RELATIONSHIP_MIN_CONFIDENCE`（默认 `0.65`）不生效。
@@ -310,7 +316,7 @@ service.remember_many(...)
 ```
 
 - **已知信息回灌：** 抽取时把已有记忆作为 `known_facts` 拼入 prompt，引导 LLM"只提取新的事实"，避免重复。
-- **静默降级：** LLM 调用失败、低 confidence、队列满都只让该轮不抽取，不阻塞对话。
+- **静默降级：** LLM 调用失败或响应无效时保留待抽取 buffer，下次重试。Memory 的待处理轮次与 Relationship queue 独立——queue 溢出只影响关系评估，不影响记忆抽取。
 - **去重：** 新记忆与同类已有记忆的 bigram 重叠超过 0.8 则跳过。
 
 ### Recall
@@ -453,7 +459,7 @@ uv run soul-tty memory clear
        │  (异步旁路，不阻塞以上任何一段)
        ▼
 ┌─ Reflection Brain ──────────────────────────────┐
-│  RelationshipService（bond · 单 worker · 合并评估）│
+│  ReflectionWorker（关系评估 · 单 worker · 合并限频）  │
 │  MemoryService（三层记忆 · 异步抽取 · 按需召回）   │
 │  EmotionService（五维向量 · 平滑 · 空闲衰减）      │
 └─────────────────────────────────────────────────┘
@@ -470,7 +476,6 @@ src/soul_tty/
 ├── cli.py                # 命令行入口与启动信息
 ├── config.py             # 环境变量配置
 ├── conversation.py       # 对话流程、句切分、Markdown 净化
-├── relationship.py       # Bond 非阻塞旁路 + 状态持久化
 ├── presence.py           # 启动节奏、低频特殊开场
 ├── emotion/              # 五维情绪体系
 │   ├── service.py        #   EmotionService 单例
@@ -487,6 +492,9 @@ src/soul_tty/
 │   ├── retriever.py      #   bigram 相关性检索
 │   ├── prompt.py         #   记忆 → 文本渲染（常驻 / 召回）
 │   └── cli.py            #   管理子命令 list/show/forget/clear
+├── reflection/           # 异步旁路推理
+│   ├── worker.py         #   ReflectionWorker 调度（队列/空闲门控/限频）
+│   └── relationship.py   #   Bond 评估与持久化
 ├── audio/                # 录音 + sherpa-onnx ASR + MLX TTS
 ├── clients/llm.py        # OpenAI 兼容 LLM 客户端
 ├── personas/             # YAML 人格加载、校验、运行时应用

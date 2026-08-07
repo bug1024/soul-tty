@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from soul_tty.clients.llm import extract_memories
 from soul_tty.memory.extractor import extract_from_turns
-from soul_tty.memory.models import TYPE_EXPERIENCE, TYPE_PROFILE
+from soul_tty.memory.models import ExtractionStatus, TYPE_EXPERIENCE, TYPE_PROFILE
 from soul_tty.memory.service import MemoryService
 from soul_tty.reflection.relationship import CompletedTurn
 
@@ -157,7 +157,7 @@ class ExtractorFlowTests(unittest.TestCase):
                 model="m",
                 turns=[CompletedTurn("x", "y")],
             )
-        self.assertFalse(landed)
+        self.assertIs(landed, ExtractionStatus.NO_CHANGE)
 
     def test_returns_true_when_at_least_one_memory_lands(self):
         with patch(
@@ -179,7 +179,7 @@ class ExtractorFlowTests(unittest.TestCase):
                 model="m",
                 turns=[CompletedTurn("我们完成 Soul-TTY 了", "恭喜")],
             )
-        self.assertTrue(landed)
+        self.assertIs(landed, ExtractionStatus.UPDATED)
 
     def test_service_unavailable_returns_false_silently(self):
         with TemporaryDirectory() as tmp:
@@ -197,7 +197,7 @@ class ExtractorFlowTests(unittest.TestCase):
                     model="m",
                     turns=[CompletedTurn("x", "y")],
                 )
-        self.assertFalse(landed)
+        self.assertIs(landed, ExtractionStatus.FAILED)
         # 不可用时连 LLM 都不发，省一次尾延迟
         self.assertEqual(extract.call_count, 0)
 

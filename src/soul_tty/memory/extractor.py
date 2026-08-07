@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from ..clients.llm import extract_memories
+from .models import ExtractionStatus
 from .service import MemoryService
 from ..reflection.relationship import CompletedTurn
 
@@ -36,15 +37,16 @@ def extract_from_turns(
     model: str,
     turns: list[CompletedTurn],
     known_facts: list[dict] | None = None,
-) -> bool:
+) -> ExtractionStatus:
     """从一段对话里抽取记忆并写入 service。
 
-    返回 True 当且仅当至少一条记忆成功落库。返回 False 不代表失败——
-    也可能是「本轮没有值得保存的内容」（recall 反馈链路需要这个信号
-    决定要不要 hot-update system prompt）。
+    返回 ExtractionStatus：
+    - FAILED：LLM 调用失败或响应无法解析，buffer 保留。
+    - NO_CHANGE：处理成功但没有新增记忆，buffer 应 ack。
+    - UPDATED：至少一条新记忆落库，buffer 应 ack 且刷新 prompt。
     """
     if not service.available or not turns:
-        return False
+        return ExtractionStatus.FAILED
     if known_facts is None:
         known_facts = service.known_facts(persona_id=persona_id)
     combined = _coalesce(turns)
@@ -57,11 +59,13 @@ def extract_from_turns(
             agent_text=combined.agent_text,
         )
     except Exception:
-        return False
-    if not isinstance(result, dict):
-        return False
+        return ExtractionStatus.FAILED
+    if result is None:
+        return ExtractionStatus.FAILED
     accepted = service.remember_many(
         result.get("memories", []),
         persona_id=persona_id,
     )
-    return accepted > 0
+    if accepted > 0:
+        return ExtractionStatus.UPDATED
+    return ExtractionStatus.NO_CHANGE

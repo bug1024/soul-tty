@@ -127,7 +127,7 @@ def recency(
     halflife = halflife_days or config.MEMORY_RECENCY_HALFLIFE_DAYS
     if halflife <= 0:
         return 1.0
-    return math.exp(-days / halflife)
+    return math.exp(-math.log(2) * days / halflife)
 
 
 def search(

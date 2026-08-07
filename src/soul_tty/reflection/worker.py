@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config
+from ..memory.models import ExtractionStatus
 from .relationship import (
     CompletedTurn,
     EvaluationCallback,
@@ -32,9 +33,8 @@ from .relationship import (
 
 _STOP = object()
 
-# 记忆抽取器签名：消费一批 turn，返回是否至少落库一条。
-# 失败/未抽取时返回 False，worker 据此保留 buffer 不动。
-MemoryExtractor = Callable[[list[CompletedTurn]], bool]
+# 记忆抽取器签名：消费一批 turn，返回抽取结果状态。
+MemoryExtractor = Callable[[list[CompletedTurn]], ExtractionStatus]
 # 抽取完成后触发，签名无参；通常用于让 system prompt 重新渲染常驻段。
 OnMemoryUpdated = Callable[[], None]
 
@@ -206,48 +206,50 @@ class ReflectionWorker:
                 with self._lock:
                     current = self.state
                 self._last_evaluation = time.monotonic()
+                # 关系评估：失败不影响 Emotion/Memory，只不让 Bond 更新
                 try:
                     result = self.evaluator(current, item)
                 except Exception:
-                    continue
+                    result = None
                 if self._stop.is_set():
                     return
-                # 每轮评估 +1：无论 confidence 够不够，HUD 上的「互动次数」计数都该往上走。
-                incremented = RelationshipState(
-                    bond=current.bond,
-                    recent_events=current.recent_events,
-                    inner_voice=current.inner_voice,
-                    interaction_count=current.interaction_count + 1,
-                    updated_at=datetime.now().astimezone().isoformat(
-                        timespec="seconds"
-                    ),
-                )
-                updated_payload = apply_evaluation(incremented, result)
-                final_state = (
-                    updated_payload["relationship"]
-                    if updated_payload is not None
-                    else incremented
-                )
-                try:
-                    save_state(self.path, final_state)
-                except OSError:
-                    continue
-                with self._lock:
-                    self.state = final_state
-                if self.on_update is not None:
+                if result is not None:
+                    # 每轮评估 +1：无论 confidence 够不够，HUD 上的「互动次数」计数都该往上走。
+                    incremented = RelationshipState(
+                        bond=current.bond,
+                        recent_events=current.recent_events,
+                        inner_voice=current.inner_voice,
+                        interaction_count=current.interaction_count + 1,
+                        updated_at=datetime.now().astimezone().isoformat(
+                            timespec="seconds"
+                        ),
+                    )
+                    updated_payload = apply_evaluation(incremented, result)
+                    final_state = (
+                        updated_payload["relationship"]
+                        if updated_payload is not None
+                        else incremented
+                    )
                     try:
-                        self.on_update(final_state)
-                    except Exception:
-                        pass
-                # 把 apply_evaluation 的完整 payload 抛给上层协调器；
-                # emotion / expression 的应用都不在 ReflectionWorker 的职责里。
-                if updated_payload is not None and self.on_evaluation is not None:
-                    try:
-                        self.on_evaluation(updated_payload)
-                    except Exception:
-                        pass
-                # 关系评估完成后串行跑记忆抽取；共享 idle 窗口，两次独立推理。
-                # 失败/未抽取都返回 False，buffer 不动，下次连带重试。
+                        save_state(self.path, final_state)
+                    except OSError:
+                        final_state = current
+                    with self._lock:
+                        self.state = final_state
+                    if self.on_update is not None:
+                        try:
+                            self.on_update(final_state)
+                        except Exception:
+                            pass
+                    # 把 apply_evaluation 的完整 payload 抛给上层协调器；
+                    # emotion / expression 的应用都不在 ReflectionWorker 的职责里。
+                    if updated_payload is not None and self.on_evaluation is not None:
+                        try:
+                            self.on_evaluation(updated_payload)
+                        except Exception:
+                            pass
+                # 关系评估完成后（无论成功/失败）串行跑记忆抽取。
+                # 记忆抽取独立 try/except——评估失败不影响本轮抽取。
                 if self.memory_extractor is not None:
                     self._maybe_extract_memory()
             finally:
@@ -309,13 +311,18 @@ class ReflectionWorker:
         if not turns or self.memory_extractor is None:
             return
         try:
-            landed = bool(self.memory_extractor(turns))
+            status = self.memory_extractor(turns)
         except Exception:
-            return  # 失败时 buffer 不动
+            return  # 异常时 buffer 不动，下次重试
+        if not isinstance(status, ExtractionStatus):
+            return
         with self._lock:
             self._last_memory_at = time.monotonic()
-        if landed:
-            self._ack_memory_extracted(max_seq)
+        if status is ExtractionStatus.FAILED:
+            return  # 失败时 buffer 不动，下次重试
+        # NO_CHANGE 或 UPDATED 都 ack buffer——数据已处理完
+        self._ack_memory_extracted(max_seq)
+        if status is ExtractionStatus.UPDATED:
             if self.on_memory_updated is not None:
                 try:
                     self.on_memory_updated()
@@ -323,13 +330,6 @@ class ReflectionWorker:
                     pass
 
     def stop(self) -> None:
-        self._stop.set()
-        try:
-            self.queue.put_nowait(_STOP)
-        except queue.Full:
-            pass
-        if self._thread is not None:
-            self._thread.join(timeout=0.2)
         self._stop.set()
         try:
             self.queue.put_nowait(_STOP)

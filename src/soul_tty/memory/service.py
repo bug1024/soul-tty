@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .. import config
 from .models import (
     MEMORY_TYPES,
@@ -90,9 +92,12 @@ class MemoryService:
             importance = float(item.get("importance", 0))
         except (TypeError, ValueError):
             return 0
+        if not math.isfinite(importance):
+            return 0
+        importance = max(0.0, min(1.0, importance))
         if importance < config.MEMORY_MIN_IMPORTANCE:
             return 0
-        owner = item.get("persona_id") or persona_id
+        owner = persona_id
         # 与同类已有记忆做兜底去重；LLM 也会有重复输出
         if self._is_duplicate(memory_type, content, owner):
             return 0

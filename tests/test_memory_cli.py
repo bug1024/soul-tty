@@ -24,7 +24,7 @@ def _service_with(tmp_path) -> MemoryService:
             "importance": 0.85,
             "persona_id": "serena",
         },
-    ])
+    ], persona_id="serena")
     return service
 
 

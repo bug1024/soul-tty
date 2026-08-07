@@ -143,11 +143,13 @@ def extract_memories(
     try:
         text = response.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        return {"memories": []}
-    result = _parse_json_object(text) or {}
+        return None
+    result = _parse_json_object(text)
+    if result is None:
+        return None
     memories = result.get("memories")
     if not isinstance(memories, list):
-        return {"memories": []}
+        return None
     return {"memories": memories}
 
 

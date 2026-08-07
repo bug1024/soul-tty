@@ -8,6 +8,20 @@ Serena 说短句」这种人格作用域的 preference 在 V2 落地时不必迁
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+
+
+class ExtractionStatus(Enum):
+    """抽取结果的三态语义。
+
+    - FAILED: LLM 调用/解析失败，buffer 保留，下次重试。
+    - NO_CHANGE: 处理成功但本轮没有值得保存的记忆，buffer 应 ack。
+    - UPDATED: 至少一条新记忆落库，buffer 应 ack 且刷新 prompt。
+    """
+
+    FAILED = "failed"
+    NO_CHANGE = "no_change"
+    UPDATED = "updated"
 
 SCOPE_GLOBAL = "global"
 SCOPE_PERSONA = "persona"

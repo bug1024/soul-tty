@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from soul_tty import config
+from soul_tty.memory.models import ExtractionStatus
 from soul_tty.reflection.relationship import CompletedTurn
 from soul_tty.reflection.worker import ReflectionWorker
 
@@ -119,7 +120,7 @@ class SuccessfulAckTests(unittest.TestCase):
                     (100, CompletedTurn("late arrival", "L"))
                 )
                 worker._memory_seq = 100
-                return True
+                return ExtractionStatus.UPDATED
 
             worker = _make_worker(tmp, memory_extractor=extractor)
             worker._memory_buffer.append((1, CompletedTurn("first", "A")))
@@ -143,7 +144,7 @@ class ThrottleTests(unittest.TestCase):
             calls = []
             worker = _make_worker(
                 tmp,
-                memory_extractor=lambda turns: (calls.append(turns) or False),
+                memory_extractor=lambda turns: (calls.append(turns) or ExtractionStatus.FAILED),
                 memory_min_interval_s=60.0,
             )
             # 刚抽过——再调不应触发
@@ -157,7 +158,7 @@ class ThrottleTests(unittest.TestCase):
             calls = []
             worker = _make_worker(
                 tmp,
-                memory_extractor=lambda turns: (calls.append(turns) or False),
+                memory_extractor=lambda turns: (calls.append(turns) or ExtractionStatus.FAILED),
             )
             worker._last_memory_at = 0.0
             worker._memory_buffer.append((1, CompletedTurn("alpha beta", "A")))
@@ -170,7 +171,7 @@ class ThrottleTests(unittest.TestCase):
             calls = []
             worker = _make_worker(
                 tmp,
-                memory_extractor=lambda turns: (calls.append(turns) or False),
+                memory_extractor=lambda turns: (calls.append(turns) or ExtractionStatus.FAILED),
                 memory_min_text_chars=50,
             )
             worker._last_memory_at = 0.0
@@ -183,7 +184,7 @@ class ThrottleTests(unittest.TestCase):
             calls = []
             worker = _make_worker(
                 tmp,
-                memory_extractor=lambda turns: (calls.append(turns) or False),
+                memory_extractor=lambda turns: (calls.append(turns) or ExtractionStatus.FAILED),
             )
             worker._last_memory_at = 0.0
             worker._maybe_extract_memory()
@@ -198,7 +199,7 @@ class OnMemoryUpdatedTests(unittest.TestCase):
             updates: list[int] = []
 
             def extractor(turns):
-                return False
+                return ExtractionStatus.FAILED
 
             worker = _make_worker(
                 tmp,
@@ -211,7 +212,7 @@ class OnMemoryUpdatedTests(unittest.TestCase):
             self.assertEqual(updates, [])
 
             def extractor_landed(turns):
-                return True
+                return ExtractionStatus.UPDATED
 
             worker.memory_extractor = extractor_landed
             worker._last_memory_at = 0.0

@@ -117,13 +117,13 @@ class BulkRememberTests(ServiceBaseTest):
             "content": "完成 Emotion 系统",
             "importance": 0.85,
             "persona_id": "serena",
-        })
+        }, persona_id="serena")
         self.service.remember({
             "type": TYPE_EXPERIENCE,
             "content": "和 Coder 调试 TTS",
             "importance": 0.8,
             "persona_id": "coder",
-        })
+        }, persona_id="coder")
         # known_facts 给抽取器用：全部 global + 目标人格最近 experience
         facts = self.service.known_facts(persona_id="serena", recent_experience=5)
         self.assertEqual(len(facts), 2)  # 1 profile + 1 experience
@@ -142,7 +142,7 @@ class ResidentContextTests(ServiceBaseTest):
             "content": "完成 Emotion 系统",
             "importance": 0.85,
             "persona_id": "serena",
-        })
+        }, persona_id="serena")
         text = self.service.render_resident_context()
         self.assertIn("是工程师", text)
         self.assertNotIn("完成 Emotion 系统", text)
@@ -171,7 +171,7 @@ class RecallTests(ServiceBaseTest):
             "content": "完成 Emotion 系统",
             "importance": 0.85,
             "persona_id": "serena",
-        })
+        }, persona_id="serena")
         self.assertEqual(
             self.service.recall("今天天气怎么样", persona_id="serena"), ""
         )
@@ -182,7 +182,7 @@ class RecallTests(ServiceBaseTest):
             "content": "用户完成了 Soul-TTY Emotion 系统设计",
             "importance": 0.85,
             "persona_id": "serena",
-        })
+        }, persona_id="serena")
         text = self.service.recall(
             "你还记得我的 Soul-TTY 项目吗", persona_id="serena"
         )
@@ -196,13 +196,13 @@ class RecallTests(ServiceBaseTest):
             "content": "Soul-TTY 项目",
             "importance": 0.85,
             "persona_id": "serena",
-        })
+        }, persona_id="serena")
         self.service.remember({
             "type": TYPE_EXPERIENCE,
             "content": "Soul-TTY 项目",
             "importance": 0.85,
             "persona_id": "coder",
-        })
+        }, persona_id="coder")
         text = self.service.recall(
             "你还记得我的 Soul-TTY 项目吗", persona_id="serena"
         )

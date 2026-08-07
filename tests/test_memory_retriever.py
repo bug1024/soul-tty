@@ -114,7 +114,7 @@ class RecencyTests(unittest.TestCase):
 
     def test_decays_over_time(self):
         stamp = (NOW - timedelta(days=180)).isoformat(timespec="seconds")
-        self.assertLess(recency(stamp, now=NOW), 0.4)
+        self.assertAlmostEqual(recency(stamp, now=NOW), 0.5, places=3)
 
     def test_older_is_smaller(self):
         recent = (NOW - timedelta(days=30)).isoformat(timespec="seconds")
