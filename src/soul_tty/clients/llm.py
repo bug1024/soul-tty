@@ -347,6 +347,7 @@ def evaluate_relationship(
     mood: str,
     user_text: str,
     agent_text: str,
+    voice_context: str = "",
 ) -> dict | None:
     """旁路评估完整问答；不读取也不修改正式 Chat 历史。
 
@@ -361,7 +362,19 @@ def evaluate_relationship(
     }
 
     bond 是 0~1 浮点数；单次最大增长 0.03，越接近 1 增长越慢。
+    voice_context 是随选的声音观察弱证据，为空时不影响评估。
     """
+    user_content = (
+        f"角色：{display_name}\n当前羁绊强度：{bond:.2f}\n"
+        f"当前阶段：{level}\n当前情绪：{mood}\n\n"
+    )
+    if voice_context:
+        user_content += f"用户声音观察（弱证据，可能误判）：\n{voice_context}\n\n"
+    user_content += (
+        f"<dialogue>\n用户：{user_text}\n"
+        f"{display_name}：{agent_text}\n</dialogue>\n"
+        "请同时输出 relationship_delta.bond、emotion_delta、expression。"
+    )
     payload = {
         "model": config.RELATIONSHIP_LLM_MODEL or model,
         "messages": [
@@ -390,13 +403,7 @@ def evaluate_relationship(
             },
             {
                 "role": "user",
-                "content": (
-                    f"角色：{display_name}\n当前羁绊强度：{bond:.2f}\n"
-                    f"当前阶段：{level}\n当前情绪：{mood}\n\n"
-                    f"<dialogue>\n用户：{user_text}\n"
-                    f"{display_name}：{agent_text}\n</dialogue>\n"
-                    "请同时输出 relationship_delta.bond、emotion_delta、expression。"
-                ),
+                "content": user_content,
             },
         ],
         "stream": False,

@@ -604,7 +604,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             answer = main_module._answer(FakeStreamingChat(), "你好")
 
         self.assertEqual(answer, "第一句。第二句！")
-        record.assert_called_once_with("你好", answer)
+        record.assert_called_once_with("你好", answer, voice_ref=None)
 
     def test_cancelled_answer_does_not_change_relationship(self):
         cancel = threading.Event()

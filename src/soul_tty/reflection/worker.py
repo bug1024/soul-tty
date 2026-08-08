@@ -116,10 +116,15 @@ class ReflectionWorker:
         )
         self._thread.start()
 
-    def submit(self, user_text: str, agent_text: str) -> bool:
+    def submit(
+        self, user_text: str, agent_text: str, voice_ref: int | None = None
+    ) -> bool:
         if not user_text.strip() or not agent_text.strip() or self._stop.is_set():
             return False
-        turn = CompletedTurn(user_text.strip(), agent_text.strip())
+        voice_refs = (voice_ref,) if voice_ref is not None else ()
+        turn = CompletedTurn(
+            user_text.strip(), agent_text.strip(), voice_refs=voice_refs
+        )
         with self._lock:
             # 从完整回答结束开始等待空闲窗口，避免立刻与下一轮主对话争抢模型。
             self._last_activity = time.monotonic()
@@ -181,6 +186,10 @@ class ReflectionWorker:
                 self.queue.task_done()
         if len(turns) == 1:
             return first
+        # 合并多轮文本和 voice_refs
+        all_refs: list[int | None] = []
+        for turn in turns:
+            all_refs.extend(turn.voice_refs)
         return CompletedTurn(
             "\n".join(
                 f"第{index}轮：{turn.user_text}"
@@ -190,6 +199,7 @@ class ReflectionWorker:
                 f"第{index}轮：{turn.agent_text}"
                 for index, turn in enumerate(turns, 1)
             ),
+            voice_refs=tuple(all_refs),
         )
 
     def _run(self) -> None:
@@ -347,8 +357,14 @@ def install(service: ReflectionWorker | None) -> None:
     _service = service
 
 
-def record_turn(user_text: str, agent_text: str) -> bool:
-    return _service.submit(user_text, agent_text) if _service is not None else False
+def record_turn(
+    user_text: str, agent_text: str, voice_ref: int | None = None
+) -> bool:
+    return (
+        _service.submit(user_text, agent_text, voice_ref=voice_ref)
+        if _service is not None
+        else False
+    )
 
 
 def user_activity() -> None:

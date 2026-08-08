@@ -47,6 +47,7 @@ def level_for(bond: float) -> str:
 class CompletedTurn:
     user_text: str
     agent_text: str
+    voice_refs: tuple[int | None, ...] = ()
 
 
 @dataclass(frozen=True)

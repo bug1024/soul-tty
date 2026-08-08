@@ -21,6 +21,9 @@ _emotion_instruct_provider: Callable[[], str] | None = None
 # Memory recall：cli.py 把 MemoryService.recall 绑到这里；
 # 每次主对话取一次，命中召回词时返回临时 [Relevant Memories] 段。
 _recall_provider: Callable[[str], str] | None = None
+# Voice perception：cli.py 把 VoiceStateService.submit 绑到这里；
+# 每次 ASR final 后提交 PCM，不阻塞主对话。
+_voice_submit_provider: Callable[[bytes], int | None] | None = None
 
 
 def set_emotion_instruct_provider(
@@ -38,6 +41,14 @@ def set_recall_provider(provider: Callable[[str], str] | None) -> None:
     """
     global _recall_provider
     _recall_provider = provider
+
+
+def set_voice_submit_provider(
+    provider: Callable[[bytes], int | None] | None,
+) -> None:
+    """cli.py 在 VoiceStateService 启动后调用；None 表示关闭声音感知。"""
+    global _voice_submit_provider
+    _voice_submit_provider = provider
 
 
 def _current_tts_instruct() -> str:
@@ -58,6 +69,16 @@ def _current_recall(user_text: str) -> str:
         return provider(user_text) or ""
     except Exception:
         return ""
+
+
+def _current_voice_ref(pcm: bytes | None) -> int | None:
+    """提交 utterance PCM 给 VoiceStateService，返回 VoiceRef。"""
+    if pcm is None or _voice_submit_provider is None:
+        return None
+    try:
+        return _voice_submit_provider(pcm)
+    except Exception:
+        return None
 
 
 def emit_emotion_update(emotion_service, snap) -> None:
@@ -122,6 +143,7 @@ def _answer(
     text: str,
     cancel: threading.Event | None = None,
     on_token: Callable[[str], None] | None = None,
+    pcm: bytes | None = None,
 ) -> str:
     cancel = cancel or threading.Event()
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
@@ -129,6 +151,8 @@ def _answer(
     instruct = _current_tts_instruct()
     # 本轮检索到的相关记忆；临时插入，不进 system prompt / 不进 history。
     recall = _current_recall(text)
+    # 提交 utterance PCM 给 VoiceStateService（不阻塞）
+    voice_ref = _current_voice_ref(pcm)
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
         with tts.StreamingSpeaker(
             cancel, terminal.audio_level, instruct=instruct
@@ -148,7 +172,7 @@ def _answer(
                 if not cancel.is_set():
                     terminal.notice(f"TTS 失败: {e}")
     if answer and not cancel.is_set():
-        reflection.record_turn(text, answer)
+        reflection.record_turn(text, answer, voice_ref=voice_ref)
     return answer
 
 
@@ -179,7 +203,9 @@ def _transcribe(pcm: bytes) -> str | None:
     return text if _usable_transcript(text) else None
 
 
-def _answer_interruptibly(chat: llm.Chat, text: str, listener) -> str | None:
+def _answer_interruptibly(
+    chat: llm.Chat, text: str, listener, pcm: bytes | None = None
+) -> str | None:
     """后台回答，前台同时确认插话；返回已确认的下一句用户文本。"""
     cancel = threading.Event()
     answer_parts: list[str] = []
@@ -187,7 +213,7 @@ def _answer_interruptibly(chat: llm.Chat, text: str, listener) -> str | None:
 
     def run_answer() -> None:
         try:
-            _answer(chat, text, cancel, answer_parts.append)
+            _answer(chat, text, cancel, answer_parts.append, pcm=pcm)
             outcome.put(None)
         except BaseException as e:
             outcome.put(e)
@@ -245,10 +271,12 @@ def _show_final(text: str) -> None:
     terminal.user_text(text)
 
 
-def _answer_half_duplex(chat: llm.Chat, mic, text: str) -> None:
+def _answer_half_duplex(
+    chat: llm.Chat, mic, text: str, pcm: bytes | None = None
+) -> None:
     mic.pause()
     try:
-        _answer(chat, text)
+        _answer(chat, text, pcm=pcm)
     except Exception as e:
         terminal.notice(f"LLM 调用失败: {e}")
     finally:
@@ -280,7 +308,7 @@ def _run_sherpa_half_duplex_mic(chat: llm.Chat, audio) -> None:
                 if not text:
                     continue
                 _show_final(text)
-                _answer_half_duplex(chat, mic, text)
+                _answer_half_duplex(chat, mic, text, pcm=update.pcm)
                 session.reset()
     finally:
         mic.stop()
@@ -309,7 +337,7 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
             reflection.user_activity()
             terminal.user_text(text)
             try:
-                pending_text = _answer_interruptibly(chat, text, listener)
+                pending_text = _answer_interruptibly(chat, text, listener, pcm=pcm)
             except Exception as e:
                 terminal.notice(f"LLM 调用失败: {e}")
                 continue
