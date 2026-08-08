@@ -63,13 +63,13 @@ Soul-TTY 的不同不在于第一次提出 Emotion / Bond / Memory 这些概念�
 |---|---|---|
 | **实时语音对话** | ✅ | 麦克风 → sherpa-onnx 流式 ASR → llama.cpp 流式 LLM → MLX Qwen3-TTS 流式语音 |
 | **五维情绪体系** | ✅ | happiness / calmness / curiosity / stress / energy 连续向量，平滑演化 + 空闲自然衰减 |
-| **Bond System（羁绊）** | ✅ | 跨启动持久化的关系标量，边际递减增长；后台旁路评估，不阻塞对话 |
+| **Bond 羁绊系统** | ✅ | 跨启动持久化的关系标量，边际递减增长；后台旁路评估，不阻塞对话 |
 | **三套装 × 三种模式** | ✅ | companion（默认）/ late_night（深夜）/ focused（工作），每套装映射一种行为语气 |
 | **本地人格系统** | ✅ | YAML 描述人格、台词、形象、TTS 语气；不锁死，可热加载 |
 | **动态口型** | ✅ | 闭嘴 / 半开双缓存图，由实际播放 PCM 音量驱动切换 |
 | **动态台词** | ✅ | 启动欢迎、换装语、长时间安静后的陪伴短句均由 LLM 实时生成，超时回退本地短句 |
 | **会话记忆** | ✅ | 画像 / 偏好 / 经历三层分离，异步抽取 + 常驻段 + 按需召回 |
-| **语音感知（SenseVoice）** | ✅ | SenseVoiceSmall 异步感知用户语气与声学事件，作为弱证据进入 Reflection Brain，辅助 Serena 的 Emotion / Expression 演化；最近一次感知在 Tab detail 查看 |
+| **语音感知 SenseVoice** | ✅ | SenseVoiceSmall 异步感知用户语气与声学事件，作为弱证据进入 Reflection Brain，辅助 Serena 的情绪与表达演化；最近一次感知在 Tab 详情中查看 |
 | **日期时间感知** | ✅ | 启动时写入当前日期星期，每分钟热更新；Serena 知道"今天是星期几" |
 | **全双工语音打断** | 🚧 | 实验开关 `BARGE_IN_ENABLED=1`；完整 AEC 状态机尚未稳定 |
 
@@ -354,16 +354,16 @@ Voice Observation 有两条独立的生命周期：
 
 Memory 回答 *"之前发生过什么？"* — 跨会话累积用户画像、交流偏好与共同经历，让 Agent 能在新一轮对话中"记得"你。它不是简单地把历史对话原文倒进 prompt，而是**抽取 → 存储 → 按需注入**：
 
-- 画像（profile）和偏好（preference）常驻 system prompt，作为 [User Context] 段落；
-- 经历（experience）只在用户提起过去相关话题时按需检索召回，作为临时 [Relevant Memories] 段注入。
+- 画像 profile 和偏好 preference 常驻 system prompt，作为 [User Context] 段落；
+- 经历 experience 只在用户提起过去相关话题时按需检索召回，作为临时 [Relevant Memories] 段注入。
 
 ### Three Types
 
 | 类型 | 作用域 | 含义 | 示例 |
 |---|---|---|---|
-| **profile**（用户画像） | global | 关于用户的客观事实 | "用户是一名 AI 应用开发者，正在做终端语音助手项目" |
-| **preference**（交流偏好） | global | 用户喜欢怎样的交流方式 | "用户喜欢简洁直接的回复，不喜欢太长的解释" |
-| **experience**（共同经历） | persona | 用户与某个 Agent 的共同经历 | "用户和 Serena 聊过她的项目，Serena 给了架构建议" |
+| **`profile`** 用户画像 | global | 关于用户的客观事实 | "用户是一名 AI 应用开发者，正在做终端语音助手项目" |
+| **`preference`** 交流偏好 | global | 用户喜欢怎样的交流方式 | "用户喜欢简洁直接的回复，不喜欢太长的解释" |
+| **`experience`** 共同经历 | persona | 用户与某个 Agent 的共同经历 | "用户和 Serena 聊过她的项目，Serena 给了架构建议" |
 
 **作用域隔离：** profile 和 preference 是 global 的——换人格依然有效。experience 绑定 persona——换人格不会继承上一人格的共同经历。
 
@@ -607,9 +607,9 @@ Soul-TTY 是一个 Python 进程，但完整跑起来还需要几个外部服务
 
 TTS 端使用 `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit` 或兼容版本。
 
-### 可选：语音感知（SenseVoice）
+### 可选组件：语音感知
 
-SenseVoice 可感知用户语气/情绪/声学事件，结果作为弱证据供旁路反思系统消费。默认关闭，需要手动下载模型（约 228MB）：
+语音感知可感知用户语气/情绪/声学事件，结果作为弱证据供旁路反思系统消费。默认关闭，需要手动下载模型（约 228MB）：
 
 ```bash
 # 模型下载（首次运行前执行一次即可）
@@ -701,7 +701,7 @@ uv run soul-tty
 | Memory | `MEMORY_RECALL_MIN_RELEVANCE` | `0.2` | 召回相关性门槛 |
 | Memory | `MEMORY_RECENCY_HALFLIFE_DAYS` | `180` | 记忆时间衰减半衰期（天） |
 | Emotion | `EMOTION_ENABLED` | `1` | 关闭则情绪系统不启动 |
-| Voice | `VOICE_STATE_ENABLED` | `0` | 开启 SenseVoice 感知；默认关闭（ONNX 模型需单独下载） |
+| Voice | `VOICE_STATE_ENABLED` | `0` | 开启语音感知；默认关闭（ONNX 模型需单独下载） |
 | Voice | `SENSEVOICE_MODEL_DIR` | `../sherpa-asr/models/...` | SenseVoice 模型目录，含 `model.int8.onnx` + `tokens.txt` |
 | Voice | `VOICE_STATE_RESULT_TTL_S` | `120` | 感知结果缓存有效期（秒），超时后 Reflection 不可见 |
 | Voice | `VOICE_STATE_UI_TTL_S` | `45` | Dashboard 感知行展示 TTL，超出后自动消失；应短于 RESULT_TTL |
@@ -783,11 +783,11 @@ uv run pytest
 
 V1 已完成。三层分离记忆（画像 / 偏好 / 经历）、异步抽取、常驻段 + 按需召回、CLI 管理均已实现。
 
-- ✅ 画像（profile）与偏好（preference）常驻 system prompt
-- ✅ 经历（experience）按用户召回词按需检索注入
+- ✅ 画像 profile 与偏好 preference 常驻 system prompt
+- ✅ 经历 experience 按用户召回词按需检索注入
 - ✅ 异步抽取由 Reflection Worker 旁路完成
 - ✅ 去重与 importance 门槛过滤 | 管理与治理 CLI
-- 🚧 embedding 检索（V2，替换当前 bigram 方案）
+- 🚧 V2 embedding 检索（替换当前 bigram 方案）
 - 🚧 手动编辑与修正记忆
 
 ### Expression Layer
