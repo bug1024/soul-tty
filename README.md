@@ -71,7 +71,7 @@ Soul-TTY 的不同不在于第一次提出 Emotion / Bond / Memory 这些概念�
 | **会话记忆** | ✅ | 画像 / 偏好 / 经历三层分离，异步抽取 + 常驻段 + 按需召回 |
 | **语音感知 SenseVoice** | ✅ | SenseVoiceSmall 异步感知用户语气与声学事件，作为弱证据进入 Reflection Brain，辅助 Serena 的情绪与表达演化；最近一次感知在 Tab 详情中查看 |
 | **日期时间感知** | ✅ | 启动时写入当前日期星期，每分钟热更新；Serena 知道"今天是星期几" |
-| **全双工语音打断** | 🚧 | 实验开关 `BARGE_IN_ENABLED=1`；完整 AEC 状态机尚未稳定 |
+| **全双工语音打断** | ✅ | 实验开关 `DUPLEX_ENABLED=1`：partial 流、agent 期间插话打断、backchannel 短肯定词不打断；AEC 走 macos_voice 后端（AVAudioEngine voice-processing），其他平台建议佩戴耳机 |
 
 ---
 
@@ -348,7 +348,36 @@ Voice Observation 有两条独立的生命周期：
 
 超过后均不可见——这不是 bug，而是设计语义：**过了就是过了，Serena 不能反复翻旧账**。
 
-## 8. Memory System
+## 8. Full-Duplex Voice Mode
+
+> **半双工是默认；全双工是显式实验开关。开启 = partial 流 + 后台 answer + 取消语义 + backchannel。**
+
+### 三种语音模式
+
+| 模式 | 触发 | 行为 |
+|---|---|---|
+| `half_duplex` | 默认 | Mic 在 agent 说话期间暂停；用户说一句、agent 答一句 |
+| `barge_in` | `BARGE_IN_ENABLED=1`（旧名） | agent 说话期间持续听；离线 ASR 整句识别后决定是否打断 |
+| `full_duplex` | `DUPLEX_ENABLED=1` | partial 流式显示；agent 后台跑；用户 partial 命中即取消；backchannel 短词不打断 |
+
+`run_microphone` 是统一入口：先 `_detect_voice_mode()` 选模式 → `_voice_mode_warning()` 一次性提示 → 转到对应 `_run_*_mic()`。
+
+### 关键组件
+
+- **`Mic.add_frame_listener`** — 麦克风采集帧广播给 `DuplexListener` 与 VoiceState 旁路（同一份 PCM）
+- **`DuplexListener`** — 把帧送进 `VadGatedSherpaStream`，产出 `SPEECH_START / PARTIAL / FINAL / SPEECH_END` 事件流
+- **`FloorManager`** — 谁拥有麦克风的状态机（`IDLE / USER_SPEAKING / AGENT_SPEAKING / INTERRUPTED`），回声判定走 `interaction.echo.is_probable_echo`
+- **`PlaybackTranscript`** — agent 实际播放过的文本，用于回声过滤（避免误把"嗯,你说得对"当插话）
+- **Backchannel** — `BACKCHANNEL_ENABLED=1` 时，"嗯/好的/是" 等 ≤3 字肯定词不打断，只进 `pending_backchannel`，供下一轮参考
+- **`MacOSVoiceIO`** — macOS 13+ 后端，通过 Swift helper 启用 `AVAudioEngine.setVoiceProcessingEnabled`，硬件级 AEC；其他平台走 `PortAudioIO` 需佩戴耳机
+
+### 已知边界
+
+- TTS 播放仍走 `sd.RawOutputStream`，未接入 `MacOSVoiceIO`：外放环境下仍有少量自激，AEC 不完整
+- DuplexListener 内部 queue 容量 `64`：极端慢 ASR 时老 partial 会被丢
+- Backchannel 白名单写死在 `interaction/floor.BACKCHANNEL_WORDS`，当前不可配置
+
+## 9. Memory System
 
 ### Concept
 
@@ -473,7 +502,7 @@ uv run soul-tty memory clear
 
 ---
 
-## 9. Outfit & Modes
+## 10. Outfit & Modes
 
 换装不只是换一张图（运行截图见文首）。每个套装标注一个 `mode`，这个 mode 决定情绪系统如何解释"现在是哪种陪伴状态"：
 
@@ -489,7 +518,7 @@ uv run soul-tty memory clear
 
 ---
 
-## 10. Technical Implementation
+## 11. Technical Implementation
 
 ```
 麦克风 (16kHz mono PCM)
@@ -541,7 +570,7 @@ uv run soul-tty memory clear
 
 ---
 
-## 11. Project Structure
+## 12. Project Structure
 
 ```text
 src/soul_tty/
@@ -582,7 +611,7 @@ docs/                     # 设计稿、规划文档
 
 ---
 
-## 12. Installation
+## 13. Installation
 
 ### 前置依赖
 
@@ -647,7 +676,7 @@ uv run soul-tty
 
 ---
 
-## 13. Configuration
+## 14. Configuration
 
 所有配置项都通过环境变量覆盖，完整默认值见 [`src/soul_tty/config.py`](./src/soul_tty/config.py)。
 
@@ -672,8 +701,13 @@ uv run soul-tty
 | 切句 | `VAD_AGGRESSIVENESS` | `2` | 0–3，越大越严格 |
 | 切句 | `SILENCE_MS` | `700` | 连续静音判定一句话结束 |
 | 切句 | `MAX_UTTERANCE_S` | `15` | 单句最长秒数，超出强制切段 |
-| 打断 | `BARGE_IN_ENABLED` | `0` | 实验性全双工打断（建议配合耳机） |
-| 打断 | `BARGE_IN_ECHO_SIMILARITY` | `0.72` | 回声判定阈值 |
+| 打断 | `DUPLEX_ENABLED` | `0` | 真双工总开关（partial 流 + 打断 + 后台 answer 线程 + cancel） |
+| 打断 | `DUPLEX_ECHO_SIMILARITY` | `0.72` | duplex 路径回声判定阈值 |
+| 打断 | `BARGE_IN_ENABLED` | (alias) | 旧名，等价 `DUPLEX_ENABLED` |
+| 打断 | `BARGE_IN_ECHO_SIMILARITY` | (alias) | 旧路径回声阈值 |
+| 打断 | `BACKCHANNEL_ENABLED` | `1` | agent 说话时识别「嗯/好的」等短肯定词，不打断只记录 |
+| 音频 I/O | `AUDIO_IO_BACKEND` | `portaudio` | `portaudio` / `macos_voice`（后者需 Swift helper + macOS 13+） |
+| 音频 I/O | `TTS_PLAYBACK_GAIN` | `1.0` | TTS 输出增益（>0；1.0 = 原样） |
 | TTS | `TTS_BACKEND` | `mlx` | `mlx` / `macos` |
 | TTS | `MLX_TTS_URL` | `http://127.0.0.1:50501` | MLX-Audio 服务地址 |
 | TTS | `MLX_TTS_VOICE` | `Serena` | Qwen3-TTS 内置音色 |
@@ -735,7 +769,7 @@ SOUL_TTY_PERSONA=my_persona uv run soul-tty         # 用环境变量选人格
 
 ---
 
-## 14. Development
+## 15. Development
 
 不需要麦克风也能验证 LLM ↔ TTS 链路：
 
@@ -761,7 +795,7 @@ uv run pytest
 
 ---
 
-## 15. Interaction Reference
+## 16. Interaction Reference
 
 | 操作 | 行为 |
 |---|---|
@@ -777,7 +811,7 @@ uv run pytest
 
 ---
 
-## 16. Roadmap
+## 17. Roadmap
 
 ### Memory Layer ✅
 
@@ -807,7 +841,7 @@ V1 已完成。三层分离记忆（画像 / 偏好 / 经历）、异步抽取�
 
 ---
 
-## 17. License & Thanks
+## 18. License & Thanks
 
 **License：** 待定（开源筹备中）。
 
