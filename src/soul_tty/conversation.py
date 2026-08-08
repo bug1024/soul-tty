@@ -365,10 +365,11 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
     - Mic 不再 pause/resume — 真全双工。
     - 用户说完(FINAL)后,无论是否打断,都走下一轮 answer。
 
-    AEC 限制(commit 05 阶段):
-    - 采集已走 ``MacOSVoiceIO`` 拿 AEC-clean PCM
-    - 但 TTS 播放仍走 ``sd.RawOutputStream``,未进入 AVAudioEngine;
-      完整外放 AEC 需 commit 07+ 把 TTS 也接进 AudioIO
+    AEC 状态(commit 07+):
+    - macos_voice 后端:TTS 播放也通过 AudioIO 推到 helper,Swift playerNode
+      与 inputNode 处于同一 AVAudioEngine,voice-processing 能拿到 playback
+      reference → 完整外放 AEC。
+    - portaudio 后端:sounddevice 无硬件 AEC,需配合耳机。
     """
     from .audio.io import get_audio_io
     from .interaction.floor import FloorManager
@@ -376,9 +377,19 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
     listener = duplex.DuplexListener(queue_maxsize=64)
     floor = FloorManager()
 
-    if config.AUDIO_IO_BACKEND == "macos_voice":
-        audio_io = get_audio_io("macos_voice")
+    # commit 07+:复用 cli.py 提前创建的 audio_io(用于 TTS 播放回灌)。
+    # cli 没创建(duplex 但 AUDIO_IO_BACKEND=portaudio)时,这里自己起一个
+    # PortAudioIO,保证 StreamingSpeaker._play_loop 一定有 audio_io 可用。
+    audio_io = tts.get_audio_io()
+    owns_audio_io = False
+    if audio_io is None and config.AUDIO_IO_BACKEND == "portaudio":
+        audio_io = get_audio_io("portaudio")
         audio_io.start()
+        tts.set_audio_io(audio_io)
+        owns_audio_io = True
+
+    if config.AUDIO_IO_BACKEND == "macos_voice":
+        assert audio_io is not None  # cli.py 必须提前注入
         audio_io.add_capture_listener(listener.on_frame)
         # macos_voice:AudioIO 接管采集,Mic 没有 pause/resume 的概念
         audio_io_holder: list = [audio_io]
@@ -444,7 +455,6 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
             if io is not None:
                 _safe_cleanup(
                     lambda: io.remove_capture_listener(listener.on_frame),
-                    lambda: io.stop(),
                 )
         else:
             mic = mic_for_answer
@@ -454,6 +464,14 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                     lambda: mic.stop(),
                 )
         listener.stop()
+        # commit 07+:只有当 _run_duplex_mic 自己 start 的 audio_io 才
+        # 在这里 stop;cli 注入的由 cli 负责关停。
+        if owns_audio_io and audio_io is not None:
+            try:
+                audio_io.stop()
+                tts.set_audio_io(None)
+            except Exception:
+                pass
 
 
 def _safe_cleanup(*callables) -> None:
@@ -541,9 +559,16 @@ def _voice_mode_warning(mode: VoiceMode) -> str:
     """模式对应的一次性启动警告(给 UI 提示用)。"""
     if mode == VoiceMode.FULL_DUPLEX:
         if config.AUDIO_IO_BACKEND == "macos_voice":
+            from .audio import tts as _tts
+
+            # commit 07+:cli 已经把 MacOSVoiceIO 注入 tts,TTS 播放也走
+            # AVAudioEngine 的 playerNode,voice-processing 能拿到
+            # playback reference → 完整外放 AEC。
+            if _tts.get_audio_io() is not None:
+                return ""
             return (
-                "双工 + macos_voice 模式:TTS 播放未接入 AVAudioEngine,完整 AEC "
-                "需把 TTS 播放也走 AudioIO;当前可减少自激但仍可能误触发"
+                "双工 + macos_voice 模式:TTS 播放未注入 AVAudioEngine,"
+                "完整 AEC 失效(打断可能不触发)"
             )
         return "双工模式已开启 — 使用麦克风直采,建议使用耳机防止外放自激"
     if mode == VoiceMode.BARGE_IN:

@@ -54,11 +54,23 @@ def main() -> None:
     parser.add_argument("--file", help="用 WAV 文件测 ASR->LLM 链路")
     parser.add_argument("--text", help="跳过 ASR 直测 LLM（含 TTS 播放）")
     parser.add_argument(
+        "--audio-backend",
+        default=os.environ.get("AUDIO_IO_BACKEND", "portaudio"),
+        choices=["portaudio", "macos_voice"],
+        help=(
+            "音频 I/O 后端（commit 03+ 生效；macos_voice 需 Swift helper 启动）"
+        ),
+    )
+    parser.add_argument(
         "subargs",
         nargs="*",
         help="传给子命令的参数（仅 memory 使用）",
     )
     args = parser.parse_args()
+
+    # 把 CLI 显式传入的值回写到环境变量,让 config.AUDIO_IO_BACKEND 立即
+    # 反映调用方的选择(此时其它模块尚未 import,因此必须在最早期处理)。
+    os.environ["AUDIO_IO_BACKEND"] = args.audio_backend
 
     if args.command == "personas":
         for persona in available_personas():
@@ -438,6 +450,19 @@ def main() -> None:
                 )
 
         terminal.start_idle_emotions(idle_generator)
+
+    # commit 07+:duplex + macos_voice 路径下提前创建 audio_io 并注入 tts,
+    # 让 StreamingSpeaker._play_loop 把 TTS 也推到 AVAudioEngine,voice-processing
+    # 才能拿到 playback reference(完整外放 AEC,不再依赖耳机)。
+    audio_io = None
+    if config.DUPLEX_ENABLED and config.AUDIO_IO_BACKEND == "macos_voice":
+        from .audio.io import get_audio_io as _get_audio_io
+        from .audio import tts as _tts
+
+        audio_io = _get_audio_io("macos_voice")
+        audio_io.start()
+        _tts.set_audio_io(audio_io)
+
     chat = llm.Chat(main_model)
     try:
         if args.text:
@@ -455,4 +480,9 @@ def main() -> None:
             emotion_service.stop()
         if voice_service is not None:
             voice_service.close()
+        if audio_io is not None:
+            try:
+                audio_io.stop()
+            except Exception:
+                pass
         terminal.close()

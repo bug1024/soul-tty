@@ -31,6 +31,61 @@ _SHORT_TAIL_MAX_CHARS = 8
 _SHORT_TAIL_MIN_PREFIX_CHARS = 8
 _PLAYBACK_LEVEL_FRAME_MS = 50
 
+# 播放线性增益（commit 02 引入）。module 级单值 + lock 让
+# set_playback_gain 跨线程安全；播放线程在 _write_metered_pcm 内
+# 读一次就锁定整个 frame 的增益，避免逐 sample 抖动。
+_PLAYBACK_GAIN: float = 1.0
+_PLAYBACK_GAIN_LOCK = threading.Lock()
+
+
+def set_playback_gain(value: float) -> None:
+    """设置 TTS 线性播放增益。
+
+    - ``value == 0`` 合法：等效静音，便于 sanity check。
+    - ``value < 0`` 抛 ``ValueError``。
+    - ``value > 1`` 会保留 clip，避免 int16 上溢爆音。
+    """
+    if value < 0:
+        raise ValueError(f"playback gain must be >= 0, got {value}")
+    with _PLAYBACK_GAIN_LOCK:
+        global _PLAYBACK_GAIN
+        _PLAYBACK_GAIN = float(value)
+
+
+def get_playback_gain() -> float:
+    """读取当前 TTS 播放增益（默认 1.0）。"""
+    with _PLAYBACK_GAIN_LOCK:
+        return _PLAYBACK_GAIN
+
+
+# commit 07+ 修:把 TTS 播放也接进 AudioIO,让 macos_voice 后端的
+# AVAudioEngine 拿到 playback reference(完整 AEC)。非 duplex 路径
+# 仍然走默认的 sd.RawOutputStream(由 ``_play_loop`` 内部 fallback)。
+_AUDIO_IO = None
+_AUDIO_IO_LOCK = threading.Lock()
+
+
+def set_audio_io(audio_io) -> None:
+    """``cli.py`` 早期把 ``AudioIO`` 实例绑到这里。
+
+    StreamingSpeaker 创建时如果发现这里有实例,``_play_loop`` 会改用
+    ``audio_io.write_playback(pcm, sr)``,而不是直接 ``sd.RawOutputStream``。
+    """
+    if audio_io is not None and not hasattr(audio_io, "write_playback"):
+        raise TypeError(
+            f"audio_io must implement AudioIO (have write_playback), "
+            f"got {type(audio_io)}"
+        )
+    with _AUDIO_IO_LOCK:
+        global _AUDIO_IO
+        _AUDIO_IO = audio_io
+
+
+def get_audio_io():
+    """读取当前绑定的 ``AudioIO``(供 StreamingSpeaker 内部使用)。"""
+    with _AUDIO_IO_LOCK:
+        return _AUDIO_IO
+
 
 class PlaybackLevelMeter:
     """把 int16 PCM 转为平滑的 0-1 口型驱动值。"""
@@ -65,18 +120,36 @@ class PlaybackLevelMeter:
 
 
 def _write_metered_pcm(stream, pcm: bytes, meter: PlaybackLevelMeter) -> None:
-    """按接近口型刷新周期的小窗播放，避免一个 HTTP 大块只更新一次。"""
+    """按接近口型刷新周期的小窗播放，避免一个 HTTP 大块只更新一次。
+
+    增益在这里一次性应用：先 clip 再 cast 回 int16，避免溢出爆音；
+    meter 必须读到 gain 之后的样本，否则口型会与听感错位。
+    gain == 1.0 时整段乘法 + clip 是 no-op，与 commit 02 之前逐字节等价。
+    """
     samples_per_frame = max(
         1,
         int(config.TTS_SAMPLE_RATE * _PLAYBACK_LEVEL_FRAME_MS / 1000),
     )
     frame_bytes = samples_per_frame * 2
+    gain = get_playback_gain()
     for offset in range(0, len(pcm), frame_bytes):
         frame = pcm[offset : offset + frame_bytes]
         if not frame:
             continue
+        if gain != 1.0 and len(frame) >= 2:
+            usable = len(frame) - len(frame) % 2
+            if usable:
+                samples = np.frombuffer(frame[:usable], dtype="<i2").astype(np.float32)
+                samples = np.clip(samples * gain, -32768, 32767).astype("<i2")
+                frame = samples.tobytes() + frame[usable:]
         meter.update(frame)
         stream.write(frame)
+
+
+# commit 06+ 注:TTS 完整 AEC 需要把播放也走 AudioIO.write_playback,
+# 这样 AVAudioEngine 才能拿到 playback reference。当前默认 portaudio 路径
+# 仍走 sd.RawOutputStream;commit 07+ 才会把 speak() / StreamingSpeaker 切到
+# AudioIO(并加 playback-drained 同步)。
 
 
 def _aligned_pcm(chunks: Iterator[bytes], cancel: threading.Event | None):
@@ -324,6 +397,10 @@ class StreamingSpeaker:
     用作上下文管理器,退出时等待队列里剩余的句子播报完毕。
     `instruct` 在构造时锁住，整段回答共享同一份 TTS 指令，
     避免同一句话念到一半突然换语气。
+
+    commit 07+:如果显式传 ``audio_io``(或通过 ``tts.set_audio_io``
+    模块级注册),``_play_loop`` 会改走 ``audio_io.write_playback``,
+    让 macos_voice 后端拿到 playback reference —— 完整 AEC。
     """
 
     def __init__(
@@ -332,10 +409,12 @@ class StreamingSpeaker:
         on_audio_level: Callable[[float], None] | None = None,
         *,
         instruct: str = "",
+        audio_io=None,
     ):
         self._cancel = cancel or threading.Event()
         self._on_audio_level = on_audio_level
         self._instruct = instruct
+        self._audio_io = audio_io if audio_io is not None else get_audio_io()
         self._sent_q: queue.Queue = queue.Queue()
         self._audio_q: queue.Queue = queue.Queue(maxsize=8)
         target = self._macos_loop if config.TTS_BACKEND == "macos" else self._synth_loop
@@ -409,15 +488,37 @@ class StreamingSpeaker:
     def _play_loop(self):
         meter = PlaybackLevelMeter(self._on_audio_level)
         try:
-            with sd.RawOutputStream(
-                samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
-            ) as stream:
+            if self._audio_io is not None:
+                # commit 07+:把 PCM 推到 AudioIO(由它决定走 macos_voice
+                # 的 playerNode / portaudio 的 sd.RawOutputStream 长连接)。
+                # 这样 macos_voice 后端 AVAudioEngine 能拿到 playback
+                # reference,voice-processing 才能完整 echo cancellation。
                 while not self._cancel.is_set():
                     pcm = self._audio_q.get()
                     if pcm is _SENTINEL:
                         break
                     if pcm:
-                        _write_metered_pcm(stream, pcm, meter)
+                        meter.update(pcm)
+                        try:
+                            self._audio_io.write_playback(
+                                pcm, config.TTS_SAMPLE_RATE
+                            )
+                        except Exception as e:
+                            if not self._cancel.is_set():
+                                print(f"(TTS 播放失败: {e})")
+                            break
+            else:
+                # 兼容路径:非 duplex(默认半双工/插话模式)仍自己开
+                # sd.RawOutputStream,跟 commit 02+ 行为一致。
+                with sd.RawOutputStream(
+                    samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
+                ) as stream:
+                    while not self._cancel.is_set():
+                        pcm = self._audio_q.get()
+                        if pcm is _SENTINEL:
+                            break
+                        if pcm:
+                            _write_metered_pcm(stream, pcm, meter)
         except Exception as e:
             if not self._cancel.is_set():
                 print(f"(TTS 播放失败: {e})")
