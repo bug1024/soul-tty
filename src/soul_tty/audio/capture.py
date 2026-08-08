@@ -2,7 +2,7 @@
 
 import queue
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import sounddevice as sd
 import webrtcvad
@@ -10,11 +10,20 @@ import webrtcvad
 from .. import config
 
 
+# 单帧回调签名:(int16 mono PCM, sample_rate)
+FrameListener = Callable[[bytes, int], None]
+
+
 class Mic:
     """麦克风采集:VAD 按句切分。
 
     flush() 丢弃队列里积压的音频——TTS 播放期间采集到的声音
     (包括扬声器回声)不应进入下一轮识别。
+
+    add_frame_listener() 注册额外的帧级回调,用于在 half-duplex 之外
+    给 duplex 流式 ASR / SenseVoice 等旁路提供实时 PCM。
+    listener 必须在 sounddevice 回调线程上非阻塞(≤1ms),否则会触发
+    PortAudio underrun / xrun。
     """
 
     FRAME_BYTES = config.SAMPLE_RATE * config.FRAME_MS // 1000 * 2  # 30ms int16 mono
@@ -24,6 +33,8 @@ class Mic:
         self._closed = threading.Event()
         self._running = False
         self._vad_generation = 0
+        self._frame_listeners: list[FrameListener] = []
+        self._listener_lock = threading.Lock()
         self._stream = sd.RawInputStream(
             samplerate=config.SAMPLE_RATE,
             blocksize=self.FRAME_BYTES // 2,
@@ -33,7 +44,20 @@ class Mic:
         )
 
     def _callback(self, indata, frames, time_info, status):
-        self._q.put(bytes(indata))
+        chunk = bytes(indata)
+        # 队列保留旧行为不变;listener 在队列推送之后分发,
+        # 保证 _q 与 frames() 的语义不被任何下游 bug 污染。
+        self._q.put(chunk)
+        # listener 列表快照后逐个调用,期间允许 listener 自己 unregister。
+        with self._listener_lock:
+            listeners = list(self._frame_listeners)
+        for fn in listeners:
+            try:
+                fn(chunk, config.SAMPLE_RATE)
+            except Exception:
+                # 单个 listener 抛异常不能影响 sounddevice 回调,
+                # 否则后续所有 PCM 都会被丢。
+                pass
 
     def start(self):
         self._closed.clear()
@@ -65,6 +89,18 @@ class Mic:
     def reset_vad(self):
         """通知切句生成器丢弃尚未成句的局部缓冲。"""
         self._vad_generation += 1
+
+    def add_frame_listener(self, listener: FrameListener) -> None:
+        """注册帧级 listener。listener 必须非阻塞,见类 docstring。"""
+        with self._listener_lock:
+            if listener not in self._frame_listeners:
+                self._frame_listeners.append(listener)
+
+    def remove_frame_listener(self, listener: FrameListener) -> None:
+        """注销帧级 listener。"""
+        with self._listener_lock:
+            if listener in self._frame_listeners:
+                self._frame_listeners.remove(listener)
 
     def frames(self) -> Iterator[bytes]:
         """从采集队列持续取 30ms 帧。
