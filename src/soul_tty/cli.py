@@ -185,6 +185,16 @@ def main() -> None:
                 if emotion_service is not None
                 else "calm"
             )
+
+            # voice_context：读取已完成的声音观察，不等待、不阻塞
+            voice_context = ""
+            if voice_service is not None and turn.voice_refs:
+                observations = voice_service.get_many(turn.voice_refs)
+                if observations:
+                    from .audio.voice_state import render_voice_context
+
+                    voice_context = render_voice_context(observations)
+
             return llm.evaluate_relationship(
                 aux_model,
                 persona.display_name,
@@ -193,6 +203,7 @@ def main() -> None:
                 current_mood,
                 turn.user_text,
                 turn.agent_text,
+                voice_context=voice_context,
             )
 
         def on_relationship_update(state) -> None:

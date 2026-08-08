@@ -82,6 +82,25 @@ def _normalize_lang(raw: str) -> str:
     return cleaned.strip("|") or "unknown"
 
 
+def render_voice_context(observations: list[VoiceObservation]) -> str:
+    """将多条 VoiceObservation 渲染为供 LLM 消费的结构化文本。
+
+    保留机器语义标签（emotion= / event= / language=），
+    不使用 UI 展示格式。空列表返回空字符串。
+    """
+    if not observations:
+        return ""
+    lines = []
+    for obs in observations:
+        parts = [
+            f"emotion={obs.emotion}",
+            f"event={obs.event}",
+            f"language={obs.language}",
+        ]
+        lines.append(", ".join(parts))
+    return "\n".join(f"[voice] {line}" for line in lines)
+
+
 # ── SenseVoice 加载与解码 ──────────────────────────────────────────────
 
 
