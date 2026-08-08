@@ -13,10 +13,14 @@ from .. import config
 
 @dataclass(frozen=True)
 class TranscriptUpdate:
-    """在线识别更新。只有 final 文本可以送进 LLM。"""
+    """在线识别更新。只有 final 文本可以送进 LLM。
+
+    pcm 字段仅在 final=True 时携带完整 utterance PCM，partial 时为 None。
+    """
 
     text: str
     final: bool
+    pcm: bytes | None = None
 
 
 def _pcm_samples(pcm: bytes) -> np.ndarray:
@@ -122,7 +126,11 @@ class SherpaStream:
 
 
 class VadGatedSherpaStream:
-    """只在检测到人声后唤醒 Sherpa，同时保留句首与 endpoint 静音。"""
+    """只在检测到人声后唤醒 Sherpa，同时保留句首与 endpoint 静音。
+
+    final TranscriptUpdate 会携带 utterance PCM（含 pre-roll），
+    供 VoiceStateService 等旁路异步消费。
+    """
 
     def __init__(
         self,
@@ -148,16 +156,29 @@ class VadGatedSherpaStream:
         self._trigger_frames = max(1, trigger_ms // config.FRAME_MS)
         self._speech_frames = 0
         self.active = False
+        # 当前 utterance 的完整 PCM 积累（含 pre-roll）
+        self._utterance_pcm: list[bytes] = []
 
     def reset(self) -> None:
         self.session.reset()
         self._pre_roll.clear()
         self._speech_frames = 0
         self.active = False
+        self._utterance_pcm.clear()
 
     def accept(self, pcm: bytes) -> list[TranscriptUpdate]:
         if self.active:
+            self._utterance_pcm.append(pcm)
             updates = self.session.accept(pcm)
+            # 为 final 更新附加完整 utterance PCM
+            if updates and updates[-1].final and self._utterance_pcm:
+                utterance = b"".join(self._utterance_pcm)
+                updates = [
+                    TranscriptUpdate(u.text, u.final, pcm=utterance if u.final else None)
+                    if u.final else u
+                    for u in updates
+                ]
+                self._utterance_pcm.clear()
             if self.session.last_endpoint:
                 self._pre_roll.clear()
                 self._speech_frames = 0
@@ -168,7 +189,6 @@ class VadGatedSherpaStream:
         try:
             speech = self.vad.is_speech(pcm, config.SAMPLE_RATE)
         except ValueError:
-            # 非标准尾帧只会出现在固定文件输入；实时流应始终是 30ms。
             speech = False
         self._speech_frames = self._speech_frames + 1 if speech else 0
         if self._speech_frames < self._trigger_frames:
@@ -176,11 +196,21 @@ class VadGatedSherpaStream:
 
         self.active = True
         buffered = b"".join(self._pre_roll)
+        self._utterance_pcm = [buffered]
         self._pre_roll.clear()
         updates = self.session.accept(buffered)
+        # 触发阶段已有 final 的话，也要附加 PCM
+        if updates and updates[-1].final and self._utterance_pcm:
+            utterance = b"".join(self._utterance_pcm)
+            updates = [
+                TranscriptUpdate(u.text, u.final, pcm=utterance if u.final else None)
+                if u.final else u
+                for u in updates
+            ]
         if self.session.last_endpoint:
             self.active = False
             self._speech_frames = 0
+            self._utterance_pcm.clear()
         return updates
 
 
