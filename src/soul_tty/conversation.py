@@ -1,6 +1,7 @@
 """对话编排：麦克风 -> ASR -> LLM -> TTS。"""
 
 import difflib
+import enum
 import queue
 import re
 import sys
@@ -9,7 +10,7 @@ import wave
 from collections.abc import Callable
 
 from . import config, prompt, reflection
-from .audio import asr, capture, tts
+from .audio import asr, capture, duplex, tts
 from .clients import llm
 from .ui import terminal
 
@@ -183,15 +184,14 @@ def _usable_transcript(text: str) -> bool:
 
 
 def _is_probable_echo(heard: str, spoken: str) -> bool:
-    """判断回答期间收到的文本是否更像扬声器回声而非插话。"""
-    heard_n = _NON_SPEECH_TEXT.sub("", heard.lower())
-    spoken_n = _NON_SPEECH_TEXT.sub("", spoken.lower())
-    if len(heard_n) < 3 or not spoken_n:
-        return False
-    if heard_n in spoken_n:
-        return True
-    window = spoken_n[-max(len(heard_n) * 2, 24):]
-    return difflib.SequenceMatcher(None, heard_n, window).ratio() >= config.BARGE_IN_ECHO_SIMILARITY
+    """判断回答期间收到的文本是否更像扬声器回声而非插话。
+
+    commit 11+ 改用 ``interaction.echo.is_probable_echo``（纯文本,
+    不依赖音频模块,便于单独被 floor 引用）。
+    """
+    from .interaction.echo import is_probable_echo
+
+    return is_probable_echo(heard, spoken, config.BARGE_IN_ECHO_SIMILARITY)
 
 
 def _transcribe(pcm: bytes) -> str | None:
@@ -352,14 +352,224 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
         listener.join()
 
 
-def run_microphone(chat: llm.Chat) -> None:
-    global _active_chat
-    _active_chat = chat
+def _run_duplex_mic(chat: llm.Chat) -> None:
+    """真双工数据通路(commit 06+:FloorManager 状态机 + 真中断)。
+
+    行为:
+    - 采集源按 ``AUDIO_IO_BACKEND`` 选:
+      * ``portaudio``:``Mic`` + sounddevice(无 AEC,需耳机)
+      * ``macos_voice``:``MacOSVoiceIO`` 通过 Swift helper 取 AEC-clean PCM
+    - 用户说话时持续 partial 流给 UI;同时后台跑 LLM/TTS answer。
+    - FloorManager 决定用户 partial 是否打断 agent(回声过滤)。
+    - 真正打断:cancel 当前 LLM streaming + 中断 TTS 播放。
+    - Mic 不再 pause/resume — 真全双工。
+    - 用户说完(FINAL)后,无论是否打断,都走下一轮 answer。
+
+    AEC 限制(commit 05 阶段):
+    - 采集已走 ``MacOSVoiceIO`` 拿 AEC-clean PCM
+    - 但 TTS 播放仍走 ``sd.RawOutputStream``,未进入 AVAudioEngine;
+      完整外放 AEC 需 commit 07+ 把 TTS 也接进 AudioIO
+    """
+    from .audio.io import get_audio_io
+    from .interaction.floor import FloorManager
+
+    listener = duplex.DuplexListener(queue_maxsize=64)
+    floor = FloorManager()
+
+    if config.AUDIO_IO_BACKEND == "macos_voice":
+        audio_io = get_audio_io("macos_voice")
+        audio_io.start()
+        audio_io.add_capture_listener(listener.on_frame)
+        # macos_voice:AudioIO 接管采集,Mic 没有 pause/resume 的概念
+        audio_io_holder: list = [audio_io]
+        mic_for_answer: object = None  # type: ignore[assignment]
+    else:
+        mic = capture.Mic()
+        mic.start()
+        mic.add_frame_listener(listener.on_frame)
+        audio_io_holder = []  # type: ignore[assignment]
+        mic_for_answer = mic
+
+    terminal.listening(initial=True)
+    try:
+        for event in listener.events():
+            if event.kind == duplex.DuplexEventKind.SPEECH_START:
+                # 用户开始说话 → 通知 FloorManager
+                floor.user_start()
+                # 如果当前有 answer 在跑,cancel 它
+                answer_state = _current_answer_state()
+                if answer_state is not None:
+                    answer_state.cancel.set()
+                continue
+
+            if event.kind == duplex.DuplexEventKind.PARTIAL:
+                _show_partial(event.text)
+                # FloorManager 决定是否打断
+                if floor.user_partial(event.text):
+                    answer_state = _current_answer_state()
+                    if answer_state is not None and not answer_state.cancel.is_set():
+                        answer_state.cancel.set()
+                        terminal.interrupted(event.text)
+                else:
+                    # 没打断:看一下是不是 backchannel("嗯"之类),给 UI 一个轻量提示
+                    bc = floor.pending_backchannel
+                    if bc is not None and bc == event.text.strip():
+                        terminal.notice(f"…{bc}")
+                continue
+
+            if event.kind == duplex.DuplexEventKind.FINAL:
+                text = event.text if _usable_transcript(event.text) else None
+                was_interrupted = floor.user_final(text or "", pcm=event.pcm)
+                if text:
+                    _show_final(text)
+                    # 等待上一轮 answer 真正结束(cancel 后还会跑完流清理)
+                    _wait_answer_done(timeout_s=0.5)
+                    # 起新 answer(真全双工:不再 mic.pause)
+                    _spawn_answer(chat, text, pcm=event.pcm)
+                elif was_interrupted:
+                    # 没拿到 final 但 floor 说被打断了:丢掉,等下一轮
+                    pass
+                continue
+
+            # SPEECH_END 当前不单独消费(都在 FINAL 里走完)
+    finally:
+        # 关停当前 answer
+        answer_state = _current_answer_state()
+        if answer_state is not None:
+            answer_state.cancel.set()
+        _wait_answer_done(timeout_s=1.0)
+        # 关停采集
+        if config.AUDIO_IO_BACKEND == "macos_voice":
+            io = audio_io_holder[0] if audio_io_holder else None
+            if io is not None:
+                _safe_cleanup(
+                    lambda: io.remove_capture_listener(listener.on_frame),
+                    lambda: io.stop(),
+                )
+        else:
+            mic = mic_for_answer
+            if mic is not None:
+                _safe_cleanup(
+                    lambda: mic.remove_frame_listener(listener.on_frame),
+                    lambda: mic.stop(),
+                )
+        listener.stop()
+
+
+def _safe_cleanup(*callables) -> None:
+    """顺序调多个清理动作;任一抛异常不影响后续。"""
+    for fn in callables:
+        try:
+            fn()
+        except Exception:
+            pass
+
+
+# ── commit 06+:answer 线程化 + cancel 同步 ─────────────────────────
+
+
+class _AnswerState:
+    """当前在跑的 answer 状态:cancel 事件 + 完成事件 + 错误。"""
+
+    def __init__(self) -> None:
+        self.cancel = threading.Event()
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
+_active_answer_state: _AnswerState | None = None
+_active_answer_lock = threading.Lock()
+
+
+def _current_answer_state() -> _AnswerState | None:
+    with _active_answer_lock:
+        return _active_answer_state
+
+
+def _wait_answer_done(timeout_s: float) -> None:
+    """等当前 answer 线程结束(cancel 后还要清理流)。"""
+    state = _current_answer_state()
+    if state is None:
+        return
+    state.done.wait(timeout=timeout_s)
+
+
+def _spawn_answer(chat: llm.Chat, text: str, pcm: bytes | None = None) -> None:
+    """后台跑 ``_answer``,cancel 可由 ``_current_answer_state().cancel`` 触发。"""
+    state = _AnswerState()
+    with _active_answer_lock:
+        global _active_answer_state
+        _active_answer_state = state
+
+    def _run() -> None:
+        try:
+            _answer(chat, text, state.cancel, pcm=pcm)
+        except BaseException as e:
+            state.error = e
+        finally:
+            state.done.set()
+            with _active_answer_lock:
+                global _active_answer_state
+                # 只清掉自己;防止被新 answer 覆盖后误清
+                if _active_answer_state is state:
+                    _active_answer_state = None
+
+    threading.Thread(target=_run, name="soul-tty-duplex-answer", daemon=True).start()
+
+
+# ── commit 13+:统一编排入口 ────────────────────────────────────────
+
+
+class VoiceMode(str, enum.Enum):
+    """当前会话的语音交互模式(commit 13+ 单一入口后用)。"""
+
+    HALF_DUPLEX = "half_duplex"
+    BARGE_IN = "barge_in"
+    FULL_DUPLEX = "full_duplex"
+
+
+def _detect_voice_mode() -> VoiceMode:
+    """根据 config 选择模式,优先级 FULL_DUPLEX > BARGE_IN > HALF_DUPLEX。"""
+    if config.DUPLEX_ENABLED:
+        return VoiceMode.FULL_DUPLEX
     if config.BARGE_IN_ENABLED:
-        terminal.warning("插话模式已开启，请使用耳机或带 AEC 的设备")
+        return VoiceMode.BARGE_IN
+    return VoiceMode.HALF_DUPLEX
+
+
+def _voice_mode_warning(mode: VoiceMode) -> str:
+    """模式对应的一次性启动警告(给 UI 提示用)。"""
+    if mode == VoiceMode.FULL_DUPLEX:
+        if config.AUDIO_IO_BACKEND == "macos_voice":
+            return (
+                "双工 + macos_voice 模式:TTS 播放未接入 AVAudioEngine,完整 AEC "
+                "需把 TTS 播放也走 AudioIO;当前可减少自激但仍可能误触发"
+            )
+        return "双工模式已开启 — 使用麦克风直采,建议使用耳机防止外放自激"
+    if mode == VoiceMode.BARGE_IN:
+        return "插话模式已开启,请使用耳机或带 AEC 的设备"
+    return ""  # half-duplex:默认模式,不打 warning
+
+
+def _run_voice_session(chat: llm.Chat) -> None:
+    """统一编排入口(commit 13+):根据 config 选模式,转给具体实现。"""
+    mode = _detect_voice_mode()
+    warn = _voice_mode_warning(mode)
+    if warn:
+        terminal.warning(warn)
+    if mode == VoiceMode.FULL_DUPLEX:
+        _run_duplex_mic(chat)
+    elif mode == VoiceMode.BARGE_IN:
         _run_barge_in_mic(chat)
     else:
         _run_sherpa_half_duplex_mic(chat, capture)
+
+
+def run_microphone(chat: llm.Chat) -> None:
+    """对外唯一入口。设置 _active_chat,然后交给 _run_voice_session。"""
+    global _active_chat
+    _active_chat = chat
+    _run_voice_session(chat)
 
 
 def answer_text(chat: llm.Chat, text: str) -> str:

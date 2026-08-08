@@ -70,10 +70,26 @@ SILENCE_MS = int(os.environ.get("SILENCE_MS", "700"))     # 连续静音判定�
 MAX_UTTERANCE_S = float(os.environ.get("MAX_UTTERANCE_S", "15"))  # 强制切段
 MIN_UTTERANCE_MS = int(os.environ.get("MIN_UTTERANCE_MS", "300"))  # 过短丢弃(防误触发)
 
-# 插话打断：回答期间仍持续切句，ASR 确认不是播放回声后取消当前回答。
+# 插话打断 / 全双工（commit 04 引入 DUPLEX_ENABLED,接管旧 BARGE_IN_ENABLED）。
+# 默认 off：开启后回答期间持续切句，ASR 确认非播放回声后取消当前回答；
 # 外放环境没有 AEC 时可能误触发，使用耳机效果最稳定。
-BARGE_IN_ENABLED = os.environ.get("BARGE_IN_ENABLED", "0") not in ("0", "false", "False")
+# 兼容旧版 BARGE_IN_ENABLED：旧值 = 1 → 等价 DUPLEX_ENABLED = 1。
+_DUPLEX_RAW = os.environ.get("DUPLEX_ENABLED") or os.environ.get(
+    "BARGE_IN_ENABLED", "0"
+)
+DUPLEX_ENABLED = _DUPLEX_RAW not in ("0", "false", "False")
+BARGE_IN_ENABLED = DUPLEX_ENABLED  # 旧名兼容
 BARGE_IN_ECHO_SIMILARITY = float(os.environ.get("BARGE_IN_ECHO_SIMILARITY", "0.72"))
+# 双工路径专用文本回声阈值(commit 04 与 legacy 共用同一默认值)。
+DUPLEX_ECHO_SIMILARITY = float(os.environ.get("DUPLEX_ECHO_SIMILARITY", "0.72"))
+# Backchannel（commit 11+）：agent 说话时用户插一句"嗯/好的"等短肯定词，
+# 不打断当前回答,只默默记下来供下一轮参考。
+# 关闭 → 所有用户 partial 都按"可能是打断"处理（即旧行为）。
+BACKCHANNEL_ENABLED = os.environ.get("BACKCHANNEL_ENABLED", "1") not in (
+    "0",
+    "false",
+    "False",
+)
 
 # LLM
 SYSTEM_PROMPT = os.environ.get(
@@ -307,6 +323,12 @@ MLX_TTS_AUDIO_PADDING_S = float(
     os.environ.get("MLX_TTS_AUDIO_PADDING_S", "1.5")
 )
 TTS_SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "24000"))
+# 线性播放增益：commit 02 引入。1.0 = 不变（默认与历史一致）；
+# 0 = 静音，>1 会触发 clip，仅供调试使用。
+TTS_PLAYBACK_GAIN = float(os.environ.get("TTS_PLAYBACK_GAIN", "1.0"))
+# 音频 I/O 后端选择：commit 03 引入。默认 portaudio（行为不变）；
+# macos_voice 是 stub，需要 Swift helper（commit 05+ 落地）。
+AUDIO_IO_BACKEND = os.environ.get("AUDIO_IO_BACKEND", "portaudio")
 # 使用实际播放 PCM 的平滑音量驱动缓存口型；不会运行固定帧率动画。
 AVATAR_LIP_SYNC_ENABLED = os.environ.get("AVATAR_LIP_SYNC_ENABLED", "1") not in (
     "0", "false", "False"
