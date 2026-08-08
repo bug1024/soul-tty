@@ -120,12 +120,12 @@ class ReflectionWorker:
         self,
         user_text: str,
         agent_text: str,
-        voice_refs: tuple = (),
+        voice_ref: int | None = None,
     ) -> bool:
         if not user_text.strip() or not agent_text.strip() or self._stop.is_set():
             return False
         turn = CompletedTurn(
-            user_text.strip(), agent_text.strip(), voice_refs=voice_refs
+            user_text.strip(), agent_text.strip(), voice_ref=voice_ref
         )
         with self._lock:
             # 从完整回答结束开始等待空闲窗口，避免立刻与下一轮主对话争抢模型。
@@ -188,17 +188,13 @@ class ReflectionWorker:
                 self.queue.task_done()
         if len(turns) == 1:
             return first
-        # 合并多轮文本和 voice_refs（保留 turn index）
-        # voice_refs 可能是旧格式 (int,) 或新格式 ((turn_index, int),)
+        # 合并多轮文本；voice_ref 在这里转成 indexed 格式供 evaluate 层消费
+        # voice_refs 字段废弃，用 voice_ref（单个）替代
+        # indexed: [(local_turn_index, voice_ref)]，local index 与合并后文本编号对应
         all_indexed: list[tuple[int, int]] = []
-        for turn_idx, turn in enumerate(turns, 1):
-            for vr in turn.voice_refs:
-                if isinstance(vr, tuple) and len(vr) == 2:
-                    # 新格式：(turn_index, voice_ref)
-                    all_indexed.append(vr)
-                elif vr is not None:
-                    # 旧格式：直接是 voice_ref，用当前合并后的 turn index
-                    all_indexed.append((turn_idx, int(vr)))
+        for local_idx, turn in enumerate(turns, 1):
+            if turn.voice_ref is not None:
+                all_indexed.append((local_idx, turn.voice_ref))
         return CompletedTurn(
             "\n".join(
                 f"第{index}轮：{turn.user_text}"
@@ -208,7 +204,7 @@ class ReflectionWorker:
                 f"第{index}轮：{turn.agent_text}"
                 for index, turn in enumerate(turns, 1)
             ),
-            voice_refs=tuple(all_indexed),
+            voice_indexed=tuple(all_indexed),
         )
 
     def _run(self) -> None:
@@ -373,18 +369,10 @@ def record_turn(
     user_text: str,
     agent_text: str,
     voice_ref: int | None = None,
-    turn_index: int | None = None,
 ) -> bool:
     if _service is None:
         return False
-    # 单轮时 turn_index 是 1-based；coalesce 时会重新计算
-    if voice_ref is not None:
-        voice_refs: tuple = ((turn_index or 0, voice_ref),)
-    else:
-        voice_refs = ()
-    return _service.submit(
-        user_text, agent_text, voice_refs=voice_refs
-    )
+    return _service.submit(user_text, agent_text, voice_ref=voice_ref)
 
 
 def user_activity() -> None:

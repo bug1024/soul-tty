@@ -69,7 +69,7 @@ Soul-TTY 的不同不在于第一次提出 Emotion / Bond / Memory 这些概念�
 | **动态口型** | ✅ | 闭嘴 / 半开双缓存图，由实际播放 PCM 音量驱动切换 |
 | **动态台词** | ✅ | 启动欢迎、换装语、长时间安静后的陪伴短句均由 LLM 实时生成，超时回退本地短句 |
 | **会话记忆** | ✅ | 画像 / 偏好 / 经历三层分离，异步抽取 + 常驻段 + 按需召回 |
-| **语音感知（SenseVoice）** | ✅ | SenseVoiceSmall 离线识别用户语气/情绪/声学事件，结果显示在 Tab detail 面板 |
+| **语音感知（SenseVoice）** | ✅ | SenseVoiceSmall 异步感知用户语气与声学事件，作为弱证据进入 Reflection Brain，辅助 Serena 的 Emotion / Expression 演化；最近一次感知在 Tab detail 查看 |
 | **日期时间感知** | ✅ | 启动时写入当前日期星期，每分钟热更新；Serena 知道"今天是星期几" |
 | **全双工语音打断** | 🚧 | 实验开关 `BARGE_IN_ENABLED=1`；完整 AEC 状态机尚未稳定 |
 
@@ -103,59 +103,60 @@ Soul-TTY 的不同不在于第一次提出 Emotion / Bond / Memory 这些概念�
 
 ## 4. Agent Architecture
 
+Soul-TTY 的核心是五条分层结构：
+
 ```
-                    User
+                          User Voice (PCM)
+                                  │
+               ┌──────────────────┼──────────────────┐
+               ▼                  ▼                  ▼
+    ┌─────────────────┐  ┌─────────────────┐
+    │ Realtime Path    │  │ Voice Perception │
+    │ Streaming        │  │ SenseVoiceSmall  │
+    │ Paraformer       │  │ (异步独立旁路)    │
+    └────────┬────────┘  └────────┬────────┘
+             │                     │
+             │  text               │  weak evidence
+             │  + emotion          │  (voice obs)
+             ▼                     ▼
+    ┌──────────────────────────────────────┐
+    │        Conversation Brain              │  实时主对话：永远优先
+    │            (Realtime)                 │  任何旁路计算不阻塞它
+    └────────────────┬─────────────────────┘
                      │
+                     │ complete turn
                      ▼
-        ┌──────────────────────────────────────┐
-        │         Conversation Brain           │  实时主对话：流式识别 → 流式回复 → 流式语音
-        │            (Realtime)                │  永远优先；任何状态计算不阻塞它
-        └────────────────┬─────────────────────┘
-                         │
-                         │ 每轮完整回答
-                         ▼
-        ┌──────────────────────────────────────┐
-        │          Reflection Brain            │  异步旁路：单 worker · 合并多轮 · 限频
-        │             (Async)                  │  共享调度，不共享推理：
-        │                                      │  ├── 关系/情绪联合评估（LLM 调用 #1）
-        │                                      │  └── 记忆抽取（LLM 调用 #2）
-        └────────────────┬─────────────────────┘
-                         │
-                         │ 串行写入三个状态层
-                         ▼
-                         │
-              ┌──────────┼──────────┐
-              │          │          │
-              ▼          ▼          ▼
-        ┌──────────────┐┌──────────────┐┌──────────────┐
-        │     Bond     ││   Memory     ││   Emotion    │
-        │  长期 · 标量   ││  三层分离      ││  短期 · 五维   │
-        │  跨启动持久化  ││  画像/偏好/经历 ││  会话内演化   │
-        │              ││              ││  + 衰减       │
-        └──────┬───────┘└──────┬───────┘└──────┬───────┘
-               │               │               │
-               └───────┬───────┴───────┬───────┘
-                       │               │
-                       ▼               ▼
-            ┌──────────────────────────────────────┐
-            │           Expression Layer            │
-            │  ─────────────────────────────────── │
-            │  · [User Context] 常驻段               │
-            │  · [Relevant Memories] 临时段          │
-            │  · Emotion Context                    │
-            │  · TTS 语气指令                        │
-            │  · Avatar 表情与口型 🚧               │
-            └──────────────────────────────────────┘
+    ┌──────────────────────────────────────┐
+    │         Reflection Brain              │  异步旁路：单 worker · 合并多轮 · 限频
+    │            (Async)                   │  文本 + 声音双信号联合评估
+    └────────────────┬─────────────────────┘
+                     │
+                     │ 串行写入多个状态层
+                     ▼
+              ┌──────┼──────┐
+              │      │      │
+              ▼      ▼      ▼
+        ┌────────┐┌────────┐┌────────┐
+        │  Bond  ││Memory  ││Emotion │
+        │  长期   ││ 三层分离 ││ 短期五维 │
+        └────┬───┘└────┬───┘└────┬───┘
+             │          │          │
+             └──────────┼──────────┘
+                        ▼
+              ┌─────────────────────┐
+              │   Expression Layer   │  状态 → 可感知表现
+              └─────────────────────┘
 ```
 
-### 四层职责
+### 五层职责
 
 | 层 | 职责 | 时延要求 |
 |---|---|---|
+| **Perception** | 实时 ASR（文本）+ 异步 Voice（语气/声学事件）；两条独立，Voice 作为弱证据 | 不阻塞主对话 |
 | **Conversation Brain** | 用户真正"对话"的回路；同步、永远在主路径 | 亚秒级 |
-| **Reflection Brain** | 关系/情绪联合评估 + 记忆抽取，两次独立 LLM 调用；异步、可合并、可丢弃 | 不阻塞对话 |
+| **Reflection Brain** | 关系/情绪联合评估 + 记忆抽取；文本 + 声音双信号融合，异步、可合并 | 不阻塞对话 |
 | **State Layer** | Bond（跨启动持久化）+ Emotion（单次会话）+ Memory（跨会话持久化） | 无实时要求 |
-| **Expression Layer** | 状态 → 可感知表现；[User Context] 常驻段 + [Relevant Memories] 临时段 + Emotion Context + TTS 语气 | 安全时机 |
+| **Expression Layer** | 状态 → 可感知表现；[User Context] 常驻段 + Emotion Context + TTS 语气 | 安全时机 |
 
 ### 为什么 Reflection 不在主路径上
 
@@ -288,7 +289,60 @@ bond ← bond + delta × (1 - bond)
 
 ---
 
-## 7. Memory System
+## 7. Voice Perception
+
+### Concept
+
+> **ASR tells Soul-TTY what you said. Voice perception tells it how you said it. Reflection decides what that means.**
+
+SenseVoiceSmall 是独立于 ASR 的异步旁路：不占用主对话算力，不阻塞回复。它分析的是"这句话听起来像什么"，不是"用户实际是什么"。
+
+### Boundary
+
+```
+SenseVoice emotion=sad
+≠
+Serena 认定"用户在撒谎"
+```
+
+Voice Observation 是外部传感器信号，Reflection 才是认知层。两者之间有明确的语义鸿沟——信号 ≠ 结论。
+
+### What voice observation provides
+
+| 字段 | 来源 | 含义 |
+|---|---|---|
+| `emotion` | SenseVoice 分类 | 这句话的声学情绪：happy / sad / angry / neutral / surprise / fear / disgust |
+| `event` | SenseVoice 分类 | 声学事件：speech / laughter / crying / cough / applause |
+| `language` | SenseVoice 判断 | 语种：zh / en / ja / ko / yue |
+
+### How Reflection uses it
+
+Reflection 的 `evaluate_relationship()` 收到的是渲染后的 voice context：
+
+```
+[voice] turn=2, emotion=sad, event=speech, language=zh
+```
+
+解读规则：
+- 优先综合文本与声音，不单独依据标签下结论
+- 声音与文本冲突时视为**反差信号**，而非"用户在掩饰"
+- laughter / crying 等声学事件权重高于普通 emotion 分类
+- 声音可影响 emotion_delta 和 expression，**不得直接改写 bond**
+- 不得把一次性的声音情绪写入长期记忆描述
+
+### 产品语义
+
+| Voice 影响 | Voice 不影响 |
+|---|---|
+| `emotion_delta`（高权重） | Bond 数值 |
+| `expression`（高权重） | 长期 Memory 写入 |
+| 跨模态冲突感知 | 用户心理状态的直接判定 |
+
+### 生命周期
+
+Voice Observation 的缓存 TTL 由 `VOICE_STATE_RESULT_TTL_S` 控制（默认 120 秒）。超过后 Reflection 和 Tab「感知」均不可见该结果——这不是 bug，而是设计语义：**过了就是过了，Serena 不能反复翻旧账**。
+
+## 8. Memory System
 
 ### Concept
 
@@ -413,7 +467,7 @@ uv run soul-tty memory clear
 
 ---
 
-## 8. Outfit & Modes
+## 9. Outfit & Modes
 
 换装不只是换一张图（运行截图见文首）。每个套装标注一个 `mode`，这个 mode 决定情绪系统如何解释"现在是哪种陪伴状态"：
 
@@ -429,7 +483,29 @@ uv run soul-tty memory clear
 
 ---
 
-## 9. Technical Implementation
+## 10. Technical Implementation
+
+```
+麦克风 (16kHz mono PCM)
+       │
+       ├──► Streaming Paraformer (sherpa-onnx)
+       │          │
+       │          ▼  text
+       │    Conversation Brain
+       │          │
+       │          ▼  流式回复
+       │         TTS → 终端口型
+       │
+       └──► SenseVoiceSmall (异步，不阻塞主路径)
+                  │
+                  ▼  VoiceObservation
+              Reflection Brain
+                  │
+                  ▼  emotion_delta / expression
+              Emotion / Expression
+```
+
+详细链路：
 
 ```
 麦克风 (16kHz mono PCM)
@@ -440,47 +516,26 @@ uv run soul-tty memory clear
 │  空闲时只跑 VAD，触发后补回 300ms pre-roll        │
 └─────────────────────────────────────────────────┘
        │
-       ▼
-┌─ ASR ───────────────────────────────────────────┐
-│  sherpa-onnx Streaming Paraformer int8（进程内）  │
-│  partial 增量显示 → 0.6s 尾部静音提交 final       │
-└─────────────────────────────────────────────────┘
-       │
-       ▼
-┌─ Conversation Brain ────────────────────────────┐
-│  llama.cpp 流式 chat（OpenAI 兼容 HTTP）          │
-│  流式 token → 句切分 · Markdown 净化 · 重复截断    │
-│  system prompt 注入 [Emotion Context]            │
-└─────────────────────────────────────────────────┘
-       │
-       ▼
-┌─ TTS ───────────────────────────────────────────┐
-│  MLX Qwen3-TTS 1.7B CustomVoice（Apple Silicon）  │
-│  流式 PCM 块（≈0.32s）· 音量驱动终端口型           │
-│  备用后端：macOS `say`                            │
-└─────────────────────────────────────────────────┘
-       │
-       ▼
-┌─ UI ────────────────────────────────────────────┐
-│  Rich Dashboard                                  │
-│  Kitty / Ghostty / iTerm2 原生图片协议            │
-│  Chafa 真彩 Unicode 像素画回退                    │
-└─────────────────────────────────────────────────┘
-       │
-       │  (异步旁路，不阻塞以上任何一段)
-       ▼
-┌─ Reflection Brain ──────────────────────────────┐
-│  ReflectionWorker（关系评估 · 单 worker · 合并限频）  │
-│  MemoryService（三层记忆 · 异步抽取 · 按需召回）   │
-│  EmotionService（五维向量 · 平滑 · 空闲衰减）      │
-└─────────────────────────────────────────────────┘
+       ├──────────────────────────────────────┐
+       ▼                                              ▼
+┌─ Streaming Paraformer ─┐              ┌─ SenseVoiceSmall ─────────┐
+│  sherpa-onnx          │              │  进程内离线推理（~228MB）  │
+│  流式 ASR，partial 显示 │              │  emotion / event / lang   │
+└──────────┬────────────┘              └────────────┬─────────────┘
+           │  text                                   │ voice_obs
+           ▼                                         ▼
+    ┌────────────────────────────┐    ┌─────────────────────┐
+    │     Conversation Brain      │    │  Reflection Brain   │
+    │  流式 LLM → TTS → 口型    │    │  联合评估          │
+    └────────────────────────────┘    │  Bond/Memory/Emotion│
+                                      └─────────────────────┘
 ```
 
 **为什么是这套技术栈：** 全本地、Apple Silicon 友好（MLX）、延迟可压到亚秒级、整条链路没有云依赖。辅助请求（欢迎语、换装台词、空闲短句）可以通过 `AUX_LLM_URL` 指向独立的小模型服务，与主对话彻底隔离算力竞争。
 
 ---
 
-## 10. Project Structure
+## 11. Project Structure
 
 ```text
 src/soul_tty/
@@ -521,7 +576,7 @@ docs/                     # 设计稿、规划文档
 
 ---
 
-## 11. Installation
+## 12. Installation
 
 ### 前置依赖
 
@@ -558,7 +613,7 @@ uv run soul-tty
 
 ---
 
-## 12. Configuration
+## 13. Configuration
 
 所有配置项都通过环境变量覆盖，完整默认值见 [`src/soul_tty/config.py`](./src/soul_tty/config.py)。
 
@@ -612,6 +667,10 @@ uv run soul-tty
 | Memory | `MEMORY_RECALL_MIN_RELEVANCE` | `0.2` | 召回相关性门槛 |
 | Memory | `MEMORY_RECENCY_HALFLIFE_DAYS` | `180` | 记忆时间衰减半衰期（天） |
 | Emotion | `EMOTION_ENABLED` | `1` | 关闭则情绪系统不启动 |
+| Voice | `VOICE_STATE_ENABLED` | `0` | 开启 SenseVoice 感知；默认关闭（ONNX 模型需单独下载） |
+| Voice | `SENSEVOICE_MODEL_DIR` | `../sherpa-asr/models/...` | SenseVoice 模型目录，含 `model.int8.onnx` + `tokens.txt` |
+| Voice | `VOICE_STATE_RESULT_TTL_S` | `120` | 感知结果缓存有效期（秒），超时后 Reflection 和 Dashboard 均不可见 |
+| Voice | `VOICE_STATE_MIN_UTTERANCE_MS` | `800` | 最短有效语音长度，过短不提交分析 |
 | Emotion | `EMOTION_EMA_RATE` | `0.2` | 平滑率 |
 | Emotion | `EMOTION_DECAY_INTERVAL_S` | `300` | 空闲衰减间隔（秒） |
 | Emotion | `EMOTION_DECAY_RATE` | `0.05` | 每轮衰减幅度 |
@@ -641,7 +700,7 @@ SOUL_TTY_PERSONA=my_persona uv run soul-tty         # 用环境变量选人格
 
 ---
 
-## 13. Development
+## 14. Development
 
 不需要麦克风也能验证 LLM ↔ TTS 链路：
 
@@ -667,7 +726,7 @@ uv run pytest
 
 ---
 
-## 14. Interaction Reference
+## 15. Interaction Reference
 
 | 操作 | 行为 |
 |---|---|
@@ -683,7 +742,7 @@ uv run pytest
 
 ---
 
-## 15. Roadmap
+## 16. Roadmap
 
 ### Memory Layer ✅
 
@@ -713,7 +772,7 @@ V1 已完成。三层分离记忆（画像 / 偏好 / 经历）、异步抽取�
 
 ---
 
-## 16. License & Thanks
+## 17. License & Thanks
 
 **License：** 待定（开源筹备中）。
 

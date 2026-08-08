@@ -205,14 +205,14 @@ def main() -> None:
 
             # voice_context：读取已完成的声音观察，不等待、不阻塞
             voice_context = ""
-            if voice_service is not None and turn.voice_refs:
-                # voice_refs 可能是旧格式 (int,) 或新格式 (turn_index, voice_ref)
+            if voice_service is not None:
                 indexed_items: list[tuple[int, int]] = []
-                for vr in turn.voice_refs:
-                    if isinstance(vr, tuple) and len(vr) == 2:
-                        indexed_items.append(vr)
-                    elif vr is not None:
-                        indexed_items.append((0, int(vr)))
+                # coalesced turn：用预建的 voice_indexed
+                if turn.voice_indexed:
+                    indexed_items = list(turn.voice_indexed)
+                # 单轮 turn：用 voice_ref
+                elif turn.voice_ref is not None:
+                    indexed_items = [(1, turn.voice_ref)]
                 if indexed_items:
                     from .audio.voice_state import render_voice_context
 

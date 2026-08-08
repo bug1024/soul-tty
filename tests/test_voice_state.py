@@ -2,7 +2,7 @@
 
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from soul_tty import config
 from soul_tty.audio.voice_state import (
@@ -11,6 +11,7 @@ from soul_tty.audio.voice_state import (
     _normalize_emotion,
     _normalize_event,
     _normalize_lang,
+    render_voice_context,
 )
 
 
@@ -59,7 +60,9 @@ class NormalizeTests(unittest.TestCase):
 
 class VoiceObservationDataclassTests(unittest.TestCase):
     def test_frozen(self):
-        obs = VoiceObservation(emotion="happy", event="speech", language="zh", duration_ms=1000)
+        obs = VoiceObservation(
+            emotion="happy", event="speech", language="zh", duration_ms=1000
+        )
         with self.assertRaises(AttributeError):
             obs.emotion = "sad"  # type: ignore[misc]
 
@@ -120,7 +123,9 @@ class VoiceStateServiceDisabledTests(unittest.TestCase):
     """VOICE_STATE_ENABLED=0 时 submit 静默返回 None。"""
 
     def test_disabled_skips_submit(self):
-        with patch("soul_tty.audio.voice_state.config.VOICE_STATE_ENABLED", False):
+        with patch(
+            "soul_tty.audio.voice_state.config.VOICE_STATE_ENABLED", False
+        ):
             service = VoiceStateService()
             try:
                 ref = service.submit(b"\x00\x00" * 16000 * 2)
@@ -130,31 +135,145 @@ class VoiceStateServiceDisabledTests(unittest.TestCase):
 
 
 class VoiceStateServiceCacheTTLTests(unittest.TestCase):
-    """缓存不会无限增长。"""
+    """缓存 TTL 行为。"""
 
     def setUp(self):
         self._patcher = patch.object(config, "VOICE_STATE_ENABLED", True)
         self._patcher.start()
+        # 保存原值，测试完恢复
+        self._orig_ttl = config.VOICE_STATE_RESULT_TTL_S
+        self._orig_qsize = config.VOICE_STATE_QUEUE_SIZE
+        config.VOICE_STATE_RESULT_TTL_S = 1  # 1 秒 TTL 方便测试
+        config.VOICE_STATE_QUEUE_SIZE = 4
 
     def tearDown(self):
+        config.VOICE_STATE_RESULT_TTL_S = self._orig_ttl
+        config.VOICE_STATE_QUEUE_SIZE = self._orig_qsize
         self._patcher.stop()
 
-    def test_cache_evicts_old(self):
+    def _put(self, service, ref, obs):
+        """直接写 cache：(obs, timestamp)"""
+        service._cache[ref] = (obs, time.monotonic())
+
+    def test_get_returns_fresh_entry(self):
         service = VoiceStateService()
         try:
-            # 模拟多次 submit，但 worker 不实际 decode
-            # 我们直接往缓存里写入条目来测试 TTL 清理
-            with service._cache_lock:
-                for i in range(20):
-                    service._cache[i] = VoiceObservation(
-                        emotion="neutral", event="speech", language="zh",
-                        duration_ms=1000,
-                    )
-                service._evict_old()
-                # 最多保留 2x queue_size = 8 条
-                self.assertLessEqual(len(service._cache), 8)
+            obs = VoiceObservation(
+                emotion="sad", event="speech", language="zh", duration_ms=1000
+            )
+            self._put(service, 1, obs)
+            result = service.get(1)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.emotion, "sad")
         finally:
             service.close()
+
+    def test_get_returns_none_after_ttl(self):
+        service = VoiceStateService()
+        try:
+            obs = VoiceObservation(
+                emotion="sad", event="speech", language="zh", duration_ms=1000
+            )
+            service._cache[1] = (obs, time.monotonic() - 2)
+            result = service.get(1)
+            self.assertIsNone(result)
+        finally:
+            service.close()
+
+    def test_get_many_skips_expired(self):
+        service = VoiceStateService()
+        try:
+            obs1 = VoiceObservation(
+                emotion="happy", event="laughter", language="zh", duration_ms=500
+            )
+            obs2 = VoiceObservation(
+                emotion="sad", event="speech", language="zh", duration_ms=800
+            )
+            service._cache[1] = (obs1, time.monotonic())  # fresh
+            service._cache[2] = (obs2, time.monotonic() - 2)  # expired
+            results = service.get_many((1, 2))
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].emotion, "happy")
+        finally:
+            service.close()
+
+    def test_latest_returns_none_after_ttl(self):
+        service = VoiceStateService()
+        try:
+            obs = VoiceObservation(
+                emotion="sad", event="speech", language="zh", duration_ms=1000
+            )
+            # 用旧时间戳放入，使其过期
+            service._cache[1] = (obs, time.monotonic() - 10)
+            result = service.latest()
+            self.assertIsNone(result)
+        finally:
+            service.close()
+
+    def test_evict_removes_expired(self):
+        service = VoiceStateService()
+        try:
+            obs = VoiceObservation(
+                emotion="neutral", event="speech", language="zh", duration_ms=1000
+            )
+            # 放入 10 条，5 条过期，5 条 fresh
+            now = time.monotonic()
+            for i in range(10):
+                age = 2 if i < 5 else 0  # 前 5 条过期
+                service._cache[i] = (obs, now - age)
+            service._evict_old()
+            # 过期 5 条被清除，剩余 5 条 fresh
+            self.assertEqual(len(service._cache), 5)
+            for ref in range(5):
+                self.assertNotIn(ref, service._cache)
+            for ref in range(5, 10):
+                self.assertIn(ref, service._cache)
+        finally:
+            service.close()
+
+    def test_get_indexed_returns_fresh_only(self):
+        service = VoiceStateService()
+        try:
+            obs1 = VoiceObservation(
+                emotion="sad", event="speech", language="zh", duration_ms=1000
+            )
+            obs2 = VoiceObservation(
+                emotion="happy", event="laughter", language="zh", duration_ms=500
+            )
+            service._cache[1] = (obs1, time.monotonic() - 2)  # expired
+            service._cache[2] = (obs2, time.monotonic())  # fresh
+            indexed = service.get_indexed(((1, 1), (2, 2)))
+            self.assertEqual(len(indexed), 1)
+            self.assertEqual(indexed[0][0], 2)  # turn_index=2
+            self.assertEqual(indexed[0][1].emotion, "happy")
+        finally:
+            service.close()
+
+
+class RenderVoiceContextTests(unittest.TestCase):
+    def test_renders_indexed(self):
+        obs = VoiceObservation(
+            emotion="sad", event="speech", language="zh", duration_ms=1000
+        )
+        indexed = [(2, obs)]
+        text = render_voice_context(observations=[], indexed=indexed)
+        self.assertIn("turn=2", text)
+        self.assertIn("emotion=sad", text)
+        self.assertIn("event=speech", text)
+        self.assertIn("language=zh", text)
+
+    def test_renders_non_indexed(self):
+        obs = VoiceObservation(
+            emotion="happy", event="laughter", language="zh", duration_ms=500
+        )
+        text = render_voice_context(observations=[obs])
+        self.assertIn("emotion=happy", text)
+        self.assertIn("event=laughter", text)
+        self.assertNotIn("turn=", text)
+
+    def test_empty(self):
+        self.assertEqual(render_voice_context(observations=[], indexed=[]), "")
+        self.assertEqual(render_voice_context(observations=[]), "")
 
 
 if __name__ == "__main__":
