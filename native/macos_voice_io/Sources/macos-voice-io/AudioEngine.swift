@@ -134,15 +134,16 @@ final class AudioEngine {
             fputs("[AudioEngine] voice-processing DISABLED (SOUL_TTY_AEC=0)\n", stderr)
         }
 
-        // 3) VPIO 切换完成后再查 format(VPIO 可能改变 I/O format)
+        // 3) VPIO 切换后先 prepare(初始化 audio units,让 format 有效)
+        engine.prepare()
+
+        // 4) 再查 format(VPIO 可能改变 I/O format)
         let input = engine.inputNode
-        let output = engine.outputNode
         playbackFormat = engine.mainMixerNode.outputFormat(forBus: 0)
         let inputFormat = input.outputFormat(forBus: 0)
-        let outputFormat = output.outputFormat(forBus: 0)
-        fputs("[AudioEngine] post-VPIO input=\(inputFormat) output=\(outputFormat)\n", stderr)
+        fputs("[AudioEngine] post-VPIO input=\(inputFormat) playbackFormat=\(playbackFormat)\n", stderr)
 
-        // 4) 最后才构造播放 graph
+        // 5) 最后才构造播放 graph
         engine.attach(playerNode)
         engine.connect(playerNode, to: engine.mainMixerNode, format: playbackFormat)
     }
@@ -155,41 +156,64 @@ final class AudioEngine {
         }
         captureHandler = handler
         let input = engine.inputNode
-        // 用 inputNode 自身的格式(可能不是 48 k,但一定是 input 物理格式)。
         let hwFormat = input.outputFormat(forBus: 0)
-        // tap 缓冲大小:对应 30 ms @ 16 k ≈ 480 samples。物理 48 k 下 ≈ 1440 frames。
+        // commit 07+ fix:VPIO 下 input 可能是多通道(9ch deinterleaved)。
+        // tap 必须用 hwFormat 安装,但回调里手动提取第一个通道(麦克风)做重采样。
         let frames: AVAudioFrameCount = 1440
         input.installTap(onBus: 0, bufferSize: frames, format: hwFormat) { [weak self] buffer, _ in
             guard let self = self, let handler = self.captureHandler else { return }
-            // 调试:第一帧 + 每 50 帧打一次 peak,看 inputNode 真拿到啥。
-            // 同时做启动静音检测(前 30 帧累计 peak)。
+            // 提取第一个通道的数据(麦克风通道)
             let chData = buffer.floatChannelData?[0]
             var peak: Float = 0
+            var frameLength = Int(buffer.frameLength)
             if let ch = chData {
-                for i in 0..<Int(buffer.frameLength) {
+                for i in 0..<frameLength {
                     let v = abs(ch[i])
                     if v > peak { peak = v }
                 }
             }
-            self._trackStartupPeak(peak, frameLength: Int(buffer.frameLength))
+            self._trackStartupPeak(peak, frameLength: frameLength)
 
             self._tapFrames += 1
             if self._tapFrames == 1 || self._tapFrames % 50 == 0 {
                 fputs("[AudioEngine] tap frame=\(self._tapFrames) "
-                      + "len=\(buffer.frameLength) peak=\(peak)\n", stderr)
+                      + "len=\(frameLength) peak=\(peak)\n", stderr)
             }
+
             do {
-                let pcm = try Resampler.bufferToInt16PCM(buffer, targetSampleRate: 16_000)
+                // 手动从 deinterleaved 多通道提取第一个通道(麦克风)
+                let pcm = try self._extractFirstChannel(buffer)
                 if !pcm.isEmpty {
                     handler(pcm, 16_000)
                 }
             } catch {
-                fputs("[AudioEngine] capture resample failed: \(error)\n", stderr)
+                fputs("[AudioEngine] capture extract failed: \(error)\n", stderr)
             }
         }
-        fputs("[AudioEngine] hwFormat=\(hwFormat) sampleRate=\(hwFormat.sampleRate) "
-              + "channels=\(hwFormat.channelCount)\n", stderr)
+        fputs("[AudioEngine] hwFormat=\(hwFormat) ch=\(hwFormat.channelCount)\n", stderr)
         tapInstalled = true
+    }
+
+    /// 从多通道 ``AVAudioPCMBuffer`` 提取第一个通道(麦克风)并重采样到 16k int16 mono。
+    private func _extractFirstChannel(_ buffer: AVAudioPCMBuffer) throws -> Data {
+        guard let chData = buffer.floatChannelData?[0] else { return Data() }
+        let frameLength = Int(buffer.frameLength)
+        // 先把第一个通道数据包装成 1ch float buffer
+        let monoFloat = AVAudioPCMBuffer(
+            pcmFormat: AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: buffer.format.sampleRate,
+                channels: 1,
+                interleaved: false
+            )!,
+            frameCapacity: AVAudioFrameCount(frameLength)
+        )!
+        monoFloat.frameLength = buffer.frameLength
+        if let dst = monoFloat.floatChannelData?[0] {
+            memcpy(dst, chData, frameLength * MemoryLayout<Float>.size)
+        }
+        // 再通过 resampler 转到 16k int16 mono
+        return try Resampler.bufferToInt16PCM(monoFloat, targetSampleRate: 16_000)
     }
 
     func removeCaptureTap() throws {
