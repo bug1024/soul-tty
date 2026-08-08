@@ -164,6 +164,18 @@ class PortAudioIO(AudioIO):
     def get_playback_gain(self) -> float:
         return tts.get_playback_gain()
 
+    def flush_playback(self) -> None:
+        """PortAudioIO 同步写,没有已排队未播放的 buffer。"""
+        pass
+
+    def wait_playback_drained(self, timeout: float | None = None) -> bool:
+        """PortAudioIO 同步写,write_playback 返回时已播完。"""
+        return True
+
+    @property
+    def playback_active(self) -> bool:
+        return False
+
     # ── 内部 ────────────────────────────────────────────────────────
 
     def _capture_callback(self, indata, frames, time_info, status):

@@ -11,6 +11,8 @@
 //   0x06 PONG          (双向)             payload = ""
 //   0x07 STATS         (Swift → Python) payload = JSON stats 文本
 //   0x08 ERROR         (Swift → Python) payload = 错误文本
+//   0x09 PLAYBACK_FLUSH (Python → Swift) payload = "" 清空已排队播放 buffer
+//   0x0A PLAYBACK_DRAINED (Swift → Python) payload = "" 扬声器已播完所有 PCM
 //
 // Python 镜像见 src/soul_tty/audio/io/macos_voice.py。修改任何字段都要同步两端。
 
@@ -26,6 +28,8 @@ enum MessageType: UInt8 {
     case pong        = 0x06
     case stats       = 0x07
     case error       = 0x08
+    case playbackFlush   = 0x09
+    case playbackDrained = 0x0A
 }
 
 @available(macOS 13.0, *)

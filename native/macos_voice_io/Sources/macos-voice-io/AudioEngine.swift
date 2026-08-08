@@ -70,6 +70,10 @@ final class AudioEngine {
     private var startupFrames = 0
     private let startupSilentThreshold: Float = 0.00001
     private let startupMaxFrames = 30
+    // 播放生命周期追踪(commit 07+ fix)
+    private var pendingPlaybackBuffers = 0
+    private let pendingPlaybackLock = NSLock()
+    var onPlaybackDrained: (() -> Void)?
 
     init() throws {
         // 1) 检查麦克风权限
@@ -233,7 +237,32 @@ final class AudioEngine {
         )!
         let buffer = try Resampler.int16PCMToBuffer(pcm, format: srcFormat)
         let engineBuffer = try Resampler.resample(buffer: buffer, to: playbackFormat)
-        playerNode.scheduleBuffer(engineBuffer, at: nil, options: [], completionHandler: nil)
+        pendingPlaybackLock.lock()
+        pendingPlaybackBuffers += 1
+        let tag = pendingPlaybackBuffers
+        pendingPlaybackLock.unlock()
+        playerNode.scheduleBuffer(engineBuffer, at: nil, options: []) { [weak self] in
+            guard let self = self else { return }
+            self.pendingPlaybackLock.lock()
+            self.pendingPlaybackBuffers -= 1
+            let left = self.pendingPlaybackBuffers
+            self.pendingPlaybackLock.unlock()
+            if left == 0 {
+                fputs("[AudioEngine] playback drained (tag=\(tag))\n", stderr)
+                self.onPlaybackDrained?()
+            }
+        }
+    }
+
+    /// 立即清空已调度但尚未播放的 buffer(打断时用)。
+    func flushPlayback() {
+        playerNode.stop()
+        playerNode.reset()
+        pendingPlaybackLock.lock()
+        pendingPlaybackBuffers = 0
+        pendingPlaybackLock.unlock()
+        playerNode.play()
+        fputs("[AudioEngine] playback flushed\n", stderr)
     }
 
     /// 0.0 = 静音,1.0 = 原始音量,>1.0 可能爆音(系统会 clip)。

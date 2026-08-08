@@ -109,8 +109,13 @@ def _print_answer(
     on_token: Callable[[str], None] | None = None,
     *,
     recall: str = "",
+    on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
-    """流式打印 LLM 回答;给了 speaker 就按句切分实时送 TTS。"""
+    """流式打印 LLM 回答;给了 speaker 就按句切分实时送 TTS。
+
+    ``on_speech_queued``:每句实际送进 TTS 的文本(commit 07+ 用于回声参考,
+    比 ``on_token`` 更准确,因为 LLM token 可能还没送到 TTS 就中断了)。
+    """
     terminal.answer_start()
     parts = []
     buf = ""
@@ -128,6 +133,8 @@ def _print_answer(
                 if not playback_started:
                     terminal.speaking()
                     playback_started = True
+                if on_speech_queued is not None:
+                    on_speech_queued(sent)
                 speaker.say(sent)
     terminal.answer_end()
     if chat.last_stop_reason == "repetition":
@@ -135,7 +142,10 @@ def _print_answer(
     if speaker is not None and buf.strip():
         if not playback_started:
             terminal.speaking()
-        speaker.say(buf.strip())
+        sent = buf.strip()
+        if on_speech_queued is not None:
+            on_speech_queued(sent)
+        speaker.say(sent)
     return "".join(parts).strip()
 
 
@@ -145,6 +155,7 @@ def _answer(
     cancel: threading.Event | None = None,
     on_token: Callable[[str], None] | None = None,
     pcm: bytes | None = None,
+    on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
     cancel = cancel or threading.Event()
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
@@ -159,11 +170,13 @@ def _answer(
             cancel, terminal.audio_level, instruct=instruct
         ) as speaker:
             answer = _print_answer(
-                chat, text, speaker, cancel, on_token, recall=recall
+                chat, text, speaker, cancel, on_token, recall=recall,
+                on_speech_queued=on_speech_queued,
             )
     else:
         answer = _print_answer(
-            chat, text, cancel=cancel, on_token=on_token, recall=recall
+            chat, text, cancel=cancel, on_token=on_token, recall=recall,
+            on_speech_queued=on_speech_queued,
         )
         if config.TTS_ENABLED and answer and not cancel.is_set():
             try:
@@ -372,7 +385,7 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
     - portaudio 后端:sounddevice 无硬件 AEC,需配合耳机。
     """
     from .audio.io import get_audio_io
-    from .interaction.floor import FloorManager
+    from .interaction.floor import FloorManager, UserFinalDisposition
 
     listener = duplex.DuplexListener(queue_maxsize=64)
     floor = FloorManager()
@@ -420,6 +433,12 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                     if answer_state is not None and not answer_state.cancel.is_set():
                         answer_state.cancel.set()
                         terminal.interrupted(event.text)
+                        # commit 07+ fix:立即清空 Swift 端已排队播放 buffer
+                        if audio_io is not None:
+                            try:
+                                audio_io.flush_playback()
+                            except Exception:
+                                pass
                 else:
                     # 没打断:看一下是不是 backchannel("嗯"之类),给 UI 一个轻量提示
                     bc = floor.pending_backchannel
@@ -429,16 +448,41 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
 
             if event.kind == duplex.DuplexEventKind.FINAL:
                 text = event.text if _usable_transcript(event.text) else None
-                was_interrupted = floor.user_final(text or "", pcm=event.pcm)
-                if text:
-                    _show_final(text)
-                    # 等待上一轮 answer 真正结束(cancel 后还会跑完流清理)
-                    _wait_answer_done(timeout_s=0.5)
-                    # 起新 answer(真全双工:不再 mic.pause)
-                    _spawn_answer(chat, text, pcm=event.pcm, floor=floor)
-                elif was_interrupted:
-                    # 没拿到 final 但 floor 说被打断了:丢掉,等下一轮
-                    pass
+                cleaned = event.text.strip() if event.text else ""
+                disposition = floor.user_final(cleaned, pcm=event.pcm)
+
+                # commit 07+ fix:按 disposition 分流
+                if disposition == UserFinalDisposition.ECHO:
+                    # Serena 自己的回声 → 不触发新 answer
+                    if config.DUPLEX_DEBUG:
+                        terminal.notice(f"[echo-final] {cleaned}")
+                    continue
+
+                if disposition == UserFinalDisposition.BACKCHANNEL:
+                    # 用户说"嗯/好的",不打断,不 spawn
+                    if cleaned:
+                        terminal.notice(f"…{cleaned}")
+                    continue
+
+                # 真用户输入(USER 或 INTERRUPT)
+                if not text:
+                    continue
+
+                if disposition == UserFinalDisposition.INTERRUPT:
+                    # partial 阶段没来得及打断,但最终仍需要 cancel
+                    answer_state = _current_answer_state()
+                    if answer_state is not None and not answer_state.cancel.is_set():
+                        answer_state.cancel.set()
+                        terminal.interrupted(cleaned)
+                        if audio_io is not None:
+                            try:
+                                audio_io.flush_playback()
+                            except Exception:
+                                pass
+
+                _show_final(text)
+                _wait_answer_done(timeout_s=0.5)
+                _spawn_answer(chat, text, pcm=event.pcm, floor=floor, audio_io=audio_io)
                 continue
 
             # SPEECH_END 当前不单独消费(都在 FINAL 里走完)
@@ -516,12 +560,19 @@ def _spawn_answer(
     text: str,
     pcm: bytes | None = None,
     floor=None,
+    audio_io=None,
 ) -> None:
     """后台跑 ``_answer``,cancel 可由 ``_current_answer_state().cancel`` 触发。
 
     如果传了 ``floor``(FloorManager),在 answer 生命周期内调
     ``agent_start/agent_chunk/agent_end``,让 ``agent_text`` 持续更新,
     供 ``is_probable_echo`` 做回声判定(避免 agent 自己的话被当成用户插话)。
+
+    commit 07+ fix:
+    - 用 ``on_speech_queued`` 替代 ``on_token`` 作为回声参考(LLM token
+      可能还没送到 TTS 就中断了,用实际送 TTS 的文本更准确)
+    - ``agent_end`` 延迟到 ``audio_io.wait_playback_drained()`` 之后
+      (保证扬声器真正播完前,``agent_text`` 仍用于回声判定)
     """
     state = _AnswerState()
     with _active_answer_lock:
@@ -532,16 +583,25 @@ def _spawn_answer(
         if floor is not None:
             floor.agent_start()
         try:
-            # 创建 on_token 回调:每收到一个 token 就更新 floor 的 agent_text
-            on_token = None
+            # 用 on_speech_queued 替代 on_token:实际送 TTS 的文本才是回声参考
+            on_speech_queued = None
             if floor is not None:
-                def _on_token(tok: str) -> None:
-                    floor.agent_chunk(tok)
-                on_token = _on_token
-            _answer(chat, text, state.cancel, on_token=on_token, pcm=pcm)
+                def _on_speech_queued(sent: str) -> None:
+                    floor.agent_chunk(sent)
+                on_speech_queued = _on_speech_queued
+            _answer(
+                chat, text, state.cancel, pcm=pcm,
+                on_speech_queued=on_speech_queued,
+            )
         except BaseException as e:
             state.error = e
         finally:
+            # commit 07+ fix:等到扬声器真正播完再 agent_end
+            if audio_io is not None and not state.cancel.is_set():
+                try:
+                    audio_io.wait_playback_drained(timeout=2.0)
+                except Exception:
+                    pass
             if floor is not None:
                 floor.agent_end()
             state.done.set()

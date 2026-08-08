@@ -90,6 +90,11 @@ BACKCHANNEL_ENABLED = os.environ.get("BACKCHANNEL_ENABLED", "1") not in (
     "false",
     "False",
 )
+# Duplex 调试日志:echo final / disposition 等额外输出
+DUPLEX_DEBUG = os.environ.get("DUPLEX_DEBUG", "0") not in ("0", "false", "False")
+# 回声 grace period(ms):agent 说完后保留最近文本用于回声判定,
+# 避免房间尾声被当成用户输入
+DUPLEX_ECHO_GRACE_MS = int(os.environ.get("DUPLEX_ECHO_GRACE_MS", "800"))
 
 # LLM
 SYSTEM_PROMPT = os.environ.get(

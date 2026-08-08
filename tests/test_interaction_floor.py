@@ -8,6 +8,7 @@ commit 07+ 修复:
 import threading
 
 from soul_tty.interaction import (
+    UserFinalDisposition,
     BACKCHANNEL_WORDS,
     FloorManager,
     FloorState,
@@ -108,7 +109,7 @@ def test_user_final_records_interrupt_text():
     fm.agent_start()
     fm.user_partial("等一下")  # → INTERRUPTED
     interrupted = fm.user_final("等一下")
-    assert interrupted is True
+    assert interrupted == UserFinalDisposition.INTERRUPT
     assert fm.last_interrupt == "等一下"
     assert fm.state == FloorState.IDLE
 
@@ -117,7 +118,7 @@ def test_user_final_no_interrupt_returns_false():
     """用户在没有 agent 时说话 → 不算打断。"""
     fm = FloorManager()
     fm.user_start()
-    assert fm.user_final("你好") is False
+    assert fm.user_final("你好") == UserFinalDisposition.USER
 
 
 def test_on_interrupt_callback_fires_via_partial():
@@ -319,20 +320,21 @@ def test_real_interrupt_after_backchannel():
 
     # 真 final 后 pending 被清
     was_interrupted = fm.user_final("等一下这个问题不对", pcm=b"\x00\x00" * 16)
-    assert was_interrupted is True
+    assert was_interrupted == UserFinalDisposition.INTERRUPT
     assert fm.pending_backchannel is None
 
 
 def test_backchannel_user_final_clears_pending():
-    """用户说完一句 final(非空)后,pending backchannel 一定被清。"""
+    """用户说一句 backchannel 式的 final → 更新 pending_backchannel,不打断。"""
     fm = _make_manager()
     fm.agent_start()
     fm.user_partial("嗯")
     assert fm.pending_backchannel == "嗯"
 
-    # 句尾 final 带文本(虽然没有真打断)
-    fm.user_final("好的", pcm=b"\x00\x00" * 16)
-    assert fm.pending_backchannel is None
+    # 句尾 final 也是 backchannel("好的") → 更新 pending,不打断
+    disp = fm.user_final("好的", pcm=b"\x00\x00" * 16)
+    assert disp == UserFinalDisposition.BACKCHANNEL
+    assert fm.pending_backchannel == "好的"
 
 
 def test_consecutive_backchannels_only_keep_last():

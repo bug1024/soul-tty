@@ -164,7 +164,10 @@ final class Helper {
                 stats.pingCount += 1
             case .playbackPCM:
                 try handlePlayback(msg.payload)
-            case .capturePCM, .pong, .stats, .error:
+            case .playbackFlush:
+                engine?.flushPlayback()
+                fputs("[macos-voice-io] PLAYBACK_FLUSH\n", stderr)
+            case .capturePCM, .pong, .stats, .error, .playbackDrained:
                 // 客户端不应发送这些,收到 → 上报 + 继续
                 try sendError("unexpected message type 0x\(String(msg.type.rawValue, radix: 16))")
             }
@@ -180,6 +183,10 @@ final class Helper {
         let eng = try AudioEngine()
         try eng.installCaptureTap { [weak self] pcm, sr in
             self?.enqueueCapture(pcm: pcm, sampleRate: sr)
+        }
+        // 注册 playback drained 回调:Swift 扬声器播完时通知 Python
+        eng.onPlaybackDrained = { [weak self] in
+            self?.sendPlaybackDrained()
         }
         try eng.start()
         self.engine = eng
@@ -262,6 +269,14 @@ final class Helper {
     func sendError(_ text: String) throws {
         let msg = Message(type: .error, payload: Data(text.utf8))
         try msg.write(to: clientFd)
+    }
+
+    func sendPlaybackDrained() {
+        let msg = Message(type: .playbackDrained, payload: Data()).encode()
+        let _ = msg.withUnsafeBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return 0 }
+            return send(clientFd, base, msg.count, 0)
+        }
     }
 }
 

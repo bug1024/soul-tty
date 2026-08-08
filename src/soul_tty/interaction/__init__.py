@@ -8,6 +8,7 @@ from .floor import (
     BACKCHANNEL_WORDS,
     FloorManager,
     FloorState,
+    UserFinalDisposition,
     is_backchannel,
 )
 from .playback_transcript import PlaybackTranscript
@@ -17,5 +18,6 @@ __all__ = [
     "FloorManager",
     "FloorState",
     "PlaybackTranscript",
+    "UserFinalDisposition",
     "is_backchannel",
 ]

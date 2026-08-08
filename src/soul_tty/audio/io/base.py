@@ -52,3 +52,24 @@ class AudioIO(Protocol):
     def get_playback_gain(self) -> float:
         """读取当前播放增益。默认 1.0。"""
         ...
+
+    def flush_playback(self) -> None:
+        """立即清空已排队但尚未播放的 PCM(打断时调用)。
+
+        默认 no-op;macos_voice 后端会发 PLAYBACK_FLUSH 到 Swift helper,
+        清空 AVAudioPlayerNode 的已调度 buffer。
+        """
+        ...
+
+    def wait_playback_drained(self, timeout: float | None = None) -> bool:
+        """等待扬声器真正播完当前所有已排队的 PCM。
+
+        Returns:
+            True = 已排空, False = 超时。
+        """
+        return True
+
+    @property
+    def playback_active(self) -> bool:
+        """是否有尚未播放完的 PCM(用于 agent_end 的时机判断)。"""
+        return False

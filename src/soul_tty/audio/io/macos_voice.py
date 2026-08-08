@@ -49,6 +49,8 @@ _PING = 0x05
 _PONG = 0x06
 _STATS = 0x07
 _ERROR = 0x08
+_PLAYBACK_FLUSH = 0x09
+_PLAYBACK_DRAINED = 0x0A
 
 _MAX_PAYLOAD = 4 * 1024 * 1024
 
@@ -135,6 +137,10 @@ class MacOSVoiceIO(AudioIO):
         # 固定 30ms framer:累计 buffer,切 960-byte 帧
         self._frame_buffer = bytearray()
         self._frame_buffer_lock = threading.Lock()
+
+        # 播放生命周期(commit 07+ fix):PLAYBACK_FLUSH / PLAYBACK_DRAINED
+        self._playback_active = threading.Event()
+        self._playback_drained = threading.Event()
 
     # ── AudioIO protocol ───────────────────────────────────────────
 
@@ -247,11 +253,35 @@ class MacOSVoiceIO(AudioIO):
 
     def write_playback(self, pcm: bytes, sample_rate: int) -> None:
         """把 int16 mono PCM 推到 helper(helper 内部 resample 到硬件格式)。
+
+        标记 playback_active,等待 PLAYBACK_DRAINED 消息。
         """
         if not pcm:
             return
+        self._playback_active.set()
+        self._playback_drained.clear()
         payload = struct.pack(">I", sample_rate) + pcm
         self._send(_PLAYBACK_PCM, payload)
+
+    def flush_playback(self) -> None:
+        """立即清空 Swift 端已排队但尚未播放的 PCM。
+
+        打断时调用,确保 Serena 真正闭嘴,而不是等已 schedule 的 buffer 播完。
+        """
+        try:
+            self._send(_PLAYBACK_FLUSH, b"")
+        except Exception:
+            pass
+        self._playback_active.clear()
+        self._playback_drained.set()
+
+    def wait_playback_drained(self, timeout: float | None = None) -> bool:
+        """等待扬声器真正播完当前所有已排队的 PCM。"""
+        return self._playback_drained.wait(timeout=timeout)
+
+    @property
+    def playback_active(self) -> bool:
+        return self._playback_active.is_set()
 
     def add_capture_listener(self, listener: CaptureListener) -> None:
         with self._listener_lock:
@@ -348,6 +378,10 @@ class MacOSVoiceIO(AudioIO):
                 log.warning("macos-voice-io error: %r", payload)
             elif msg_type == _STATS:
                 pass
+            elif msg_type == _PLAYBACK_DRAINED:
+                # commit 07+ fix:Swift 端扬声器已播完,更新 playback 状态
+                self._playback_active.clear()
+                self._playback_drained.set()
 
     def _check_capture_health(self, timeout_s: float, min_frames: int, min_peak: int) -> None:
         """启动健康检查:检查 helper 进程存活,不消耗 socket 数据(避免与 _reader_loop 竞争)。
