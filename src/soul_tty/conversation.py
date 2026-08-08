@@ -435,7 +435,7 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                     # 等待上一轮 answer 真正结束(cancel 后还会跑完流清理)
                     _wait_answer_done(timeout_s=0.5)
                     # 起新 answer(真全双工:不再 mic.pause)
-                    _spawn_answer(chat, text, pcm=event.pcm)
+                    _spawn_answer(chat, text, pcm=event.pcm, floor=floor)
                 elif was_interrupted:
                     # 没拿到 final 但 floor 说被打断了:丢掉,等下一轮
                     pass
@@ -511,19 +511,39 @@ def _wait_answer_done(timeout_s: float) -> None:
     state.done.wait(timeout=timeout_s)
 
 
-def _spawn_answer(chat: llm.Chat, text: str, pcm: bytes | None = None) -> None:
-    """后台跑 ``_answer``,cancel 可由 ``_current_answer_state().cancel`` 触发。"""
+def _spawn_answer(
+    chat: llm.Chat,
+    text: str,
+    pcm: bytes | None = None,
+    floor=None,
+) -> None:
+    """后台跑 ``_answer``,cancel 可由 ``_current_answer_state().cancel`` 触发。
+
+    如果传了 ``floor``(FloorManager),在 answer 生命周期内调
+    ``agent_start/agent_chunk/agent_end``,让 ``agent_text`` 持续更新,
+    供 ``is_probable_echo`` 做回声判定(避免 agent 自己的话被当成用户插话)。
+    """
     state = _AnswerState()
     with _active_answer_lock:
         global _active_answer_state
         _active_answer_state = state
 
     def _run() -> None:
+        if floor is not None:
+            floor.agent_start()
         try:
-            _answer(chat, text, state.cancel, pcm=pcm)
+            # 创建 on_token 回调:每收到一个 token 就更新 floor 的 agent_text
+            on_token = None
+            if floor is not None:
+                def _on_token(tok: str) -> None:
+                    floor.agent_chunk(tok)
+                on_token = _on_token
+            _answer(chat, text, state.cancel, on_token=on_token, pcm=pcm)
         except BaseException as e:
             state.error = e
         finally:
+            if floor is not None:
+                floor.agent_end()
             state.done.set()
             with _active_answer_lock:
                 global _active_answer_state
