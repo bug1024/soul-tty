@@ -94,6 +94,20 @@ def main() -> None:
     apply_persona(persona)
     terminal.configure(persona)
 
+    # 日期时间段落：启动时写入，之后每分钟热更新一次
+    prompt.builder().set_section("datetime", prompt.render_datetime_context())
+    prompt.refresh()
+
+    def _refresh_datetime() -> None:
+        prompt.builder().set_section("datetime", prompt.render_datetime_context())
+        prompt.refresh()
+
+    _datetime_timer = threading.Event()
+    def _datetime_tick() -> None:
+        while not _datetime_timer.wait(60):
+            _refresh_datetime()
+    threading.Thread(target=_datetime_tick, daemon=True).start()
+
     # Initialize EmotionService
     emotion_service = None
     if config.EMOTION_ENABLED:
@@ -278,8 +292,7 @@ def main() -> None:
                 )
             )
 
-        # VoiceStateService：异步声音感知，默认关闭
-        voice_service = None
+        # VoiceStateService：异步声音感知，独立于 REFLECTION_ENABLED
         if config.VOICE_STATE_ENABLED:
             from .audio.voice_state import VoiceStateService
 
@@ -413,6 +426,7 @@ def main() -> None:
     except KeyboardInterrupt:
         terminal.goodbye()
     finally:
+        _datetime_timer.set()
         reflection.close()
         if emotion_service is not None:
             emotion_service.stop()

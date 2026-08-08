@@ -242,7 +242,7 @@ VOICE_STATE_ENABLED = os.environ.get("VOICE_STATE_ENABLED", "1") not in (
 SENSEVOICE_MODEL_DIR = os.environ.get(
     "SENSEVOICE_MODEL_DIR",
     str(
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[2]
         / "sherpa-asr" / "models"
         / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
     ),

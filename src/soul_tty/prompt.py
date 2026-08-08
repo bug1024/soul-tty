@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import datetime
 
 # 段落顺序对应模型理解的语义层级：
 # 我是谁 → 现在什么模式 → 用户是谁 → 我们关系如何 → 我此刻的状态
@@ -23,12 +24,14 @@ _SECTION_ORDER: tuple[str, ...] = (
     "profile",
     "bond",
     "emotion",
+    "datetime",
 )
 
 _SECTION_TITLES: dict[str, str] = {
     "profile": "[User Context]",
     "bond": "[Bond Context]",
     "emotion": "[Emotion Context]",
+    "datetime": "[Date & Time]",
 }
 
 
@@ -70,6 +73,29 @@ _builder = SystemPromptBuilder()
 def builder() -> SystemPromptBuilder:
     """进程级单例；与 config 的全局配置模型保持一致。"""
     return _builder
+
+
+def render_datetime_context() -> str:
+    """渲染当前日期时间上下文字符串，供 LLM 感知"现在是什么时候"。"""
+    now = datetime.now()
+    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    period = _day_period(now.hour)
+    return (
+        f"当前时间：{now.year}年{now.month}月{now.day}日 {weekday_names[now.weekday()]}，{period}。"
+        f"现在是 {now.hour}点{now.minute}分。"
+    )
+
+
+def _day_period(hour: int) -> str:
+    if 5 <= hour < 11:
+        return "早上"
+    if 11 <= hour < 14:
+        return "中午"
+    if 14 <= hour < 18:
+        return "下午"
+    if 18 <= hour < 24:
+        return "晚上"
+    return "深夜"
 
 
 def refresh() -> str:
