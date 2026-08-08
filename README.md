@@ -108,44 +108,45 @@ Soul-TTY 的核心是五条分层结构：
 ```
                           User Voice (PCM)
                                   │
-               ┌──────────────────┼──────────────────┐
-               ▼                  ▼                  ▼
-    ┌─────────────────┐  ┌─────────────────┐
-    │ Realtime Path    │  │ Voice Perception │
-    │ Streaming        │  │ SenseVoiceSmall  │
-    │ Paraformer       │  │ (异步独立旁路)    │
-    └────────┬────────┘  └────────┬────────┘
-             │                     │
-             │  text               │  weak evidence
-             │  + emotion          │  (voice obs)
-             ▼                     ▼
-    ┌──────────────────────────────────────┐
-    │        Conversation Brain              │  实时主对话：永远优先
-    │            (Realtime)                 │  任何旁路计算不阻塞它
-    └────────────────┬─────────────────────┘
-                     │
-                     │ complete turn
-                     ▼
-    ┌──────────────────────────────────────┐
-    │         Reflection Brain              │  异步旁路：单 worker · 合并多轮 · 限频
-    │            (Async)                   │  文本 + 声音双信号联合评估
-    └────────────────┬─────────────────────┘
-                     │
-                     │ 串行写入多个状态层
-                     ▼
-              ┌──────┼──────┐
-              │      │      │
-              ▼      ▼      ▼
-        ┌────────┐┌────────┐┌────────┐
-        │  Bond  ││Memory  ││Emotion │
-        │  长期   ││ 三层分离 ││ 短期五维 │
-        └────┬───┘└────┬───┘└────┬───┘
-             │          │          │
-             └──────────┼──────────┘
-                        ▼
-              ┌─────────────────────┐
-              │   Expression Layer   │  状态 → 可感知表现
-              └─────────────────────┘
+               ┌──────────────────┴──────────────────┐
+               ▼                                     ▼
+    ┌─────────────────┐               ┌─────────────────────┐
+    │ Realtime Path    │               │  Voice Perception  │
+    │ Streaming         │               │  SenseVoiceSmall    │
+    │ Paraformer       │               │  (异步独立旁路)      │
+    └────────┬────────┘               └──────────┬──────────┘
+             │                                    │
+             │  text                               │  weak evidence
+             │                                     │  (voice obs)
+             ▼                                     ▼
+    ┌──────────────────────────────────────────────────────────┐
+    │                  Conversation Brain                        │  实时主对话：永远优先
+    │                      (Realtime)                         │  任何旁路计算不阻塞它
+    └─────────────────────────┬────────────────────────────┘
+                              │
+                              │  complete turn
+                              │  + voice evidence
+                              ▼
+    ┌──────────────────────────────────────────────────────────┐
+    │                   Reflection Brain                        │  异步旁路：单 worker · 合并多轮 · 限频
+    │                      (Async)                             │  文本 + 声音双信号联合评估
+    └─────────────────────────┬────────────────────────────┘
+                              │
+                              │ 串行写入多个状态层
+                              ▼
+                       ┌──────┼──────┐
+                       │      │      │
+                       ▼      ▼      ▼
+                 ┌────────┐┌────────┐┌────────┐
+                 │  Bond  ││Memory  ││Emotion │
+                 │  长期   ││ 三层分离 ││ 短期五维 │
+                 └────┬───┘└────┬───┘└────┬───┘
+                      │          │          │
+                      └──────────┼──────────┘
+                                 ▼
+                       ┌─────────────────────┐
+                       │   Expression Layer   │  状态 → 可感知表现
+                       └─────────────────────┘
 ```
 
 ### 五层职责
@@ -295,7 +296,7 @@ bond ← bond + delta × (1 - bond)
 
 > **ASR tells Soul-TTY what you said. Voice perception tells it how you said it. Reflection decides what that means.**
 
-SenseVoiceSmall 是独立于 ASR 的异步旁路：不占用主对话算力，不阻塞回复。它分析的是"这句话听起来像什么"，不是"用户实际是什么"。
+SenseVoiceSmall 是独立于 ASR 的异步旁路：**不进入主对话关键路径，不等待其结果即可开始回复。**它分析的是"这句话听起来像什么"，不是"用户实际是什么"。
 
 ### Boundary
 
@@ -334,13 +335,18 @@ Reflection 的 `evaluate_relationship()` 收到的是渲染后的 voice context�
 
 | Voice 影响 | Voice 不影响 |
 |---|---|
-| `emotion_delta`（高权重） | Bond 数值 |
-| `expression`（高权重） | 长期 Memory 写入 |
-| 跨模态冲突感知 | 用户心理状态的直接判定 |
+| `emotion_delta` | Bond 数值 |
+| `expression` | 长期 Memory 写入 |
+| 跨模态冲突判断 | 用户心理状态的直接判定 |
 
 ### 生命周期
 
-Voice Observation 的缓存 TTL 由 `VOICE_STATE_RESULT_TTL_S` 控制（默认 120 秒）。超过后 Reflection 和 Tab「感知」均不可见该结果——这不是 bug，而是设计语义：**过了就是过了，Serena 不能反复翻旧账**。
+Voice Observation 有两条独立的生命周期：
+
+- **Reflection（内部关联）**：由 `VOICE_STATE_RESULT_TTL_S` 控制（默认 120 秒），确保 Reflection 来得及关联
+- **Tab 展示（产品感知）**：由 `VOICE_STATE_UI_TTL_S` 控制（默认 45 秒），超时后 Tab 感知行自动消失
+
+超过后均不可见——这不是 bug，而是设计语义：**过了就是过了，Serena 不能反复翻旧账**。
 
 ## 8. Memory System
 
@@ -601,6 +607,34 @@ Soul-TTY 是一个 Python 进程，但完整跑起来还需要几个外部服务
 
 TTS 端使用 `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit` 或兼容版本。
 
+### 可选：语音感知（SenseVoice）
+
+SenseVoice 可感知用户语气/情绪/声学事件，结果作为弱证据供旁路反思系统消费。默认关闭，需要手动下载模型（约 228MB）：
+
+```bash
+# 模型下载（首次运行前执行一次即可）
+cd sherpa-asr/models
+# 方法一：HuggingFace
+git lfs install
+git clone https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+
+# 方法二：ModelScope（国内）
+git clone https://www.modelscope.cn/nickyac/SenseVoice.git
+# 将 model_quant.onnx 和 tokens.json 放入同一目录
+
+# 验证模型文件
+ls sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/
+# 应包含：model.int8.onnx（或 model_quant.onnx）+ tokens.txt（或 tokens.json）
+```
+
+下载完成后，设置环境变量并启动：
+
+```bash
+export VOICE_STATE_ENABLED=1
+export SENSEVOICE_MODEL_DIR=/path/to/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17
+uv run soul-tty
+```
+
 ### 安装并启动
 
 ```bash
@@ -669,7 +703,8 @@ uv run soul-tty
 | Emotion | `EMOTION_ENABLED` | `1` | 关闭则情绪系统不启动 |
 | Voice | `VOICE_STATE_ENABLED` | `0` | 开启 SenseVoice 感知；默认关闭（ONNX 模型需单独下载） |
 | Voice | `SENSEVOICE_MODEL_DIR` | `../sherpa-asr/models/...` | SenseVoice 模型目录，含 `model.int8.onnx` + `tokens.txt` |
-| Voice | `VOICE_STATE_RESULT_TTL_S` | `120` | 感知结果缓存有效期（秒），超时后 Reflection 和 Dashboard 均不可见 |
+| Voice | `VOICE_STATE_RESULT_TTL_S` | `120` | 感知结果缓存有效期（秒），超时后 Reflection 不可见 |
+| Voice | `VOICE_STATE_UI_TTL_S` | `45` | Dashboard 感知行展示 TTL，超出后自动消失；应短于 RESULT_TTL |
 | Voice | `VOICE_STATE_MIN_UTTERANCE_MS` | `800` | 最短有效语音长度，过短不提交分析 |
 | Emotion | `EMOTION_EMA_RATE` | `0.2` | 平滑率 |
 | Emotion | `EMOTION_DECAY_INTERVAL_S` | `300` | 空闲衰减间隔（秒） |
