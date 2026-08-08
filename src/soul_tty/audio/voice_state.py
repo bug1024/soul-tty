@@ -5,7 +5,7 @@
 - 不阻塞主对话，submit(pcm) < 1~5ms
 - 结果作为弱证据供 Reflection 消费，不直接修改 Emotion/Bond/Memory
 - VoiceObservation 不是用户真实心理状态，只是"这句话听起来像什么"
-- 模型懒加载，默认关闭 VOICE_STATE_ENABLED=0
+- 模型懒加载，默认关闭（ONNX 模型需单独下载）
 """
 
 from __future__ import annotations
@@ -82,22 +82,36 @@ def _normalize_lang(raw: str) -> str:
     return cleaned.strip("|") or "unknown"
 
 
-def render_voice_context(observations: list[VoiceObservation]) -> str:
-    """将多条 VoiceObservation 渲染为供 LLM 消费的结构化文本。
+def render_voice_context(
+    observations: list[VoiceObservation],
+    *,
+    indexed: list[tuple[int, VoiceObservation]] | None = None,
+) -> str:
+    """将 VoiceObservation 列表渲染为供 LLM 消费的结构化文本。
 
-    保留机器语义标签（emotion= / event= / language=），
-    不使用 UI 展示格式。空列表返回空字符串。
+    indexed 格式：[(turn_index, observation), ...]
+    不带 index 时退化为普通列表顺序渲染。
     """
-    if not observations:
+    if not observations and not indexed:
         return ""
     lines = []
-    for obs in observations:
-        parts = [
-            f"emotion={obs.emotion}",
-            f"event={obs.event}",
-            f"language={obs.language}",
-        ]
-        lines.append(", ".join(parts))
+    if indexed:
+        for turn_idx, obs in indexed:
+            parts = [
+                f"turn={turn_idx}",
+                f"emotion={obs.emotion}",
+                f"event={obs.event}",
+                f"language={obs.language}",
+            ]
+            lines.append(", ".join(parts))
+    else:
+        for obs in observations:
+            parts = [
+                f"emotion={obs.emotion}",
+                f"event={obs.event}",
+                f"language={obs.language}",
+            ]
+            lines.append(", ".join(parts))
     return "\n".join(f"[voice] {line}" for line in lines)
 
 
@@ -192,7 +206,8 @@ class VoiceStateService:
         self._queue: Queue[tuple[VoiceRef, bytes]] = Queue(
             maxsize=config.VOICE_STATE_QUEUE_SIZE
         )
-        self._cache: OrderedDict[VoiceRef, VoiceObservation] = OrderedDict()
+        # cache: VoiceRef → (VoiceObservation, observed_at)
+        self._cache: OrderedDict[VoiceRef, tuple[VoiceObservation, float]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._ref_counter = 0
         self._ref_lock = threading.Lock()
@@ -235,25 +250,59 @@ class VoiceStateService:
         return ref
 
     def get(self, ref: VoiceRef) -> VoiceObservation | None:
-        """查询指定 ref 的观察结果。结果就绪则返回，否则 None。"""
+        """查询指定 ref 的观察结果，超出 TTL 返回 None。"""
         with self._cache_lock:
-            return self._cache.get(ref)
+            entry = self._cache.get(ref)
+            if entry is None:
+                return None
+            obs, observed_at = entry
+            if time.monotonic() - observed_at > config.VOICE_STATE_RESULT_TTL_S:
+                return None
+            return obs
 
     def get_many(self, refs: tuple[VoiceRef | None, ...]) -> list[VoiceObservation]:
-        """批量查询多个 ref，跳过 None 和未就绪的。"""
+        """批量查询多个 ref，超出 TTL 的条目被忽略。"""
+        now = time.monotonic()
+        ttl = config.VOICE_STATE_RESULT_TTL_S
+        with self._cache_lock:
+            results = []
+            for ref in refs:
+                if ref is None:
+                    continue
+                entry = self._cache.get(ref)
+                if entry is None:
+                    continue
+                obs, observed_at = entry
+                if now - observed_at <= ttl:
+                    results.append(obs)
+            return results
+
+    def get_indexed(
+        self, items: tuple[tuple[int, VoiceRef], ...]
+    ) -> list[tuple[int, VoiceObservation]]:
+        """批量查询，带 turn index，超出 TTL 的条目被忽略。"""
+        now = time.monotonic()
+        ttl = config.VOICE_STATE_RESULT_TTL_S
         with self._cache_lock:
             return [
-                self._cache[ref]
-                for ref in refs
-                if ref is not None and ref in self._cache
+                (turn_idx, obs)
+                for turn_idx, ref in items
+                if ref in self._cache
+                and (obs := self._cache[ref][0])
+                and (now - self._cache[ref][1]) <= ttl
             ]
 
     def latest(self) -> VoiceObservation | None:
-        """返回最近一次完成的观察结果。"""
+        """返回最近一次完成的观察结果，超出 TTL 返回 None。"""
+        now = time.monotonic()
+        ttl = config.VOICE_STATE_RESULT_TTL_S
         with self._cache_lock:
             if not self._cache:
                 return None
-            return next(reversed(self._cache.values()))
+            for obs, observed_at in reversed(list(self._cache.values())):
+                if now - observed_at <= ttl:
+                    return obs
+            return None
 
     def close(self) -> None:
         self._stop.set()
@@ -290,7 +339,7 @@ class VoiceStateService:
             if obs is None:
                 continue
             with self._cache_lock:
-                self._cache[ref] = obs
+                self._cache[ref] = (obs, time.monotonic())
                 # TTL 清理
                 self._evict_old()
             if self._on_observation is not None:
@@ -301,6 +350,15 @@ class VoiceStateService:
 
     def _evict_old(self) -> None:
         """移除超出 TTL 的缓存条目，最多保留 2x 队列大小。"""
+        now = time.monotonic()
+        ttl = config.VOICE_STATE_RESULT_TTL_S
         max_cache = config.VOICE_STATE_QUEUE_SIZE * 2
+        # 先按 TTL 过期清理，再按容量上限清理
+        expired = [
+            ref for ref, (_, ts) in self._cache.items()
+            if now - ts > ttl
+        ]
+        for ref in expired:
+            self._cache.pop(ref, None)
         while len(self._cache) > max_cache:
             self._cache.popitem(last=False)

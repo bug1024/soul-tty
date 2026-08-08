@@ -236,7 +236,7 @@ MEMORY_RECENCY_HALFLIFE_DAYS = float(
 # 不阻塞主对话，结果作为弱证据供 Reflection 消费。
 # 默认关闭，因为模型文件（~228MB）非仓库自带。
 # ---------------------------------------------------------------------------
-VOICE_STATE_ENABLED = os.environ.get("VOICE_STATE_ENABLED", "1") not in (
+VOICE_STATE_ENABLED = os.environ.get("VOICE_STATE_ENABLED", "0") not in (
     "0", "false", "False",
 )
 SENSEVOICE_MODEL_DIR = os.environ.get(

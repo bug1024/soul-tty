@@ -47,7 +47,9 @@ def level_for(bond: float) -> str:
 class CompletedTurn:
     user_text: str
     agent_text: str
-    voice_refs: tuple[int | None, ...] = ()
+    # voice_refs：旧格式 (int,)；新格式 (turn_index, voice_ref) 元组
+    # coalesce 后统一为新格式，render 时带 turn index 渲染
+    voice_refs: tuple[int | tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)

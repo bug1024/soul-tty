@@ -24,6 +24,8 @@ _recall_provider: Callable[[str], str] | None = None
 # Voice perception：cli.py 把 VoiceStateService.submit 绑到这里；
 # 每次 ASR final 后提交 PCM，不阻塞主对话。
 _voice_submit_provider: Callable[[bytes], int | None] | None = None
+# 当前会话的轮次计数器，每轮递增，用于标注 voice observation 所属轮次。
+_turn_counter = 0
 
 
 def set_emotion_instruct_provider(
@@ -172,7 +174,10 @@ def _answer(
                 if not cancel.is_set():
                     terminal.notice(f"TTS 失败: {e}")
     if answer and not cancel.is_set():
-        reflection.record_turn(text, answer, voice_ref=voice_ref)
+        global _turn_counter
+        _turn_counter += 1
+        turn_index = _turn_counter
+        reflection.record_turn(text, answer, voice_ref=voice_ref, turn_index=turn_index)
     return answer
 
 

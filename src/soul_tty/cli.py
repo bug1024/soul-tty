@@ -100,7 +100,10 @@ def main() -> None:
 
     def _refresh_datetime() -> None:
         prompt.builder().set_section("datetime", prompt.render_datetime_context())
-        prompt.refresh()
+        current = prompt.refresh()
+        chat = getattr(conversation, "_active_chat", None)
+        if chat is not None:
+            chat.update_system_prompt(current)
 
     _datetime_timer = threading.Event()
     def _datetime_tick() -> None:
@@ -171,7 +174,21 @@ def main() -> None:
 
     relationship_state = None
     relationship_service = None
+
+    # VoiceStateService：异步声音感知，独立于 REFLECTION_ENABLED。
+    # UI 更新走回调，Reflection 消费走 voice_service.get_indexed()。
     voice_service = None
+    if config.VOICE_STATE_ENABLED:
+        from .audio.voice_state import VoiceStateService
+
+        def _on_voice_observation(obs):
+            terminal.update_voice_observation(
+                obs.emotion, obs.event, obs.language
+            )
+
+        voice_service = VoiceStateService(on_observation=_on_voice_observation)
+        conversation.set_voice_submit_provider(voice_service.submit)
+
     if config.REFLECTION_ENABLED:
 
         def evaluate(
@@ -189,11 +206,18 @@ def main() -> None:
             # voice_context：读取已完成的声音观察，不等待、不阻塞
             voice_context = ""
             if voice_service is not None and turn.voice_refs:
-                observations = voice_service.get_many(turn.voice_refs)
-                if observations:
+                # voice_refs 可能是旧格式 (int,) 或新格式 (turn_index, voice_ref)
+                indexed_items: list[tuple[int, int]] = []
+                for vr in turn.voice_refs:
+                    if isinstance(vr, tuple) and len(vr) == 2:
+                        indexed_items.append(vr)
+                    elif vr is not None:
+                        indexed_items.append((0, int(vr)))
+                if indexed_items:
                     from .audio.voice_state import render_voice_context
 
-                    voice_context = render_voice_context(observations)
+                    indexed_obs = voice_service.get_indexed(tuple(indexed_items))
+                    voice_context = render_voice_context(observations=[], indexed=indexed_obs)
 
             return llm.evaluate_relationship(
                 aux_model,
@@ -302,18 +326,6 @@ def main() -> None:
                     user_text, persona_id=_pid
                 )
             )
-
-        # VoiceStateService：异步声音感知，独立于 REFLECTION_ENABLED
-        if config.VOICE_STATE_ENABLED:
-            from .audio.voice_state import VoiceStateService
-
-            def _on_voice_observation(obs):
-                terminal.update_voice_observation(
-                    obs.emotion, obs.event, obs.language
-                )
-
-            voice_service = VoiceStateService(on_observation=_on_voice_observation)
-            conversation.set_voice_submit_provider(voice_service.submit)
 
         initial_mood = (
             emotion_service.snapshot().mood

@@ -117,11 +117,13 @@ class ReflectionWorker:
         self._thread.start()
 
     def submit(
-        self, user_text: str, agent_text: str, voice_ref: int | None = None
+        self,
+        user_text: str,
+        agent_text: str,
+        voice_refs: tuple = (),
     ) -> bool:
         if not user_text.strip() or not agent_text.strip() or self._stop.is_set():
             return False
-        voice_refs = (voice_ref,) if voice_ref is not None else ()
         turn = CompletedTurn(
             user_text.strip(), agent_text.strip(), voice_refs=voice_refs
         )
@@ -186,10 +188,17 @@ class ReflectionWorker:
                 self.queue.task_done()
         if len(turns) == 1:
             return first
-        # 合并多轮文本和 voice_refs
-        all_refs: list[int | None] = []
-        for turn in turns:
-            all_refs.extend(turn.voice_refs)
+        # 合并多轮文本和 voice_refs（保留 turn index）
+        # voice_refs 可能是旧格式 (int,) 或新格式 ((turn_index, int),)
+        all_indexed: list[tuple[int, int]] = []
+        for turn_idx, turn in enumerate(turns, 1):
+            for vr in turn.voice_refs:
+                if isinstance(vr, tuple) and len(vr) == 2:
+                    # 新格式：(turn_index, voice_ref)
+                    all_indexed.append(vr)
+                elif vr is not None:
+                    # 旧格式：直接是 voice_ref，用当前合并后的 turn index
+                    all_indexed.append((turn_idx, int(vr)))
         return CompletedTurn(
             "\n".join(
                 f"第{index}轮：{turn.user_text}"
@@ -199,7 +208,7 @@ class ReflectionWorker:
                 f"第{index}轮：{turn.agent_text}"
                 for index, turn in enumerate(turns, 1)
             ),
-            voice_refs=tuple(all_refs),
+            voice_refs=tuple(all_indexed),
         )
 
     def _run(self) -> None:
@@ -240,17 +249,20 @@ class ReflectionWorker:
                         if updated_payload is not None
                         else incremented
                     )
-                    try:
-                        save_state(self.path, final_state)
-                    except OSError:
-                        final_state = current
-                    with self._lock:
-                        self.state = final_state
-                    if self.on_update is not None:
+                    # BOND_ENABLED 控制 bond 写盘与 UI 更新；emotion/expression 走另一条旁路，
+                    # 不受此开关影响。
+                    if config.BOND_ENABLED:
                         try:
-                            self.on_update(final_state)
-                        except Exception:
-                            pass
+                            save_state(self.path, final_state)
+                        except OSError:
+                            final_state = current
+                        with self._lock:
+                            self.state = final_state
+                        if self.on_update is not None:
+                            try:
+                                self.on_update(final_state)
+                            except Exception:
+                                pass
                     # 把 apply_evaluation 的完整 payload 抛给上层协调器；
                     # emotion / expression 的应用都不在 ReflectionWorker 的职责里。
                     if updated_payload is not None and self.on_evaluation is not None:
@@ -358,12 +370,20 @@ def install(service: ReflectionWorker | None) -> None:
 
 
 def record_turn(
-    user_text: str, agent_text: str, voice_ref: int | None = None
+    user_text: str,
+    agent_text: str,
+    voice_ref: int | None = None,
+    turn_index: int | None = None,
 ) -> bool:
-    return (
-        _service.submit(user_text, agent_text, voice_ref=voice_ref)
-        if _service is not None
-        else False
+    if _service is None:
+        return False
+    # 单轮时 turn_index 是 1-based；coalesce 时会重新计算
+    if voice_ref is not None:
+        voice_refs: tuple = ((turn_index or 0, voice_ref),)
+    else:
+        voice_refs = ()
+    return _service.submit(
+        user_text, agent_text, voice_refs=voice_refs
     )
 
 
