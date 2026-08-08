@@ -283,7 +283,12 @@ def main() -> None:
         if config.VOICE_STATE_ENABLED:
             from .audio.voice_state import VoiceStateService
 
-            voice_service = VoiceStateService()
+            def _on_voice_observation(obs):
+                terminal.update_voice_observation(
+                    obs.emotion, obs.event, obs.language
+                )
+
+            voice_service = VoiceStateService(on_observation=_on_voice_observation)
             conversation.set_voice_submit_provider(voice_service.submit)
 
         initial_mood = (

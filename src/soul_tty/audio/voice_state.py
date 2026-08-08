@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -160,9 +161,15 @@ class VoiceStateService:
         ref = service.submit(pcm)          # < 1~5ms，不阻塞
         obs = service.get(ref)              # 结果就绪则返回，否则 None
         service.close()
+
+    on_observation 可选回调，在每次新观察结果就绪时触发，
+    参数为 VoiceObservation。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_observation: Callable[[VoiceObservation], None] | None = None,
+    ) -> None:
         self._queue: Queue[tuple[VoiceRef, bytes]] = Queue(
             maxsize=config.VOICE_STATE_QUEUE_SIZE
         )
@@ -172,6 +179,7 @@ class VoiceStateService:
         self._ref_lock = threading.Lock()
         self._recognizer = None
         self._recognizer_lock = threading.Lock()
+        self._on_observation = on_observation
         self._stop = threading.Event()
         self._worker = threading.Thread(
             target=self._run,
@@ -266,6 +274,11 @@ class VoiceStateService:
                 self._cache[ref] = obs
                 # TTL 清理
                 self._evict_old()
+            if self._on_observation is not None:
+                try:
+                    self._on_observation(obs)
+                except Exception:
+                    pass
 
     def _evict_old(self) -> None:
         """移除超出 TTL 的缓存条目，最多保留 2x 队列大小。"""
