@@ -115,11 +115,16 @@ class FloorManager:
     # ── 状态变更 ────────────────────────────────────────────────────
 
     def user_start(self) -> None:
+        """DuplexListener SPEECH_START 时调。
+
+        修复(commit 07+):SPEECH_START 不等于打断。用户可能只是轻微出声
+        (清嗓/backchannel),打断决策应由 ``user_partial`` 做。
+        所以这里不再把 AGENT_SPEAKING → INTERRUPTED。
+        """
         with self._lock:
-            if self._state == FloorState.AGENT_SPEAKING:
-                self._state = FloorState.INTERRUPTED
-            else:
+            if self._state == FloorState.IDLE:
                 self._state = FloorState.USER_SPEAKING
+            # AGENT_SPEAKING 时保持原状态(不漏掉下一步的 user_partial 决策)
 
     def user_partial(self, text: str) -> bool:
         """DuplexListener PARTIAL 时调。返回是否应当打断 agent。

@@ -407,10 +407,9 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
             if event.kind == duplex.DuplexEventKind.SPEECH_START:
                 # 用户开始说话 → 通知 FloorManager
                 floor.user_start()
-                # 如果当前有 answer 在跑,cancel 它
-                answer_state = _current_answer_state()
-                if answer_state is not None:
-                    answer_state.cancel.set()
+                # 注意:SPEECH_START 不等于打断。用户可能只是发出一个简短
+                # 声音(清嗓/backchannel),真正的打断应由 PARTIAL 决定。
+                # 所以这里不 cancel。 (commit 07+ fix)
                 continue
 
             if event.kind == duplex.DuplexEventKind.PARTIAL:

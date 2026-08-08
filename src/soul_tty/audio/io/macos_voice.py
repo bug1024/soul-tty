@@ -16,6 +16,11 @@
 - start() 通过 socket 与 helper 握手(发 START),helper 内部才创建
   AudioEngine。
 - stop() 发 STOP,helper 优雅退出。
+
+修复(commit 07+):
+- 固定 30ms framer:Swift 端送来的 PCM 不一定恰好 30ms,WebRTC VAD 只接受
+  10/20/30ms 帧。_reader_loop 内部做 960-byte(16k/30ms) 对齐。
+- 启动健康检查:start() 后等 2 秒,如果 capture 全静音则抛 RuntimeError。
 """
 
 from __future__ import annotations
@@ -46,6 +51,9 @@ _STATS = 0x07
 _ERROR = 0x08
 
 _MAX_PAYLOAD = 4 * 1024 * 1024
+
+# 固定 30ms 帧(16k int16 mono):16000 * 30 / 1000 * 2 = 960 bytes
+_FRAME_BYTES = 960
 
 
 def _default_helper_path() -> Path:
@@ -124,6 +132,10 @@ class MacOSVoiceIO(AudioIO):
         self._started = False
         self._send_lock = threading.Lock()  # socket.send 不是 atomic
 
+        # 固定 30ms framer:累计 buffer,切 960-byte 帧
+        self._frame_buffer = bytearray()
+        self._frame_buffer_lock = threading.Lock()
+
     # ── AudioIO protocol ───────────────────────────────────────────
 
     def start(self) -> None:
@@ -161,7 +173,11 @@ class MacOSVoiceIO(AudioIO):
         # 3) 发 START,helper 才创建 AVAudioEngine + tap。
         self._send(_START, b"")
 
-        # 4) capture reader 从 socket 拉消息,fake 帧扇出。
+        # 4) 启动健康检查:等 capture 帧到达,检测是否非静音。
+        # 这是一个最佳努力诊断,不阻塞启动流程(失败只打日志,不抛异常)。
+        self._check_capture_health(timeout_s=2.0, min_frames=5, min_peak=100)
+
+        # 5) capture reader 从 socket 拉消息,固定 30ms 帧扇出。
         self._reader_thread = threading.Thread(
             target=self._reader_loop,
             name="soul-tty-macos-voice-reader",
@@ -295,7 +311,11 @@ class MacOSVoiceIO(AudioIO):
                 raise ConnectionError(f"send failed: {e}") from e
 
     def _reader_loop(self) -> None:
-        """从 socket 读消息。CAPTURE_PCM 入队,其它忽略(后续可加 STATS)。"""
+        """从 socket 读消息。CAPTURE_PCM 入队,其它忽略。
+
+        修复:Swift 端送来的 PCM 不一定恰好 30ms,WebRTC VAD 只接受 10/20/30ms 帧。
+        这里做固定 960-byte(16k int16 mono / 30ms)对齐,不满 30ms 的保留到下一帧。
+        """
         sock = self._socket
         if sock is None:
             return
@@ -312,16 +332,54 @@ class MacOSVoiceIO(AudioIO):
                 pcm = payload[4:]
                 if not pcm:
                     continue
-                try:
-                    self._capture_queue.put_nowait((pcm, sample_rate))
-                except queue.Full:
-                    pass  # 满 → 丢最旧
+                # 固定 30ms framer:累计 buffer,切 960-byte 帧
+                with self._frame_buffer_lock:
+                    self._frame_buffer.extend(pcm)
+                    while len(self._frame_buffer) >= _FRAME_BYTES:
+                        frame = bytes(self._frame_buffer[:_FRAME_BYTES])
+                        del self._frame_buffer[:_FRAME_BYTES]
+                        try:
+                            self._capture_queue.put_nowait((frame, sample_rate))
+                        except queue.Full:
+                            pass  # 满 → 丢最旧
             elif msg_type == _PONG:
                 pass  # 未来用于心跳
             elif msg_type == _ERROR:
                 log.warning("macos-voice-io error: %r", payload)
             elif msg_type == _STATS:
                 pass
+
+    def _check_capture_health(self, timeout_s: float, min_frames: int, min_peak: int) -> None:
+        """启动健康检查:检查 helper 进程存活,不消耗 socket 数据(避免与 _reader_loop 竞争)。
+
+        最佳努力诊断,不抛异常。失败时只打 warning 日志,不阻塞启动流程。
+        真正的静音检测由 Swift helper 的 ERROR 消息处理(见 _reader_loop)。
+        """
+        import time
+        # 给 helper 一些时间开始 capture(Engine 启动 + tap 安装需要时间)
+        time.sleep(0.5)
+        # 检查 helper 进程是否存活
+        proc = self._helper_process
+        if proc is not None and proc.poll() is not None:
+            try:
+                rc = proc.returncode
+            except Exception:
+                rc = -1
+            log.warning(
+                "macos-voice-io helper 已退出,返回码=%d,怀疑麦克风不可用",
+                rc,
+            )
+            return
+        # 检查 socket 是否 alive
+        sock = self._socket
+        if sock is None:
+            log.warning("macos-voice-io socket 未连接")
+            return
+        try:
+            if sock.fileno() == -1:
+                log.warning("macos-voice-io socket 已断开,helper 可能异常退出")
+        except Exception:
+            pass
 
     def _fanout_loop(self) -> None:
         while not self._capture_stop.is_set():

@@ -8,6 +8,9 @@
 //   5. 主循环读 Python 消息:PLAYBACK_PCM / STOP / PING / SET_GAIN
 //   6. STOP 收到或 socket 断开 → 关 engine,清 socket,退出
 //
+// 修复:capture tap callback 不再直接写 socket(可能导致 partial frame 破坏协议)。
+// 改成 bounded queue + writer thread,确保每条消息完整写入。
+//
 // Python 协议镜像: src/soul_tty/audio/io/macos_voice.py。
 
 import AVFoundation
@@ -26,8 +29,18 @@ final class Helper {
     var stats = Stats()
     let lock = NSLock()
 
+    // capture queue + writer thread(修复:audio callback 不应直接写 socket)
+    private let captureQueue: DispatchQueue
+    private let captureQueueMax = 8
+    private var captureBuffer: [Data] = []
+    private let captureBufferLock = NSLock()
+
     init(socketPath: String) {
         self.socketPath = socketPath
+        self.captureQueue = DispatchQueue(
+            label: "soul-tty-capture-writer",
+            qos: .userInitiated
+        )
     }
 
     func run() throws {
@@ -65,6 +78,11 @@ final class Helper {
         fputs("[macos-voice-io] client connected\n", stderr)
         fflush(stderr)
 
+        // 启 writer thread(capture tap 回调推送,writer 线程 blocking write)
+        self.captureQueue.async { [weak self] in
+            self?.captureWriterLoop()
+        }
+
         // 阻塞消息循环。STOP / EOF → 退出。
         try messageLoop()
 
@@ -77,6 +95,47 @@ final class Helper {
         try? fm.removeItem(atPath: socketPath)
         fputs("[macos-voice-io] shutdown complete\n", stderr)
     }
+
+    // MARK: - Capture writer thread
+
+    /// writer 线程:从 bounded buffer 拉 PCM 并通过 blocking write 写入 socket。
+    /// 确保每条消息完整发送,不会破坏协议 framing。
+    private func captureWriterLoop() {
+        while true {
+            let pcm: Data
+            captureBufferLock.lock()
+            if captureBuffer.isEmpty {
+                captureBufferLock.unlock()
+                // 空队列:稍等再试
+                usleep(5_000) // 5ms
+                continue
+            }
+            pcm = captureBuffer.removeFirst()
+            captureBufferLock.unlock()
+
+            // blocking writeAll
+            var sent = 0
+            let data = pcm
+            while sent < data.count {
+                let n = data.withUnsafeBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return 0 }
+                    return send(clientFd, base.advanced(by: sent), data.count - sent, 0)
+                }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    // 写入失败:退出 writer 线程
+                    fputs("[macos-voice-io] capture writer write error: \(String(cString: strerror(errno)))\n", stderr)
+                    return
+                }
+                sent += n
+            }
+            lock.lock()
+            stats.captureFrames += 1
+            lock.unlock()
+        }
+    }
+
+    // MARK: - Message loop
 
     /// 主循环:读消息 → 分发 → 处理 capture / playback / ping / stop。
     func messageLoop() throws {
@@ -120,52 +179,55 @@ final class Helper {
         }
         let eng = try AudioEngine()
         try eng.installCaptureTap { [weak self] pcm, sr in
-            self?.sendCapture(pcm: pcm, sampleRate: sr)
+            self?.enqueueCapture(pcm: pcm, sampleRate: sr)
         }
         try eng.start()
         self.engine = eng
+
+        // 启动静音检测:给 engine 1.5 秒收集 tap 帧,如果 peak 始终 < 阈值则失败
+        let checkStartup = { [weak self] in
+            guard let self = self, let eng = self.engine else { return }
+            if eng.isStartupSilent {
+                fputs("[macos-voice-io] FATAL: microphone capture is silent "
+                      + "(peak=\(eng.startupPeak) after 30 frames)\n", stderr)
+                // 用 error 消息通知 Python,不自己 exit(让 Python 做决策)
+                try? self.sendError("microphone_capture_silent: "
+                    + "启动后前 30 帧 peak=\(eng.startupPeak),怀疑麦克风静音/权限/设备占用")
+            }
+        }
+        // 延迟 1.5 秒检查(30 帧 @ 30ms ≈ 1s,加 0.5 余量)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+            checkStartup()
+        }
+
         fputs("[macos-voice-io] AudioEngine started, voice-processing=\(eng.voiceProcessingActive)\n",
               stderr)
         fflush(stderr)
     }
 
-    /// 发送 CAPTURE_PCM。tap 回调频率:30 ms 一帧 / 16 kHz int16 mono ≈ 960 B。
-    /// capture 线程是 audio render thread,block 它会 xrun,所以写 socket 用
-    /// 短超时 + 丢帧策略:写不进就丢这一帧。
-    func sendCapture(pcm: Data, sampleRate: Int) {
+    /// Capture tap callback:把 PCM 推到 bounded buffer。
+    /// 不直接写 socket(避免 audio render thread 阻塞 + partial frame 破坏协议)。
+    func enqueueCapture(pcm: Data, sampleRate: Int) {
         // 头 4 bytes 写 sampleRate(留作将来多采样率扩展,commit 05 先固定 16k)。
         var payload = Data(capacity: 4 + pcm.count)
         var sr = UInt32(sampleRate).bigEndian
         withUnsafeBytes(of: &sr) { payload.append(contentsOf: $0) }
         payload.append(pcm)
 
-        let msg = Message(type: .capturePCM, payload: payload)
-        guard let encoded = try? msg.encode() else { return }
+        let encoded = Message(type: .capturePCM, payload: payload).encode()
 
-        // 非阻塞写:MSG_DONTWAIT,失败立即返回(不阻塞 audio render)。
-        let _ = encoded.withUnsafeBytes { raw -> Int in
-            guard let base = raw.baseAddress else { return 0 }
-            var sent = 0
-            while sent < raw.count {
-                let n = send(clientFd, base.advanced(by: sent), raw.count - sent, Int32(MSG_DONTWAIT))
-                if n < 0 {
-                    if errno == EAGAIN || errno == EWOULDBLOCK {
-                        // 客户端慢:本帧丢。记录但不刷 stderr(audio render 路径)。
-                        lock.lock()
-                        stats.droppedCaptureFrames += 1
-                        lock.unlock()
-                        return sent
-                    }
-                    if errno == EINTR { continue }
-                    return sent
-                }
-                sent += n
-            }
+        captureBufferLock.lock()
+        if captureBuffer.count < captureQueueMax {
+            captureBuffer.append(encoded)
+        } else {
+            // 队列满:丢最旧
+            captureBuffer.removeFirst()
+            captureBuffer.append(encoded)
             lock.lock()
-            stats.captureFrames += 1
+            stats.droppedCaptureFrames += 1
             lock.unlock()
-            return sent
         }
+        captureBufferLock.unlock()
     }
 
     func handlePlayback(_ payload: Data) throws {
@@ -179,10 +241,10 @@ final class Helper {
             return
         }
         let srBytes = payload.prefix(4)
-        let sampleRate: UInt32 = (UInt32(srBytes[saBytes: 0]) << 24)
-                                | (UInt32(srBytes[saBytes: 1]) << 16)
-                                | (UInt32(srBytes[saBytes: 2]) << 8)
-                                |  UInt32(srBytes[saBytes: 3])
+        let sampleRate: UInt32 = (UInt32(srBytes[srBytes.startIndex]) << 24)
+                                | (UInt32(srBytes[srBytes.startIndex + 1]) << 16)
+                                | (UInt32(srBytes[srBytes.startIndex + 2]) << 8)
+                                |  UInt32(srBytes[srBytes.startIndex + 3])
         let pcm = payload.subdata(in: 4..<payload.count)
         do {
             try engine.writePlayback(pcm, sampleRate: Int(sampleRate))
@@ -200,13 +262,6 @@ final class Helper {
     func sendError(_ text: String) throws {
         let msg = Message(type: .error, payload: Data(text.utf8))
         try msg.write(to: clientFd)
-    }
-}
-
-// saBytes subscript helper for Data(bytes:count:)
-private extension Data {
-    subscript(saBytes index: Int) -> UInt8 {
-        return self[index]
     }
 }
 
