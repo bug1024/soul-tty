@@ -231,6 +231,32 @@ MEMORY_RECENCY_HALFLIFE_DAYS = float(
     os.environ.get("MEMORY_RECENCY_HALFLIFE_DAYS", "180")
 )
 
+# ---------------------------------------------------------------------------
+# 声音感知旁路。SenseVoiceSmall 异步分析用户语气/情绪/声学事件，
+# 不阻塞主对话，结果作为弱证据供 Reflection 消费。
+# 默认关闭，因为模型文件（~228MB）非仓库自带。
+# ---------------------------------------------------------------------------
+VOICE_STATE_ENABLED = os.environ.get("VOICE_STATE_ENABLED", "0") not in (
+    "0", "false", "False",
+)
+SENSEVOICE_MODEL_DIR = os.environ.get(
+    "SENSEVOICE_MODEL_DIR",
+    str(
+        Path(__file__).resolve().parents[3]
+        / "sherpa-asr" / "models"
+        / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+    ),
+)
+SENSEVOICE_NUM_THREADS = int(os.environ.get("SENSEVOICE_NUM_THREADS", "1"))
+SENSEVOICE_PROVIDER = os.environ.get("SENSEVOICE_PROVIDER", "cpu")
+VOICE_STATE_QUEUE_SIZE = int(os.environ.get("VOICE_STATE_QUEUE_SIZE", "4"))
+VOICE_STATE_MIN_UTTERANCE_MS = int(
+    os.environ.get("VOICE_STATE_MIN_UTTERANCE_MS", "800")
+)
+VOICE_STATE_RESULT_TTL_S = int(
+    os.environ.get("VOICE_STATE_RESULT_TTL_S", "120")
+)
+
 # 固定 Dashboard 只保留有限滚动历史；长期记忆由未来的会话记忆层负责。
 DASHBOARD_MAX_MESSAGES = int(os.environ.get("DASHBOARD_MAX_MESSAGES", "300"))
 # 欢迎区默认以角色信息为主；诊断模式展开精确羁绊值与完整技术栈。
