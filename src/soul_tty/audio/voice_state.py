@@ -93,8 +93,14 @@ def _load_recognizer():
         ) from e
 
     model_dir = Path(config.SENSEVOICE_MODEL_DIR).expanduser()
-    model_path = model_dir / "model.int8.onnx"
-    tokens = model_dir / "tokens.txt"
+    # 兼容 ModelScope 版本（model_quant.onnx + tokens.json）
+    # 和官方 sherpa-onnx 版本（model.int8.onnx + tokens.txt）
+    model_path = model_dir / "model_quant.onnx"
+    if not model_path.is_file():
+        model_path = model_dir / "model.int8.onnx"
+    tokens = model_dir / "tokens.json"
+    if not tokens.is_file():
+        tokens = model_dir / "tokens.txt"
     missing = [
         str(path) for path in (model_path, tokens) if not path.is_file()
     ]
