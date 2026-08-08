@@ -65,6 +65,27 @@ _MOOD_LABELS: dict[str, str] = {
     "calm": "平静",
 }
 
+# 用户声音情绪感知 → 克制的中文描述（不是"情绪标签"，是"听起来像什么"）
+_VOICE_EMOTION_LABELS: dict[str, str] = {
+    "happy": "语气愉悦",
+    "sad": "语气偏低落",
+    "angry": "语气偏激动",
+    "neutral": "语气平稳",
+    "surprise": "语气意外",
+    "fear": "语气紧张",
+    "disgust": "语气排斥",
+    "unknown": "—",
+}
+
+_VOICE_EVENT_LABELS: dict[str, str] = {
+    "speech": "说话",
+    "laughter": "轻笑",
+    "crying": "哭腔",
+    "cough": "咳嗽",
+    "sneeze": "打喷嚏",
+    "applause": "掌声",
+}
+
 # 5 维情绪值 → 短中文标签（详情行使用）。
 _EMOTION_DIM_LABELS: dict[str, str] = {
     "happiness": "愉悦",
@@ -254,6 +275,10 @@ class Dashboard:
                 self.emotion_expression = initial.expression
                 if initial.emotion is not None:
                     self.emotion_vector = initial.emotion
+        # 声音感知：最近一次用户语气观察，由 set_voice_observation 更新。
+        self.voice_emotion = ""
+        self.voice_event = ""
+        self.voice_language = ""
         self.greeting = relationship_voice or _fallback_greeting(
             tier=self.relationship_level,
             repeat_launch=_launch_context.repeat_launch,
@@ -480,6 +505,9 @@ class Dashboard:
             emotion_vector=self.emotion_vector,
             relationship_interaction_count=self.relationship_interaction_count,
             relationship_recent_events=self.relationship_recent_events,
+            voice_emotion=self.voice_emotion,
+            voice_event=self.voice_event,
+            voice_language=self.voice_language,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -792,6 +820,16 @@ class Dashboard:
             if safe_to_refresh:
                 self.refresh()
 
+    def set_voice_observation(self, emotion: str, event: str, language: str) -> None:
+        """保存最近一次用户语气观察；安全窗口内触发重绘。"""
+        with self._lock:
+            self.voice_emotion = emotion
+            self.voice_event = event
+            self.voice_language = language
+            safe_to_refresh = self.state == "listening" and not self.partial_text
+            if safe_to_refresh:
+                self.refresh()
+
     def _mark_voice_activity_locked(self, now: float) -> bool:
         self._last_voice_activity = now
         self._next_idle_emotion_at = now + config.IDLE_EMOTION_AFTER_S
@@ -977,6 +1015,14 @@ def update_emotion(snap) -> None:
     """接收 EmotionService 的快照；非 listening 状态下会被 dashboard 延迟刷新。"""
     if _dashboard is not None:
         _dashboard.set_emotion(snap)
+
+
+def update_voice_observation(
+    emotion: str, event: str, language: str
+) -> None:
+    """接收 VoiceStateService 的最新观察。"""
+    if _dashboard is not None:
+        _dashboard.set_voice_observation(emotion, event, language)
 
 
 def audio_level(level: float) -> None:
@@ -1189,6 +1235,27 @@ def _relationship_detail_text(
     return text
 
 
+def _voice_detail_text(
+    voice_emotion: str,
+    voice_event: str,
+    voice_language: str,
+) -> Text:
+    """声音感知详情行：用户最近一句话的语气/事件/语言，给 Tab 详情行使用。
+
+    只在有可显示的数据时构建文本；全空时返回空 Text() 不占行。
+    """
+    emotion_label = _VOICE_EMOTION_LABELS.get(voice_emotion, "")
+    event_label = _VOICE_EVENT_LABELS.get(voice_event, "")
+    bits = [b for b in (emotion_label, event_label, voice_language) if b]
+    if not bits:
+        return Text()
+    text = Text(style="dim", no_wrap=True, overflow="ellipsis")
+    text.append("◎ ", style="cyan")
+    text.append("感知  ", style="dim")
+    text.append(" · ".join(bits), style="cyan")
+    return text
+
+
 def _idle_emotion_line(mood: str, index: int) -> str:
     mood_lines = {
         "happy": ("刚才聊得挺开心的。", "我还在等你继续呢。"),
@@ -1234,6 +1301,9 @@ def _splash_panel(
     emotion_vector=None,
     relationship_interaction_count: int = 0,
     relationship_recent_events: tuple[str, ...] = (),
+    voice_emotion: str = "",
+    voice_event: str = "",
+    voice_language: str = "",
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -1294,12 +1364,17 @@ def _splash_panel(
         if emotion_expression == "caring" and show_details:
             emotion.append("  · 关心", style="dim italic")
 
-    # 详情行：5 维情绪 + 亲密进度。空 Text() 渲染时无视觉占位。
+    # 详情行：5 维情绪 + 亲密进度 + 声音感知。空 Text() 渲染时无视觉占位。
     emotion_detail = (
         _emotion_detail_text(emotion_vector) if show_details else Text()
     )
     relationship_detail = (
         _relationship_detail_text(relationship_interaction_count, relationship_recent_events)
+        if show_details
+        else Text()
+    )
+    voice_detail = (
+        _voice_detail_text(voice_emotion, voice_event, voice_language)
         if show_details
         else Text()
     )
@@ -1323,6 +1398,8 @@ def _splash_panel(
         Text(""),
         Align.center(relationship),
         Align.center(relationship_detail),
+        Text(""),
+        Align.center(voice_detail),
         Text(""),
         Align.center(tech_footer),
     )

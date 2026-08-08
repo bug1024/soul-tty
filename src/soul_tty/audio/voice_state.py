@@ -215,6 +215,13 @@ class VoiceStateService:
                 if ref is not None and ref in self._cache
             ]
 
+    def latest(self) -> VoiceObservation | None:
+        """返回最近一次完成的观察结果。"""
+        with self._cache_lock:
+            if not self._cache:
+                return None
+            return next(reversed(self._cache.values()))
+
     def close(self) -> None:
         self._stop.set()
         # 塞一个空任务让 worker 退出等待
