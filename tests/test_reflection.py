@@ -438,6 +438,54 @@ class ReflectionWorkerTests(unittest.TestCase):
         # bond 不变：低 confidence 不扣分也不加分
         self.assertEqual(service.state.bond, config.RELATIONSHIP_INITIAL_BOND)
 
+    def test_coalesce_preserves_local_voice_index_alignment(self):
+        """coalesce_pending 合并多轮时，voice_indexed 的 local index 与合并后文本编号一一对应。
+
+        场景：第1轮无 voice，第2轮有 ref=101，第3轮无 voice，第4轮有 ref=303
+        结果 voice_indexed 应为 ((2, 101), (4, 303))，与合并后"第2轮"和"第4轮"文本对应。
+        """
+        completed = threading.Event()
+
+        def evaluate(state, turn):
+            # 验证 turn 的 voice_indexed 正确对应文本轮次
+            if "第1轮" in turn.user_text and "第4轮" in turn.user_text:
+                # voice_indexed 长度应为 2，且 local index 与文本中 turn 位置一致
+                for local_idx, ref in turn.voice_indexed:
+                    self.assertEqual(
+                        turn.user_text.splitlines()[local_idx - 1],
+                        f"第{local_idx}轮：用户文本第{local_idx}轮",
+                    )
+                    self.assertIn(f"第{local_idx}轮", turn.agent_text)
+                self.assertEqual(turn.voice_indexed, ((2, 101), (4, 303)))
+            completed.set()
+            return {
+                "event": "测试",
+                "relationship_delta": {"bond": 0.0},
+                "inner_voice": "",
+                "confidence": 0.9,
+            }
+
+        with TemporaryDirectory() as directory:
+            service = ReflectionWorker(
+                "serena",
+                evaluate,
+                state_dir=Path(directory),
+                queue_size=4,
+                idle_delay_s=0,
+                min_interval_s=0,
+            )
+            # 第1轮：无 voice
+            service.submit("用户文本第1轮", "Serena第1轮回答", voice_ref=None)
+            # 第2轮：有 voice
+            service.submit("用户文本第2轮", "Serena第2轮回答", voice_ref=101)
+            # 第3轮：无 voice
+            service.submit("用户文本第3轮", "Serena第3轮回答", voice_ref=None)
+            # 第4轮：有 voice
+            service.submit("用户文本第4轮", "Serena第4轮回答", voice_ref=303)
+            service.start()
+            self.assertTrue(completed.wait(timeout=1))
+            service.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

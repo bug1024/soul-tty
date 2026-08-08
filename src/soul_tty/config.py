@@ -256,6 +256,8 @@ VOICE_STATE_MIN_UTTERANCE_MS = int(
 VOICE_STATE_RESULT_TTL_S = int(
     os.environ.get("VOICE_STATE_RESULT_TTL_S", "120")
 )
+# Dashboard UI 展示 TTL，应短于 RESULT_TTL；超过后 Tab 感知行自动消失
+VOICE_STATE_UI_TTL_S = int(os.environ.get("VOICE_STATE_UI_TTL_S", "45"))
 
 # 固定 Dashboard 只保留有限滚动历史；长期记忆由未来的会话记忆层负责。
 DASHBOARD_MAX_MESSAGES = int(os.environ.get("DASHBOARD_MAX_MESSAGES", "300"))

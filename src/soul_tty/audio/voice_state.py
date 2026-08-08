@@ -26,6 +26,7 @@ from .. import config
 logger = logging.getLogger(__name__)
 
 # 内部 emotion 标签 → 规范化名
+# 同时兼容官方训练标签（FEARFUL/DISGUSTED/SURPRISED）和 sherpa-onnx 吐出标签
 _EMOTION_MAP: dict[str, str] = {
     "<|HAPPY|>": "happy",
     "<|SAD|>": "sad",
@@ -34,6 +35,10 @@ _EMOTION_MAP: dict[str, str] = {
     "<|SURPRISE|>": "surprise",
     "<|FEAR|>": "fear",
     "<|DISGUST|>": "disgust",
+    # 官方训练标签（更长形式）
+    "<|SURPRISED|>": "surprise",
+    "<|FEARFUL|>": "fear",
+    "<|DISGUSTED|>": "disgust",
 }
 
 # 内部 event 标签 → 规范化名
@@ -44,6 +49,8 @@ _EVENT_MAP: dict[str, str] = {
     "<|Cough|>": "cough",
     "<|Sneeze|>": "sneeze",
     "<|Applause|>": "applause",
+    "<|BGM|>": "bgm",
+    "<|Breath|>": "breath",
 }
 
 # 实际能测到的 event 标签集可能更少，但保留完整映射不做硬截断。

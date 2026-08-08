@@ -36,6 +36,16 @@ class NormalizeTests(unittest.TestCase):
     def test_emotion_empty(self):
         self.assertEqual(_normalize_emotion(""), "unknown")
 
+    # 官方训练标签别名
+    def test_emotion_fearful(self):
+        self.assertEqual(_normalize_emotion("<|FEARFUL|>"), "fear")
+
+    def test_emotion_disgusted(self):
+        self.assertEqual(_normalize_emotion("<|DISGUSTED|>"), "disgust")
+
+    def test_emotion_surprised(self):
+        self.assertEqual(_normalize_emotion("<|SURPRISED|>"), "surprise")
+
     def test_event_laughter(self):
         self.assertEqual(_normalize_event("<|Laughter|>"), "laughter")
 
@@ -47,6 +57,12 @@ class NormalizeTests(unittest.TestCase):
 
     def test_event_unknown(self):
         self.assertEqual(_normalize_event("<|Slam|>"), "Slam")
+
+    def test_event_bgm(self):
+        self.assertEqual(_normalize_event("<|BGM|>"), "bgm")
+
+    def test_event_breath(self):
+        self.assertEqual(_normalize_event("<|Breath|>"), "breath")
 
     def test_lang_zh(self):
         self.assertEqual(_normalize_lang("<|zh|>"), "zh")

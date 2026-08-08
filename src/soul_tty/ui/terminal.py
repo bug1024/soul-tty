@@ -279,6 +279,7 @@ class Dashboard:
         self.voice_emotion = ""
         self.voice_event = ""
         self.voice_language = ""
+        self._voice_observed_at: float | None = None  # TTL 过期判定
         self.greeting = relationship_voice or _fallback_greeting(
             tier=self.relationship_level,
             repeat_launch=_launch_context.repeat_launch,
@@ -508,6 +509,7 @@ class Dashboard:
             voice_emotion=self.voice_emotion,
             voice_event=self.voice_event,
             voice_language=self.voice_language,
+            voice_observed_at=self._voice_observed_at,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -821,11 +823,12 @@ class Dashboard:
                 self.refresh()
 
     def set_voice_observation(self, emotion: str, event: str, language: str) -> None:
-        """保存最近一次用户语气观察；安全窗口内触发重绘。"""
+        """保存最近一次用户语气观察（含时间戳）；安全窗口内触发重绘。"""
         with self._lock:
             self.voice_emotion = emotion
             self.voice_event = event
             self.voice_language = language
+            self._voice_observed_at = time.monotonic()
             safe_to_refresh = self.state == "listening" and not self.partial_text
             if safe_to_refresh:
                 self.refresh()
@@ -1239,11 +1242,16 @@ def _voice_detail_text(
     voice_emotion: str,
     voice_event: str,
     voice_language: str,
+    voice_observed_at: float | None = None,
 ) -> Text:
     """声音感知详情行：用户最近一句话的语气/事件/语言，给 Tab 详情行使用。
 
     只在有可显示的数据时构建文本；全空时返回空 Text() 不占行。
+    超过 UI_TTL 则不显示。
     """
+    if voice_observed_at is not None:
+        if time.monotonic() - voice_observed_at > config.VOICE_STATE_UI_TTL_S:
+            return Text()
     emotion_label = _VOICE_EMOTION_LABELS.get(voice_emotion, "")
     event_label = _VOICE_EVENT_LABELS.get(voice_event, "")
     bits = [b for b in (emotion_label, event_label, voice_language) if b]
@@ -1304,6 +1312,7 @@ def _splash_panel(
     voice_emotion: str = "",
     voice_event: str = "",
     voice_language: str = "",
+    voice_observed_at: float | None = None,
 ) -> Panel:
     primary = persona.appearance.primary_color
 
@@ -1374,7 +1383,7 @@ def _splash_panel(
         else Text()
     )
     voice_detail = (
-        _voice_detail_text(voice_emotion, voice_event, voice_language)
+        _voice_detail_text(voice_emotion, voice_event, voice_language, voice_observed_at)
         if show_details
         else Text()
     )
