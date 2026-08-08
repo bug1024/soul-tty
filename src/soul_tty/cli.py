@@ -157,6 +157,7 @@ def main() -> None:
 
     relationship_state = None
     relationship_service = None
+    voice_service = None
     if config.REFLECTION_ENABLED:
 
         def evaluate(
@@ -270,12 +271,21 @@ def main() -> None:
                 )
                 prompt.refresh()
 
-            # 主对话每轮走 service.recell，按需注入临时 recall 段
+            # 主对话每轮走 service.recall，按需注入临时 recall 段
             conversation.set_recall_provider(
                 lambda user_text, _pid=persona.id: memory_service.recall(
                     user_text, persona_id=_pid
                 )
             )
+
+        # VoiceStateService：异步声音感知，默认关闭
+        voice_service = None
+        if config.VOICE_STATE_ENABLED:
+            from .audio.voice_state import VoiceStateService
+
+            voice_service = VoiceStateService()
+            conversation.set_voice_submit_provider(voice_service.submit)
+
         initial_mood = (
             emotion_service.snapshot().mood
             if emotion_service is not None
@@ -401,4 +411,6 @@ def main() -> None:
         reflection.close()
         if emotion_service is not None:
             emotion_service.stop()
+        if voice_service is not None:
+            voice_service.close()
         terminal.close()
