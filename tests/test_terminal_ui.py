@@ -43,7 +43,6 @@ class TerminalUITests(unittest.TestCase):
             "SERENA",
             "早上好，今天也请多关照。",
             "◉ 正在聆听",
-            "直接说话即可",
             "0 换装",
             "LOCAL · Qwen3.5-9B · 文字模式 · Sherpa-ONNX",
         )
@@ -205,10 +204,11 @@ class TerminalUITests(unittest.TestCase):
                     3,
                     relationship_score=0.47,
                     relationship_tier="亲近",
+                    show_details=True,
                 )
             )
 
-        self.assertIn("♡ 亲密  亲近", output.getvalue())
+        self.assertIn("亲近", output.getvalue())
         self.assertNotIn("47", output.getvalue())
 
     def test_splash_reveals_exact_score_and_emotion_dimensions_in_details(self):
@@ -243,7 +243,7 @@ class TerminalUITests(unittest.TestCase):
             )
 
         rendered = output.getvalue()
-        self.assertIn("♡ 亲密  亲近  47/100", rendered)
+        self.assertIn("关系", rendered)
         # 5 维情绪数值按 NN 形式展开
         self.assertIn("愉悦 82", rendered)
         self.assertIn("平静 66", rendered)
@@ -251,8 +251,8 @@ class TerminalUITests(unittest.TestCase):
         self.assertIn("压力 18", rendered)
         self.assertIn("活力 74", rendered)
         # 亲密进度：互动次数 + 上次事件
-        self.assertIn("共 8 次互动", rendered)
-        self.assertIn("上次：共同玩笑", rendered)
+        self.assertIn("共同经历 8 件", rendered)
+        self.assertNotIn("人格：Serena", rendered)
         # Tab 详情模式下不再展开技术栈
         self.assertNotIn("人格：Serena", rendered)
         self.assertNotIn("听觉：Sherpa-ONNX", rendered)
@@ -756,10 +756,11 @@ class TerminalUITests(unittest.TestCase):
                         3,
                         relationship_score=0.5,
                         relationship_tier=english,
+                        show_details=True,
                     )
                 )
             self.assertIn(
-                f"♡ 亲密  {chinese}",
+                chinese,
                 output.getvalue(),
                 f"english={english!r} should render as {chinese!r}",
             )

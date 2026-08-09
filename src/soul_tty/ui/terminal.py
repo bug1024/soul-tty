@@ -137,11 +137,13 @@ class TerminalInput:
         on_toggle_details=None,
         on_cycle_mode=None,
         on_secret_mode=None,
+        on_toggle_dev=None,
     ) -> None:
         self.on_scroll = on_scroll
         self.on_toggle_details = on_toggle_details
         self.on_cycle_mode = on_cycle_mode
         self.on_secret_mode = on_secret_mode
+        self.on_toggle_dev = on_toggle_dev
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
@@ -178,6 +180,11 @@ class TerminalInput:
     @staticmethod
     def detail_toggles(data: bytes) -> int:
         return data.count(b"\t")
+
+    @staticmethod
+    def dev_toggles(data: bytes) -> int:
+        """Ctrl+D = \\x04"""
+        return data.count(b"\x04")
 
     @classmethod
     def outfit_toggles(cls, data: bytes) -> int:
@@ -243,6 +250,9 @@ class TerminalInput:
                     )
                     for _ in range(toggles):
                         self.on_secret_mode()
+                if self.on_toggle_dev is not None:
+                    for _ in range(self.dev_toggles(data)):
+                        self.on_toggle_dev()
             except OSError:
                 return
 
@@ -317,6 +327,15 @@ class Dashboard:
         )
         self.base_greeting = self.greeting
         self._pending_relationship_voice = ""
+
+        # Presence Panel 字段
+        self.desire_to_talk = 72
+        self.energy_level = 65
+        self.memory_count = 0
+        self.recent_memory = ""
+        self.current_tendency = "想聊天"
+        self.unfinished_topics = 0
+
         self.partial_text = ""
         self.presence_hint = ""
         self.messages: list[tuple[str, str]] = []
@@ -324,6 +343,7 @@ class Dashboard:
         self.interrupt_index: int | None = None
         self.scroll_offset = 0
         self.show_details = config.DASHBOARD_DETAILS
+        self.dev_mode = False
         self.mouth_frame = 1
         self._native_frames_ready = False
         self._lock = threading.RLock()
@@ -345,6 +365,7 @@ class Dashboard:
             self.toggle_details,
             self.cycle_mode,
             self.toggle_secret_mode,
+            self.toggle_dev_mode,
         )
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
@@ -575,6 +596,13 @@ class Dashboard:
             voice_event=self.voice_event,
             voice_language=self.voice_language,
             voice_observed_at=self._voice_observed_at,
+            dev_mode=self.dev_mode,
+            desire_to_talk=self.desire_to_talk,
+            energy_level=self.energy_level,
+            memory_count=self.memory_count,
+            recent_memory=self.recent_memory,
+            current_tendency=self.current_tendency,
+            unfinished_topics=self.unfinished_topics,
         )
 
         body_width = min(110, max(44, _console.width - 4))
@@ -1019,6 +1047,12 @@ class Dashboard:
             self.show_details = not self.show_details
             self.live.update(self.render(), refresh=True)
 
+    def toggle_dev_mode(self) -> None:
+        """Ctrl+D 切换开发模式。"""
+        with self._lock:
+            self.dev_mode = not self.dev_mode
+            self.live.update(self.render(), refresh=True)
+
     def update(self, index: int, text: str) -> None:
         role, _ = self.messages[index]
         self.messages[index] = (role, text)
@@ -1390,6 +1424,7 @@ def _splash_panel(
     relationship_score: float | None = None,
     relationship_tier: str = "",
     show_details: bool = False,
+    dev_mode: bool = False,
     quiet_presence: bool = False,
     emotion_mood: str = "calm",
     emotion_intensity: float = 0.0,
@@ -1401,9 +1436,18 @@ def _splash_panel(
     voice_event: str = "",
     voice_language: str = "",
     voice_observed_at: float | None = None,
+    # Presence Panel 字段
+    desire_to_talk: int = 72,
+    energy_level: int = 65,
+    memory_count: int = 0,
+    recent_memory: str = "",
+    current_tendency: str = "想聊天",
+    unfinished_topics: int = 0,
 ) -> Panel:
     primary = persona.appearance.primary_color
+    dim = _MUTED_TEXT_COLOR
 
+    # ── 标题 ──
     title = Text(
         persona.display_name.upper() if stage >= 2 else "",
         style=f"bold {primary}",
@@ -1411,92 +1455,114 @@ def _splash_panel(
     greeting_text = Text(no_wrap=True, overflow="ellipsis")
     if stage >= 2:
         greeting_text.append(
-            f"“{greeting or _fallback_greeting()}”",
-            style="italic",
+            f"“{greeting or _fallback_greeting()}”", style="italic",
         )
 
+    # ── 状态行 ──
     status = Text()
-    hint = Text()
     if stage >= 3:
-        symbols = {
-            "idle": "○",
-            "listening": "◉",
-            "thinking": "◇",
-            "speaking": "≋",
-        }
-        status.append(f"{symbols.get(state, '○')} ", style=f"bold {primary}")
-        status_label = (
-            "安静陪伴"
-            if quiet_presence and state == "listening"
-            else _STATE_LABELS.get(state, "角色已就绪")
-        )
-        status.append(status_label, style="bold")
-        hints = {
-            "idle": "随时可以开始",
-            "listening": "直接说话即可",
-            "thinking": "我正在认真想",
-            "speaking": "正在把回答说给你听",
-        }
-        hint.append(status_hint or hints.get(state, "随时可以开始"), style="dim")
+        symbols = {"idle": "○", "listening": "◉", "thinking": "◇", "speaking": "≋"}
+        status_label = _STATE_LABELS.get(state, "待机中")
+        if quiet_presence and state == "listening":
+            status_label = "安静陪伴"
+        status.append(f"{symbols.get(state, '○')} {status_label}", style=f"bold {primary}")
 
-    relationship = Text()
-    if stage >= 3 and relationship_score is not None:
-        relationship.append("♡ ", style=primary)
-        relationship.append("亲密  ", style="dim")
-        relationship.append(_RELATIONSHIP_LEVEL_ZH.get(
-            relationship_tier, relationship_tier
-        ), style=primary)
-        if show_details:
-            bond_pct = int(round(float(relationship_score) * 100))
-            relationship.append(f"  {bond_pct}/100", style="dim")
+    # ── 详情面板 ──
+    details = Text()
+    if show_details:
+        # 状态
+        details.append("当前状态\n", style=dim)
+        details.append(f"想聊天程度 {desire_to_talk}%  ", style="bold")
+        details.append(f"精力状态 {energy_level}%", style="bold")
+        details.append("\n\n")
 
-    emotion = Text()
-    if stage >= 3:
-        emotion.append("◌ ", style=primary)
-        emotion.append("情绪  ", style="dim")
-        emotion.append(_MOOD_LABELS.get(emotion_mood, emotion_mood), style=primary)
-        if show_details:
-            intensity_pct = int(round(emotion_intensity * 100))
-            emotion.append(f"  {intensity_pct}/100", style="dim")
-        if emotion_expression == "caring" and show_details:
-            emotion.append("  · 关心", style="dim italic")
+        # 情绪
+        details.append("情绪\n", style=dim)
+        if emotion_vector is not None:
+            parts = []
+            for dk in ("happiness", "calmness", "curiosity", "stress", "energy"):
+                label = _EMOTION_DIM_LABELS[dk]
+                raw = getattr(emotion_vector, dk, None)
+                if raw is None and isinstance(emotion_vector, dict):
+                    raw = emotion_vector.get(dk)
+                if raw is not None:
+                    try:
+                        pct = int(round(float(raw) * 100))
+                    except (TypeError, ValueError):
+                        continue
+                    parts.append(f"{label} {pct}")
+            if parts:
+                details.append("  ".join(parts), style="bold")
+            else:
+                details.append(_MOOD_LABELS.get(emotion_mood, emotion_mood), style="bold")
+        else:
+            details.append(_MOOD_LABELS.get(emotion_mood, emotion_mood), style="bold")
+        details.append("\n\n")
 
-    # 详情行：5 维情绪 + 亲密进度 + 声音感知。空 Text() 渲染时无视觉占位。
-    emotion_detail = (
-        _emotion_detail_text(emotion_vector) if show_details else Text()
-    )
-    relationship_detail = (
-        _relationship_detail_text(relationship_interaction_count, relationship_recent_events)
-        if show_details
-        else Text()
-    )
-    voice_detail = (
-        _voice_detail_text(voice_emotion, voice_event, voice_language, voice_observed_at)
-        if show_details
-        else Text()
-    )
-    # Tab 详情模式下隐藏技术栈展开表（人格/大脑/声音/听觉），
-    # 让出空间给情绪与亲密的细化数值。
+        # 关系
+        details.append("关系\n", style=dim)
+        details.append(_RELATIONSHIP_LEVEL_ZH.get(relationship_tier, relationship_tier), style="bold")
+        if relationship_interaction_count > 0:
+            details.append(f"  共同经历 {relationship_interaction_count} 件", style=dim)
+        details.append("\n\n")
+
+        # 记忆
+        details.append("记忆\n", style=dim)
+        if memory_count > 0:
+            details.append(f"长期记忆 {memory_count} 条", style="bold")
+            if recent_memory:
+                details.append(f"\n最近想起  {recent_memory}", style=dim)
+        else:
+            details.append("尚无记忆", style=dim)
+        details.append("\n\n")
+
+        # 感知
+        details.append("感知\n", style=dim)
+        if voice_emotion:
+            details.append(_VOICE_EMOTION_LABELS.get(voice_emotion, voice_emotion), style=dim)
+        else:
+            details.append("正在倾听", style=dim)
+        if voice_event:
+            details.append(f"  {_VOICE_EVENT_LABELS.get(voice_event, voice_event)}", style=dim)
+        lang = "中文" if voice_language == "zh" else voice_language
+        if lang:
+            details.append(f"  {lang}", style=dim)
+        details.append("\n\n")
+
+        # 内在状态
+        details.append("内在状态\n", style=dim)
+        details.append(current_tendency, style="bold")
+        if unfinished_topics > 0:
+            details.append(f"  未完成话题 {unfinished_topics} 个", style=dim)
+
+    # ── 开发模式 ──
+    dev_lines = Text()
+    if dev_mode and show_details:
+        dev_lines.append("\n", style="bold red")
+        dev_lines.append("[DEV]\n", style="bold red")
+        dev_lines.append(f"Emotion Vector: {emotion_vector}\n", style=dim)
+        dev_lines.append(f"Bond Score: {relationship_score}\n", style=dim)
+        dev_lines.append(f"Tier: {relationship_tier}\n", style=dim)
+        dev_lines.append(f"Intensity: {emotion_intensity:.2f}\n", style=dim)
+        dev_lines.append(f"Expression: {emotion_expression}\n", style=dim)
+        dev_lines.append(f"Voice Observed: {bool(voice_observed_at)}\n", style=dim)
+
+    # ── 技术摘要 ──
     tech_footer = (
         _technical_profile(persona, runtime, stage, expanded=False)
         if not show_details
         else Text()
     )
 
-    details = Group(
+    # ── 组装 ──
+    all_details = Group(
         Align.center(title),
         Align.center(greeting_text),
         Text(""),
         Align.center(status),
-        Align.center(hint),
         Text(""),
-        Align.center(emotion),
-        Align.center(emotion_detail),
-        Text(""),
-        Align.center(relationship),
-        Align.center(relationship_detail),
-        Text(""),
-        Align.center(voice_detail),
+        Align.center(details),
+        Align.center(dev_lines),
         Text(""),
         Align.center(tech_footer),
     )
@@ -1507,17 +1573,17 @@ def _splash_panel(
         content.add_column(ratio=1)
         content.add_row(
             Align.center(avatar, vertical="middle"),
-            Align.center(details, vertical="middle", height=13),
+            Align.center(all_details, vertical="middle", height=13),
         )
     elif avatar is not None:
-        content = Group(Align.center(avatar), Text(""), details)
+        content = Group(Align.center(avatar), Text(""), all_details)
     elif native_avatar:
-        content = details
+        content = all_details
     else:
         content = Group(
             Align.center(_logo(persona, stage)),
             Text(""),
-            details,
+            all_details,
         )
     panel_width = (
         min(110, _console.width - 4)
