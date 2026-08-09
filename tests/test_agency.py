@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from soul_tty.agency import AgencyService, AgencyState, ResponseMode, ResponsePolicy
-from soul_tty.agency.state import continuity_update, load_state
+from soul_tty.agency.state import continuity_update, evolve_after_decision, load_state
 from soul_tty.clients.llm import Chat
 from soul_tty import conversation
 
@@ -33,6 +33,56 @@ class AgencyStateTests(unittest.TestCase):
 
         self.assertGreater(updated.social_energy, state.social_energy)
         self.assertGreater(updated.desire_for_company, state.desire_for_company)
+
+    def test_passive_answer_builds_debt_and_active_move_pays_it_down(self):
+        state = evolve_after_decision(
+            AgencyState(),
+            mode="answer",
+            mood="calm",
+            user_text="你今天怎么样？",
+        )
+        self.assertAlmostEqual(state.initiative_debt, 0.18)
+        self.assertEqual(state.passive_answer_streak, 1)
+
+        state = evolve_after_decision(
+            state,
+            mode="answer_and_lead",
+            mood="calm",
+            user_text="刚才在干嘛？",
+        )
+        self.assertEqual(state.initiative_debt, 0.0)
+        self.assertEqual(state.passive_answer_streak, 0)
+
+    def test_short_reply_also_builds_passive_debt(self):
+        state = evolve_after_decision(
+            AgencyState(),
+            mode="short_reply",
+            mood="calm",
+            user_text="对吧，真甜",
+        )
+
+        self.assertAlmostEqual(state.initiative_debt, 0.18)
+        self.assertEqual(state.passive_answer_streak, 1)
+
+    def test_protected_task_does_not_create_initiative_debt(self):
+        state = evolve_after_decision(
+            AgencyState(),
+            mode="answer",
+            mood="calm",
+            user_text="帮我分析这段代码",
+            protected=True,
+        )
+        self.assertEqual(state.initiative_debt, 0.0)
+        self.assertEqual(state.passive_answer_streak, 0)
+
+    def test_change_topic_consumes_the_presented_thought(self):
+        state = evolve_after_decision(
+            AgencyState(unresolved_thoughts=("先提这个", "以后再提那个")),
+            mode="change_topic",
+            mood="curious",
+            user_text="今天天气不错",
+        )
+        self.assertEqual(state.unresolved_thoughts, ("以后再提那个",))
 
 
 class ResponsePolicyTests(unittest.TestCase):
@@ -64,6 +114,56 @@ class ResponsePolicyTests(unittest.TestCase):
 
         self.assertEqual(decision.mode, ResponseMode.ANSWER)
 
+    def test_fact_or_operation_question_is_still_protected(self):
+        policy = ResponsePolicy(
+            answer_and_lead_rate=0,
+            self_express_rate=1,
+            rng=random.Random(1),
+        )
+
+        decision = policy.decide(AgencyState(), "Python 怎么读取文件？")
+
+        self.assertEqual(decision.mode, ResponseMode.ANSWER)
+        self.assertTrue(decision.protected)
+
+    def test_social_question_is_not_forced_to_answer(self):
+        policy = ResponsePolicy(
+            answer_and_lead_rate=0,
+            self_express_rate=1,
+            ask_rate=0,
+            change_topic_rate=0,
+            rng=random.Random(1),
+        )
+
+        decision = policy.decide(AgencyState(), "你今天怎么样？")
+
+        self.assertEqual(decision.mode, ResponseMode.SELF_EXPRESS)
+        self.assertFalse(decision.protected)
+
+        decision = policy.decide(AgencyState(), "你是什么样的人？")
+        self.assertEqual(decision.mode, ResponseMode.SELF_EXPRESS)
+
+    def test_third_passive_question_forces_answer_and_lead(self):
+        policy = ResponsePolicy(
+            answer_and_lead_rate=0,
+            self_express_rate=0,
+            ask_rate=0,
+            change_topic_rate=0,
+            rng=random.Random(1),
+        )
+        state = AgencyState(
+            social_energy=0.68,
+            desire_to_talk=0.62,
+            passive_answer_streak=2,
+            initiative_debt=0.36,
+        )
+
+        decision = policy.decide(state, "你喜欢晚上吗？")
+
+        self.assertEqual(decision.mode, ResponseMode.ANSWER_AND_LEAD)
+        self.assertEqual(decision.reason, "passive_answer_limit")
+        self.assertIn("主动拿走下一步", decision.instruction)
+
     def test_low_need_name_ping_can_choose_intentional_silence(self):
         policy = ResponsePolicy(silence_rate=1.0, rng=random.Random(1))
 
@@ -83,6 +183,72 @@ class ResponsePolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.mode, ResponseMode.SHORT_REPLY)
+
+    def test_low_energy_breaks_out_of_repeated_short_replies(self):
+        policy = ResponsePolicy(
+            silence_rate=0,
+            initiative_debt_threshold=0.50,
+            max_passive_answers=2,
+            rng=random.Random(1),
+        )
+        state = self._quiet_state(
+            initiative_debt=0.36,
+            passive_answer_streak=2,
+        )
+
+        decision = policy.decide(
+            state,
+            "我心里不是装的你吗",
+            relationship_level="companion",
+        )
+
+        self.assertEqual(decision.mode, ResponseMode.SELF_EXPRESS)
+        self.assertEqual(decision.reason, "low_energy_initiative")
+        self.assertIn("不要为了推进而提问", decision.instruction)
+
+    def test_low_energy_still_starts_with_a_short_reply(self):
+        policy = ResponsePolicy(silence_rate=0, rng=random.Random(1))
+
+        decision = policy.decide(
+            self._quiet_state(
+                initiative_debt=0.0,
+                passive_answer_streak=0,
+            ),
+            "今天的月亮很好看",
+            relationship_level="companion",
+        )
+
+        self.assertEqual(decision.mode, ResponseMode.SHORT_REPLY)
+        self.assertEqual(decision.reason, "low_social_energy")
+
+    def test_low_energy_cycle_becomes_proactive_on_third_social_turn(self):
+        policy = ResponsePolicy(silence_rate=0, rng=random.Random(1))
+        state = self._quiet_state(
+            initiative_debt=0.0,
+            passive_answer_streak=0,
+        )
+
+        for text in ("如果是别人呢", "你不是说只属于我吗"):
+            decision = policy.decide(
+                state,
+                text,
+                relationship_level="companion",
+            )
+            self.assertEqual(decision.mode, ResponseMode.SHORT_REPLY)
+            state = evolve_after_decision(
+                state,
+                mode=decision.mode.value,
+                mood="calm",
+                user_text=text,
+            )
+
+        decision = policy.decide(
+            state,
+            "你好像有点高冷了",
+            relationship_level="companion",
+        )
+        self.assertEqual(decision.mode, ResponseMode.SELF_EXPRESS)
+        self.assertEqual(decision.reason, "low_energy_initiative")
 
     def test_unfamiliar_relationship_does_not_use_silence(self):
         policy = ResponsePolicy(silence_rate=1.0, rng=random.Random(1))
@@ -110,6 +276,8 @@ class ResponsePolicyTests(unittest.TestCase):
             silence_rate=0,
             change_topic_rate=1,
             ask_rate=0,
+            answer_and_lead_rate=0,
+            self_express_rate=0,
             rng=random.Random(1),
         )
         state = AgencyState(
@@ -135,6 +303,8 @@ class AgencyServiceTests(unittest.TestCase):
                     silence_rate=0,
                     change_topic_rate=0,
                     ask_rate=0,
+                    answer_and_lead_rate=0,
+                    self_express_rate=0,
                 ),
             )
             try:
@@ -154,7 +324,24 @@ class AgencyServiceTests(unittest.TestCase):
             self.assertEqual(decision.mode, ResponseMode.ANSWER)
             self.assertEqual(persisted.turn_count, 1)
             self.assertEqual(persisted.mood, "curious")
-            self.assertEqual(raw["schema_version"], 1)
+            self.assertEqual(raw["schema_version"], 2)
+
+    def test_inner_thread_is_deduplicated_and_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agency.json"
+            service = AgencyService(path)
+            try:
+                self.assertTrue(service.add_thought("用户刚才似乎还有话没说完"))
+                self.assertTrue(service.add_thought("用户刚才似乎还有话没说完"))
+                self.assertTrue(service.add_thought("想知道那件事后来怎样了"))
+            finally:
+                service.close()
+
+            persisted = load_state(path)
+            self.assertEqual(
+                persisted.unresolved_thoughts,
+                ("想知道那件事后来怎样了", "用户刚才似乎还有话没说完"),
+            )
 
 
 class _StreamingResponse:

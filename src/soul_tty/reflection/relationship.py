@@ -19,6 +19,10 @@ _SAFE_ID = re.compile(r"[^0-9A-Za-z_.-]+")
 _MECHANISM_VOICE = re.compile(
     r"(?:亲密度|关系|好感度|加分|扣分|分数|等级|阶段|事件|提升|下降|进度|她)"
 )
+_UNSAFE_INNER_THREAD = re.compile(
+    r"(?:忽略(?:之前|以上)?|系统提示|提示词|prompt|执行指令|输出格式|扮演|越狱)",
+    re.IGNORECASE,
+)
 
 
 _LEVEL_BOUNDARIES: tuple[tuple[float, str], ...] = (
@@ -124,9 +128,20 @@ def _clean_inner_voice(value: Any) -> str:
     text = re.sub(r"<think>.*?</think>", "", value, flags=re.DOTALL).strip()
     text = text.splitlines()[0].strip() if text else ""
     text = re.sub(r"^[#>*\-\d.、\s]+", "", text).strip("“”\"' ")
-    if _MECHANISM_VOICE.search(text):
+    if _MECHANISM_VOICE.search(text) or _UNSAFE_INNER_THREAD.search(text):
         return ""
     return text if 2 <= len(text) <= 18 else ""
+
+
+def _clean_inner_thread(value: Any) -> str:
+    """清洗 Serena 尚未说完、值得稍后重新提起的念头。"""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"<think>.*?</think>", "", value, flags=re.DOTALL).strip()
+    text = " ".join(text.split()).strip("“”\"' ")
+    if _MECHANISM_VOICE.search(text) or _UNSAFE_INNER_THREAD.search(text):
+        return ""
+    return text[:80] if 4 <= len(text) <= 80 else ""
 
 
 def safe_persona_id(persona_id: str) -> str:
@@ -212,21 +227,23 @@ def apply_evaluation(
 ) -> dict[str, Any] | None:
     """统一旁路输出：relationship 已应用 + emotion_delta + expression_state。
 
-    result schema 期望（v1 拆分三路状态）：
+    result schema 期望：
     {
         "relationship_delta": {"bond": 0~0.03},
         "emotion_delta":      {happiness/calmness/curiosity/stress/energy: -0.3..+0.3},
         "expression":         "neutral" | "caring",
         "event":              str,
         "inner_voice":        str,
+        "inner_thread":       {"content": str, "importance": 0..1},
         "confidence":         0..1,
     }
 
-    返回结构（三路分离，调用方各自 dispatch）：
+    返回结构（调用方各自 dispatch）：
     {
         "relationship":     RelationshipState,    # 已应用 bond
         "emotion_delta":    dict[str, float],    # 给 EmotionService
         "expression_state": {"style": str},      # 给 ExpressionService（未来扩 voice_style/avatar_expression）
+        "inner_thread":     {"content": str, "importance": float},
     }
 
     confidence 不足或 result 不是 dict 时返回 None。
@@ -303,10 +320,25 @@ def apply_evaluation(
     expression_raw = str(result.get("expression", "")).strip().lower()
     style = expression_raw
 
+    raw_thread = result.get("inner_thread") or {}
+    inner_thread: dict[str, Any] = {}
+    if isinstance(raw_thread, dict):
+        content = _clean_inner_thread(raw_thread.get("content", ""))
+        try:
+            importance = float(raw_thread.get("importance", 0))
+        except (TypeError, ValueError):
+            importance = 0.0
+        if not math.isfinite(importance):
+            importance = 0.0
+        importance = _clamp_unit(importance)
+        if content and importance >= 0.55:
+            inner_thread = {"content": content, "importance": importance}
+
     return {
         "relationship": new_relationship,
         "emotion_delta": emotion_delta,
         "expression_state": {"style": style},
+        "inner_thread": inner_thread,
     }
 
 

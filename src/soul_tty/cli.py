@@ -231,6 +231,7 @@ def _main() -> None:
 
     relationship_state = None
     relationship_service = None
+    agency_service = None
 
     # VoiceStateService：异步声音感知，独立于 REFLECTION_ENABLED。
     # UI 更新走回调，Reflection 消费走 voice_service.get_indexed()。
@@ -276,7 +277,7 @@ def _main() -> None:
                     indexed_obs = voice_service.get_indexed(tuple(indexed_items))
                     voice_context = render_voice_context(observations=[], indexed=indexed_obs)
 
-            return llm.evaluate_relationship(
+            result = llm.evaluate_relationship(
                 aux_model,
                 persona.display_name,
                 state.bond,
@@ -286,6 +287,10 @@ def _main() -> None:
                 turn.agent_text,
                 voice_context=voice_context,
             )
+            # 禁止持久化的会话既不进入 Memory，也不能留下 Agency inner thread。
+            if result is not None and not turn.memory_allowed:
+                result.pop("inner_thread", None)
+            return result
 
         def on_relationship_update(state) -> None:
             if not config.BOND_ENABLED:
@@ -303,7 +308,12 @@ def _main() -> None:
             prompt.refresh()
 
         def on_evaluation_result(payload: dict) -> None:
-            """ReflectionWorker 把 apply_evaluation 的 payload 抛上来；这里分发到 emotion/expression。"""
+            """把 Reflection 的状态分量分发给各自服务。"""
+            inner_thread = payload.get("inner_thread") or {}
+            if agency_service is not None and isinstance(inner_thread, dict):
+                content = str(inner_thread.get("content", "")).strip()
+                if content:
+                    agency_service.add_thought(content)
             if emotion_service is None:
                 return
             emotion_delta = payload.get("emotion_delta") or {}
@@ -404,7 +414,6 @@ def _main() -> None:
 
     # Agency 位于 Conversation Brain 之前：每轮只做本地决策，不调用辅助
     # LLM，也不等待状态落盘。Emotion 只提供当前 mood 快照，二者不互相改写。
-    agency_service = None
     if config.AGENCY_ENABLED:
         from .agency import AgencyService, ResponsePolicy
         agency_path = (
@@ -421,6 +430,12 @@ def _main() -> None:
                     silence_rate=config.AGENCY_SILENCE_RATE,
                     change_topic_rate=config.AGENCY_CHANGE_TOPIC_RATE,
                     ask_rate=config.AGENCY_ASK_RATE,
+                    answer_and_lead_rate=config.AGENCY_ANSWER_AND_LEAD_RATE,
+                    self_express_rate=config.AGENCY_SELF_EXPRESS_RATE,
+                    initiative_debt_threshold=(
+                        config.AGENCY_INITIATIVE_DEBT_THRESHOLD
+                    ),
+                    max_passive_answers=config.AGENCY_MAX_PASSIVE_ANSWERS,
                     min_turns_before_silence=(
                         config.AGENCY_MIN_TURNS_BEFORE_SILENCE
                     ),

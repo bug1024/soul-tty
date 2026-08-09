@@ -48,6 +48,8 @@ class AgencyState:
     unresolved_thoughts: tuple[str, ...] = ()
     turn_count: int = 0
     consecutive_silences: int = 0
+    initiative_debt: float = 0.0
+    passive_answer_streak: int = 0
     last_mode: str = "answer"
     last_interaction_at: str = ""
     updated_at: str = ""
@@ -55,7 +57,7 @@ class AgencyState:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["unresolved_thoughts"] = list(self.unresolved_thoughts)
-        data["schema_version"] = 1
+        data["schema_version"] = 2
         return data
 
     @classmethod
@@ -84,6 +86,10 @@ class AgencyState:
             turn_count=_nonnegative_int(data.get("turn_count", 0)),
             consecutive_silences=_nonnegative_int(
                 data.get("consecutive_silences", 0)
+            ),
+            initiative_debt=_unit(data.get("initiative_debt"), 0.0),
+            passive_answer_streak=_nonnegative_int(
+                data.get("passive_answer_streak", 0)
             ),
             last_mode=str(data.get("last_mode", "answer")) or "answer",
             last_interaction_at=str(data.get("last_interaction_at", "")),
@@ -154,6 +160,7 @@ def evolve_after_decision(
     mode: str,
     mood: str,
     user_text: str,
+    protected: bool = False,
 ) -> AgencyState:
     """一次互动后更新 Need；只做小幅连续变化，避免随机人格跳变。"""
 
@@ -161,6 +168,8 @@ def evolve_after_decision(
     mood = (mood or state.mood or "calm").lower()
     cost = {
         "answer": 0.020,
+        "answer_and_lead": 0.024,
+        "self_express": 0.020,
         "short_reply": 0.010,
         "ask": 0.016,
         "change_topic": 0.018,
@@ -194,7 +203,30 @@ def evolve_after_decision(
     if mood in {"tired", "numb"} and energy < 0.30:
         attention = "inward"
 
+    proactive_modes = {
+        "answer_and_lead",
+        "self_express",
+        "ask",
+        "change_topic",
+    }
+    if mode in proactive_modes:
+        initiative_debt = _unit(state.initiative_debt - 0.40, 0.0)
+        passive_answer_streak = 0
+    elif mode in {"answer", "short_reply"} and not protected:
+        # 短答同样是一种被动回应。若不累计债务，低能量状态会永久停留在
+        # short_reply，主动模式永远没有触发机会。
+        initiative_debt = _unit(state.initiative_debt + 0.18, 0.0)
+        passive_answer_streak = state.passive_answer_streak + 1
+    else:
+        initiative_debt = state.initiative_debt
+        passive_answer_streak = 0 if protected else state.passive_answer_streak
+
     now = _now_iso()
+    unresolved_thoughts = (
+        state.unresolved_thoughts[1:]
+        if mode == "change_topic" and state.unresolved_thoughts
+        else state.unresolved_thoughts
+    )
     return replace(
         state,
         mood=mood,
@@ -207,6 +239,9 @@ def evolve_after_decision(
         consecutive_silences=(
             state.consecutive_silences + 1 if mode == "silence" else 0
         ),
+        initiative_debt=initiative_debt,
+        passive_answer_streak=passive_answer_streak,
+        unresolved_thoughts=unresolved_thoughts,
         last_mode=mode,
         last_interaction_at=now,
         updated_at=now,

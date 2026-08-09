@@ -360,6 +360,7 @@ def evaluate_relationship(
         "expression":         "neutral" | "caring",
         "event":              str,
         "inner_voice":        str,
+        "inner_thread":       {"content": str, "importance": 0..1},
         "confidence":         0..1,
     }
 
@@ -375,7 +376,7 @@ def evaluate_relationship(
     user_content += (
         f"<dialogue>\n用户：{user_text}\n"
         f"{display_name}：{agent_text}\n</dialogue>\n"
-        "请同时输出 relationship_delta.bond、emotion_delta、expression。"
+        "请同时输出 relationship_delta.bond、emotion_delta、expression 和 inner_thread。"
     )
     payload = {
         "model": config.RELATIONSHIP_LLM_MODEL or model,
@@ -409,6 +410,10 @@ def evaluate_relationship(
                     "event 字符串，描述本轮关系事件；"
                     "inner_voice 字符串，角色此刻亲口说出的第一人称中文短句，"
                     "要含蓄表达当下感受，不超过十五个汉字；"
+                    "inner_thread 对象，content 是角色尚未说完、值得未来自然重新提起的"
+                    "疑问或牵挂，不超过四十个汉字，importance 是 0 到 1；只有用户明显"
+                    "欲言又止、重要话题未完或角色产生具体好奇时才填写，否则 content 为空、"
+                    "importance 为 0。inner_thread 不是用户事实，不得写成长期记忆摘要；"
                     "confidence 为 0 到 1 的数字。"
                     "不要使用第三人称旁白，不要解释判断原因，"
                     "禁止出现亲密度、关系、加分、扣分、分数、等级、阶段、事件、"

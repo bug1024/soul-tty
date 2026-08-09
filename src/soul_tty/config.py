@@ -224,7 +224,7 @@ RELATIONSHIP_MIN_CONFIDENCE = float(
     os.environ.get("RELATIONSHIP_MIN_CONFIDENCE", "0.65")
 )
 RELATIONSHIP_LLM_MAX_TOKENS = int(
-    os.environ.get("RELATIONSHIP_LLM_MAX_TOKENS", "96")
+    os.environ.get("RELATIONSHIP_LLM_MAX_TOKENS", "160")
 )
 # 最近关系事件保留条数（FIFO）；超过则丢最旧的，避免无限增长。
 RELATIONSHIP_MAX_RECENT_EVENTS = int(
@@ -277,6 +277,18 @@ AGENCY_CHANGE_TOPIC_RATE = float(
     os.environ.get("AGENCY_CHANGE_TOPIC_RATE", "0.08")
 )
 AGENCY_ASK_RATE = float(os.environ.get("AGENCY_ASK_RATE", "0.12"))
+AGENCY_ANSWER_AND_LEAD_RATE = float(
+    os.environ.get("AGENCY_ANSWER_AND_LEAD_RATE", "0.30")
+)
+AGENCY_SELF_EXPRESS_RATE = float(
+    os.environ.get("AGENCY_SELF_EXPRESS_RATE", "0.15")
+)
+AGENCY_INITIATIVE_DEBT_THRESHOLD = float(
+    os.environ.get("AGENCY_INITIATIVE_DEBT_THRESHOLD", "0.50")
+)
+AGENCY_MAX_PASSIVE_ANSWERS = int(
+    os.environ.get("AGENCY_MAX_PASSIVE_ANSWERS", "2")
+)
 AGENCY_MIN_TURNS_BEFORE_SILENCE = int(
     os.environ.get("AGENCY_MIN_TURNS_BEFORE_SILENCE", "6")
 )

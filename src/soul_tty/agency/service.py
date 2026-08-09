@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from .. import observability
@@ -64,11 +65,41 @@ class AgencyService:
                 mode=decision.mode.value,
                 mood=mood,
                 user_text=user_text,
+                protected=decision.protected,
             )
             snapshot = self._state
             self._session_turns += 1
         self._schedule_save(snapshot)
+        observability.event(
+            "agency.state.evolved",
+            mode=decision.mode.value,
+            initiative_debt=round(snapshot.initiative_debt, 3),
+            passive_answer_streak=snapshot.passive_answer_streak,
+            pending_thoughts=len(snapshot.unresolved_thoughts),
+        )
         return decision
+
+    def add_thought(self, thought: str) -> bool:
+        """旁路加入一个未完念头；去重、有界，且不阻塞状态写盘。"""
+        compact = " ".join(str(thought).split()).strip()[:120]
+        if len(compact) < 4:
+            return False
+        with self._lock:
+            existing = [
+                item
+                for item in self._state.unresolved_thoughts
+                if item != compact
+            ]
+            thoughts = tuple([compact, *existing][:8])
+            self._state = replace(self._state, unresolved_thoughts=thoughts)
+            snapshot = self._state
+        self._schedule_save(snapshot)
+        observability.event(
+            "agency.inner_thread.added",
+            thought_chars=len(compact),
+            pending_count=len(thoughts),
+        )
+        return True
 
     def _schedule_save(self, state: AgencyState) -> None:
         try:

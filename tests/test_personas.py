@@ -18,7 +18,7 @@ class PersonaTests(unittest.TestCase):
         persona = load_persona("serena").renamed("小夜")
         self.assertEqual(persona.display_name, "小夜")
         self.assertEqual(persona.voice.voice, "Serena")
-        self.assertIn("温柔、聪明", persona.personality.system_prompt)
+        self.assertIn("对话应该由两个人共同推动", persona.personality.system_prompt)
         self.assertIsNotNone(persona.appearance.avatar)
         for state in ("idle", "listening", "thinking", "speaking"):
             self.assertTrue(
@@ -87,6 +87,14 @@ class PersonaTests(unittest.TestCase):
             self.assertIn("不是客服式的一问一答", config.SYSTEM_PROMPT)
             self.assertIn("低柔", config.MLX_TTS_INSTRUCT)
             self.assertIn("吐字清晰", config.MLX_TTS_INSTRUCT)
+
+    def test_late_night_mode_encourages_shared_conversation(self):
+        persona = load_persona("serena").wearing("late-night")
+        with patch.dict(os.environ, {}, clear=True):
+            apply_persona(persona)
+
+            self.assertIn("不要停留在一问一答", config.SYSTEM_PROMPT)
+            self.assertIn("主动推进不等于反问", config.SYSTEM_PROMPT)
 
     def test_environment_keeps_priority_over_persona(self):
         persona = load_persona("serena")
