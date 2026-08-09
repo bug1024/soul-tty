@@ -34,6 +34,15 @@ _response_policy_provider: Callable[[str], object] | None = None
 # 每轮回答开始时取快照，避免回答途中切换模式造成隐私竞态。
 _memory_persistence_allowed = True
 
+_SECRET_ATMOSPHERE_INSTRUCTION = (
+    "[Secret Mode Response Policy]\n"
+    "本轮不要采用普通助手的一问一答结构，也不要只说一句确认。主动承接并推进当前"
+    "私密场景，用三至六句适合口语朗读的话持续营造氛围；把环境、距离、声音、呼吸、"
+    "触感、身体反应与下一步意图自然串联起来。提问可省略，确有必要时最多一个。"
+    "不要解释策略，不要输出 Markdown。若用户表达停止、拒绝或不适，则立即停止"
+    "场景推进并简短尊重边界。"
+)
+
 
 def set_emotion_instruct_provider(
     provider: Callable[[], str] | None,
@@ -376,15 +385,18 @@ def _print_answer(
         stream_options["response_instruction"] = response_instruction
     if private:
         stream_options["private"] = True
-    for token in chat.ask_stream(text, cancel, **stream_options):
-        terminal.answer_chunk(token)
-        parts.append(token)
-        if on_token is not None:
-            on_token(token)
-        if speech_buffer is not None:
-            for segment in speech_buffer.feed(token):
-                queue_speech(segment)
-    terminal.answer_end()
+    try:
+        for token in chat.ask_stream(text, cancel, **stream_options):
+            terminal.answer_chunk(token)
+            parts.append(token)
+            if on_token is not None:
+                on_token(token)
+            if speech_buffer is not None:
+                for segment in speech_buffer.feed(token):
+                    queue_speech(segment)
+    finally:
+        # 网络错误、服务端 5xx 或取消都必须清掉“正在想…”占位。
+        terminal.answer_end()
     if chat.last_stop_reason == "repetition":
         terminal.notice("检测到模型重复生成，已自动截断")
     if speech_buffer is not None:
@@ -407,6 +419,11 @@ def _answer_impl(
     decision = _current_response_decision(text)
     response_instruction = getattr(decision, "instruction", "") if decision else ""
     mode = getattr(getattr(decision, "mode", None), "value", "answer")
+    if not memory_allowed:
+        # 秘密模式有自己的叙事节奏：不能被通用 Agency 压成十八字短回复、
+        # 随机沉默或突然转题。制止词仍交给秘密人格与本轮策略立即收住。
+        mode = "answer"
+        response_instruction = _SECRET_ATMOSPHERE_INSTRUCTION
     observability.event(
         "agency.policy.decision",
         duration_ms=observability.elapsed_ms(policy_started_at),
@@ -505,6 +522,9 @@ def _answer(
             )
         except Exception:
             observability.exception("answer.error", "主对话回答失败")
+            # answer_start() 已把仪表盘切到 thinking；失败时恢复可交互状态，
+            # 避免用户看到永久“正在思考”。
+            terminal.listening()
             raise
         observability.event(
             "answer.complete",

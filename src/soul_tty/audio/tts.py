@@ -4,6 +4,8 @@ StreamingSpeaker:句子队列 -> 合成线程 -> 播放线程的流水线,
 LLM 边生成边切句送入,边合成边播放,降低首音延迟。
 """
 
+import logging
+import math
 import queue
 import re
 import subprocess
@@ -28,6 +30,8 @@ _LONG_PAUSE_PUNCTUATION = re.compile(r"(?:\.[ \t]*){2,}|…{2,}")
 _TRAILING_LONG_PAUSE = re.compile(
     r"(?:(?:\.[ \t]*){2,}|…{2,})(?=[ \t]*(?:\n|$))"
 )
+_INCOMPLETE_SEGMENT_END = re.compile(r"[，,、：:；;]+$")
+_COMPLETE_SEGMENT_END = frozenset("。！？!?\n")
 _SHORT_TAIL_MAX_CHARS = 8
 _SHORT_TAIL_MIN_PREFIX_CHARS = 8
 _PLAYBACK_LEVEL_FRAME_MS = 50
@@ -279,6 +283,37 @@ def _normalize_mlx_text(text: str) -> str:
     return text.strip()
 
 
+def _complete_mlx_segment(text: str) -> str:
+    """把独立 TTS 请求封成完整语句，避免模型维持未完语调直到退化。
+
+    上层为了低延迟会在逗号处切语义段；逗号对人是自然边界，但对
+    Qwen3-TTS 的独立生成请求意味着“后面还有内容”，偶发无法产生 EOS。
+    这里只修改送给 TTS 的副本，不改变界面文字和 LLM 历史。
+    """
+    text = _normalize_mlx_text(text)
+    if not text:
+        return text
+    text = _INCOMPLETE_SEGMENT_END.sub("。", text)
+    if text[-1] not in _COMPLETE_SEGMENT_END:
+        text += "。"
+    return text
+
+
+def _fade_out_pcm(pcm: bytes, duration_ms: int = 60) -> bytes:
+    """给被硬上限截断的最后一块 PCM 做短淡出，避免波形突变爆音。"""
+    usable = len(pcm) - len(pcm) % 2
+    if usable <= 0:
+        return pcm
+    samples = np.frombuffer(pcm[:usable], dtype="<i2").astype(np.float32)
+    fade_samples = min(
+        samples.size,
+        max(1, int(config.TTS_SAMPLE_RATE * duration_ms / 1000)),
+    )
+    samples[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
+    faded = np.clip(samples, -32768, 32767).astype("<i2").tobytes()
+    return faded + pcm[usable:]
+
+
 def _split_mlx_text(text: str) -> list[str]:
     """规范化文本，并按完整句拆分独立请求。"""
     text = _normalize_mlx_text(text)
@@ -319,13 +354,17 @@ def _trim_trailing_silence(
     bytes_per_second = config.TTS_SAMPLE_RATE * 2
 
     for chunk in chunks:
+        hits_audio_limit = False
         if max_audio_s is not None:
             remaining = int(max_audio_s * bytes_per_second) - received_bytes
             if remaining <= 0:
                 return
+            hits_audio_limit = len(chunk) >= remaining
             chunk = chunk[: remaining - remaining % 2]
             if not chunk:
                 return
+            if hits_audio_limit:
+                chunk = _fade_out_pcm(chunk)
         received_bytes += len(chunk)
         samples = np.frombuffer(chunk, dtype="<i2").astype(np.float32)
         rms = (
@@ -347,7 +386,10 @@ def _trim_trailing_silence(
         if rms >= config.MLX_TTS_SILENCE_RMS:
             heard_voice = True
         yield chunk
-        if max_audio_s is not None and received_bytes >= max_audio_s * bytes_per_second:
+        if hits_audio_limit or (
+            max_audio_s is not None
+            and received_bytes >= max_audio_s * bytes_per_second
+        ):
             return
 
 
@@ -370,6 +412,22 @@ def _synthesize_mlx_segment(
     `instruct` 为本次回答的 TTS 指令（来自 EmotionService.current_tts_instruct）；
     空串时回退到 config.MLX_TTS_INSTRUCT（persona 默认）。
     """
+    text = _complete_mlx_segment(text)
+    char_count = len(_SPEAKABLE.findall(text))
+    max_audio_s = min(
+        config.MLX_TTS_MAX_AUDIO_S,
+        max(
+            config.MLX_TTS_MIN_AUDIO_S,
+            char_count * config.MLX_TTS_AUDIO_S_PER_CHAR
+            + config.MLX_TTS_AUDIO_PADDING_S,
+        ),
+    )
+    # Qwen3-TTS 约 12.5 codec token/s。客户端以前只停止读取 PCM，服务端仍可
+    # 继续生成到固定 256 token；按本段音频上限约束 token，减少退化持续时间。
+    max_tokens = min(
+        config.MLX_TTS_MAX_TOKENS,
+        max(24, math.ceil((max_audio_s + 0.5) * 12.5)),
+    )
     payload = {
         "model": config.MLX_TTS_MODEL,
         "input": text,
@@ -377,7 +435,7 @@ def _synthesize_mlx_segment(
         "response_format": "pcm",
         "stream": True,
         "streaming_interval": config.MLX_TTS_STREAMING_INTERVAL,
-        "max_tokens": config.MLX_TTS_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": config.MLX_TTS_TEMPERATURE,
         "top_p": config.MLX_TTS_TOP_P,
         "top_k": config.MLX_TTS_TOP_K,
@@ -390,21 +448,31 @@ def _synthesize_mlx_segment(
             payload["instruct"] = effective
     else:
         raise RuntimeError("MLX_TTS_VOICE 不能为空；音色克隆后端已移除")
-    with client.stream(
-        "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
-    ) as resp:
-        resp.raise_for_status()
-        aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
-        char_count = len(re.sub(r"\s", "", text))
-        max_audio_s = min(
-            config.MLX_TTS_MAX_AUDIO_S,
-            max(
-                config.MLX_TTS_MIN_AUDIO_S,
-                char_count * config.MLX_TTS_AUDIO_S_PER_CHAR
-                + config.MLX_TTS_AUDIO_PADDING_S,
-            ),
+    started_at = time.perf_counter()
+    audio_bytes = 0
+    try:
+        with client.stream(
+            "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
+        ) as resp:
+            resp.raise_for_status()
+            aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
+            for pcm in _trim_trailing_silence(aligned, max_audio_s):
+                audio_bytes += len(pcm)
+                yield pcm
+    finally:
+        audio_s = audio_bytes / (config.TTS_SAMPLE_RATE * 2)
+        capped = audio_s >= max_audio_s - 0.02
+        observability.event(
+            "tts.segment_synthesis.complete",
+            level=logging.WARNING if capped else logging.INFO,
+            duration_ms=observability.elapsed_ms(started_at),
+            input_chars=char_count,
+            audio_s=round(audio_s, 3),
+            max_audio_s=round(max_audio_s, 3),
+            max_tokens=max_tokens,
+            capped=capped,
+            cancelled=bool(cancel is not None and cancel.is_set()),
         )
-        yield from _trim_trailing_silence(aligned, max_audio_s)
 
 
 def synthesize_mlx_stream(
@@ -438,7 +506,7 @@ def synthesize_mlx_semantic_segment(
     instruct: str = "",
 ) -> Iterator[bytes]:
     """把已由上层切好的语义段作为一个 TTS 请求，保留段内韵律上下文。"""
-    segment = _normalize_mlx_text(text)
+    segment = _complete_mlx_segment(text)
     if not segment or not _SPEAKABLE.search(segment):
         return
     with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:

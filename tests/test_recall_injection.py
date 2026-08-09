@@ -1,4 +1,4 @@
-"""recall 注入：临时 system message，不进 system prompt / 不进 history。"""
+"""recall 注入：合并进临时 user message，不进 system prompt / history。"""
 
 import unittest
 from unittest.mock import MagicMock, patch
@@ -41,18 +41,23 @@ class RecallInjectionTests(unittest.TestCase):
         # client.stream 被以关键字 json= 调用，payload 在那里
         return self._client.stream.call_args.kwargs["json"]["messages"]
 
-    def test_recall_appears_in_payload_between_history_and_user(self):
+    def test_recall_appears_in_ephemeral_user_payload(self):
         chat = Chat("m")
         list(chat.ask_stream(
             "你还记得我上次说的项目吗",
             recall="[Relevant Memories]\n- x",
         ))
         messages = self._last_payload_messages()
-        # 倒数第二条 = recall 临时段，倒数第一条 = 本轮 user
         self.assertEqual(messages[-1]["role"], "user")
-        self.assertEqual(messages[-1]["content"], "你还记得我上次说的项目吗")
-        self.assertEqual(messages[-2]["role"], "system")
-        self.assertIn("[Relevant Memories]", messages[-2]["content"])
+        self.assertIn("[Relevant Memories]", messages[-1]["content"])
+        self.assertIn(
+            "[Current User Message]\n你还记得我上次说的项目吗",
+            messages[-1]["content"],
+        )
+        self.assertEqual(
+            [message["role"] for message in messages].count("system"),
+            1,
+        )
 
     def test_recall_does_not_pollute_messages_history(self):
         chat = Chat("m")
@@ -82,26 +87,23 @@ class RecallInjectionTests(unittest.TestCase):
             if message["role"] == "system":
                 self.assertNotIn("[Relevant Memories]", message["content"])
 
-    def test_recall_sits_after_history_before_user(self):
+    def test_recall_keeps_history_roles_compatible_with_chat_template(self):
         chat = Chat("m")
         list(chat.ask_stream("first", recall=""))
         list(chat.ask_stream("second", recall="[Relevant Memories]\n- y"))
         messages = self._last_payload_messages()
-        # system, user(first), assistant(first), system(recall), user(second)
         roles = [m["role"] for m in messages]
         self.assertEqual(
             roles,
-            ["system", "user", "assistant", "system", "user"],
+            ["system", "user", "assistant", "user"],
         )
         recall_index = next(
             i
             for i, m in enumerate(messages)
             if "[Relevant Memories]" in m.get("content", "")
         )
-        last_user_index = len(messages) - 1
-        self.assertLess(recall_index, last_user_index)
+        self.assertEqual(recall_index, len(messages) - 1)
 
 
 if __name__ == "__main__":
     unittest.main()
-

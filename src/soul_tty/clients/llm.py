@@ -9,6 +9,7 @@
 """
 
 import json
+import logging
 import re
 import threading
 import time
@@ -467,11 +468,12 @@ class Chat:
     ) -> Iterator[str]:
         """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。
 
-        `recall` 是本轮临时检索到的 [Relevant Memories] 段。临时插在
-        最后一条 user 消息之前：这样：
+        `recall` 是本轮临时检索到的 [Relevant Memories] 段。临时合并进
+        最后一条 user 消息：这样：
         - 不进 system prompt：保留 prompt KV cache 前缀
         - 不进 self.messages：避免随 MAX_HISTORY 滚动污染长上下文
-        - 不变 KV cache 稳定前缀：只重算末尾两条
+        - 不产生第二条 system message：兼容要求 system 只能位于开头的模板
+        - 不变 KV cache 稳定前缀：只重算末尾一条
 
         `response_instruction` 是 Agency 针对本轮的表达策略，同样只进入本次
         request，不写入 `self.messages`。
@@ -490,13 +492,12 @@ class Chat:
         messages = history
         temporary_context = [item for item in (recall, response_instruction) if item]
         if temporary_context:
+            contextual_user_text = "\n\n".join(
+                (*temporary_context, f"[Current User Message]\n{text}")
+            )
             messages = [
                 *history[:-1],
-                *(
-                    {"role": "system", "content": item}
-                    for item in temporary_context
-                ),
-                history[-1],
+                {"role": "user", "content": contextual_user_text},
             ]
         endpoint = config.PRIVATE_LLM_URL if private else config.LLM_URL
         request_model = (
@@ -538,6 +539,18 @@ class Chat:
                     f"{endpoint}/v1/chat/completions",
                     json=payload,
                 ) as resp:
+                    status_code = getattr(resp, "status_code", 200)
+                    if isinstance(status_code, int) and status_code >= 400:
+                        # 流式响应的错误正文默认不会进入 HTTPStatusError；主动读取并
+                        # 写日志，避免只看到一个无法定位原因的 500。
+                        error_body = resp.read().decode(errors="replace")[:1000]
+                        observability.event(
+                            "llm.response.error",
+                            level=logging.ERROR,
+                            status_code=status_code,
+                            response_body=error_body,
+                            endpoint=endpoint,
+                        )
                     resp.raise_for_status()
                     for line in resp.iter_lines():
                         if cancel is not None and cancel.is_set():

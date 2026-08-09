@@ -211,6 +211,12 @@ class AgencyConversationIntegrationTests(unittest.TestCase):
         self.assertTrue(
             any("Response Policy" in item["content"] for item in request_messages)
         )
+        self.assertEqual(
+            [item["role"] for item in request_messages].count("system"),
+            1,
+        )
+        self.assertEqual(request_messages[-1]["role"], "user")
+        self.assertIn("[Current User Message]\n今天还好吗", request_messages[-1]["content"])
         self.assertFalse(
             any("Response Policy" in item["content"] for item in chat.messages)
         )

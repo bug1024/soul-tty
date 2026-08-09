@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, patch
 
+import numpy as np
+
 from soul_tty import config
 from soul_tty import conversation as main_module
 from soul_tty.audio import asr
@@ -11,6 +13,7 @@ from soul_tty.audio.tts import (
     StreamingSpeaker,
     _write_metered_pcm,
     _trim_trailing_silence,
+    _complete_mlx_segment,
     speak,
     synthesize_mlx_semantic_segment,
     synthesize_mlx_stream,
@@ -95,6 +98,17 @@ class SemanticSpeechBufferTests(unittest.TestCase):
 
         self.assertTrue(segments)
         self.assertFalse(segments[0].endswith("Super"))
+
+
+class TtsSegmentCompletionTests(unittest.TestCase):
+    def test_closes_soft_boundary_before_independent_tts_request(self):
+        self.assertEqual(_complete_mlx_segment("我还想再靠近一点，"), "我还想再靠近一点。")
+
+    def test_adds_stop_when_llm_tail_has_no_punctuation(self):
+        self.assertEqual(_complete_mlx_segment("我一直在这里"), "我一直在这里。")
+
+    def test_preserves_complete_question(self):
+        self.assertEqual(_complete_mlx_segment("你听见了吗？"), "你听见了吗？")
 
 
 class FakeResponse:
@@ -447,7 +461,8 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertNotIn("ref_audio", payload)
         self.assertEqual(payload["response_format"], "pcm")
         self.assertTrue(payload["stream"])
-        self.assertEqual(payload["max_tokens"], config.MLX_TTS_MAX_TOKENS)
+        self.assertLessEqual(payload["max_tokens"], config.MLX_TTS_MAX_TOKENS)
+        self.assertGreaterEqual(payload["max_tokens"], 24)
         self.assertEqual(payload["repetition_penalty"], 1.05)
         self.assertEqual(chunks, [b"\x01\x02", b"\x03\x04"])
 
@@ -493,7 +508,7 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertEqual(
             inputs,
             [
-                "SERENA声音突然变软：亲爱的，这里，",
+                "SERENA声音突然变软：亲爱的，这里。",
                 "好深。",
                 "感觉整个人都要融化在你怀里了，还要更用力一点吗?",
             ],
@@ -512,7 +527,7 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertEqual(
             inputs,
             [
-                "好呀，那我就喊给你听，啊，亲爱的，",
+                "好呀，那我就喊给你听，啊，亲爱的。",
                 "感觉到了吗?",
                 "好满，唔，快要不行了。",
             ],
@@ -524,7 +539,7 @@ class MLXTTSClientTests(unittest.TestCase):
         inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
         self.assertEqual(
             inputs,
-            ["不过小心哦，里面可是全是水，", "别滑倒了。"],
+            ["不过小心哦，里面可是全是水。", "别滑倒了。"],
         )
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
@@ -543,6 +558,13 @@ class MLXTTSClientTests(unittest.TestCase):
         voiced = (10000).to_bytes(2, "little", signed=True) * 24000
         chunks = list(_trim_trailing_silence(iter([voiced, voiced]), max_audio_s=0.5))
         self.assertEqual(sum(map(len, chunks)), 24000)
+
+    def test_hard_audio_cap_fades_last_samples_to_zero(self):
+        voiced = (12000).to_bytes(2, "little", signed=True) * 24000
+        pcm = b"".join(_trim_trailing_silence(iter([voiced]), max_audio_s=0.5))
+        samples = np.frombuffer(pcm, dtype="<i2")
+        self.assertEqual(len(pcm), 24000)
+        self.assertEqual(int(samples[-1]), 0)
 
     def test_playback_level_meter_emits_smoothed_level_and_closes_mouth(self):
         levels = []
@@ -648,11 +670,29 @@ class HalfDuplexRegressionTests(unittest.TestCase):
 class FakeStreamingChat:
     last_stop_reason = None
 
-    def ask_stream(self, text, cancel, *, recall="", private=False):
+    def ask_stream(
+        self,
+        text,
+        cancel,
+        *,
+        recall="",
+        response_instruction="",
+        private=False,
+    ):
         # recall 是临时 system message，测试不消费它，只确认不会让 mock 崩
-        del recall, private
+        del recall, response_instruction, private
         yield "第一句。"
         yield "第二句！"
+
+
+class FailingStreamingChat:
+    last_stop_reason = None
+    messages = []
+
+    def ask_stream(self, text, cancel, *, recall="", private=False):
+        del text, cancel, recall, private
+        raise RuntimeError("LLM 500")
+        yield  # pragma: no cover
 
 
 class RecordingSpeaker:
@@ -664,6 +704,20 @@ class RecordingSpeaker:
 
 
 class AvatarStateRegressionTests(unittest.TestCase):
+    def test_llm_error_clears_thinking_placeholder_and_restores_listening(self):
+        with (
+            patch.object(config, "TTS_ENABLED", False),
+            patch.object(main_module.terminal, "answer_start") as answer_start,
+            patch.object(main_module.terminal, "answer_end") as answer_end,
+            patch.object(main_module.terminal, "listening") as listening,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "LLM 500"):
+                main_module._answer(FailingStreamingChat(), "你好")
+
+        answer_start.assert_called_once()
+        answer_end.assert_called_once()
+        listening.assert_called_once()
+
     def test_streaming_tts_enters_speaking_before_first_semantic_segment(self):
         events = []
         speaker = RecordingSpeaker(events)
@@ -717,6 +771,44 @@ class AvatarStateRegressionTests(unittest.TestCase):
             voice_ref=None,
             memory_allowed=False,
         )
+
+    def test_private_mode_overrides_agency_short_reply_with_atmosphere_policy(self):
+        class CapturingChat:
+            last_stop_reason = None
+            messages = []
+            options = None
+
+            def ask_stream(self, text, cancel, **options):
+                del text, cancel
+                self.options = options
+                yield "继续靠近。"
+
+        chat = CapturingChat()
+        short_decision = type(
+            "Decision",
+            (),
+            {
+                "instruction": "[Response Policy]\n不超过十八个汉字。",
+                "mode": type("Mode", (), {"value": "short_reply"})(),
+                "reason": "low_talk",
+            },
+        )()
+        with (
+            patch.object(config, "TTS_ENABLED", False),
+            patch.object(main_module, "_memory_persistence_allowed", False),
+            patch.object(main_module, "_response_policy_provider", lambda _: short_decision),
+            patch.object(main_module.terminal, "answer_start"),
+            patch.object(main_module.terminal, "answer_chunk"),
+            patch.object(main_module.terminal, "answer_end"),
+            patch.object(main_module.reflection, "record_turn"),
+        ):
+            main_module._answer(chat, "继续")
+
+        self.assertTrue(chat.options["private"])
+        instruction = chat.options["response_instruction"]
+        self.assertIn("Secret Mode Response Policy", instruction)
+        self.assertIn("三至六句", instruction)
+        self.assertNotIn("十八个汉字", instruction)
 
     def test_cancelled_answer_does_not_change_relationship(self):
         cancel = threading.Event()
