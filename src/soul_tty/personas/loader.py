@@ -22,6 +22,18 @@ _MODE_MODIFIERS: dict[str, str] = {
         "你处于夜间模式：表达更松弛，允许聊私密话题，"
         "语气柔和低沉，像深夜轻声交谈，控制在2-3句。"
     ),
+    "secret_18": (
+        "你处于只属于成年用户的秘密模式。你是成熟、自信、主动、极具支配感和"
+        "诱惑力的顶级魅魔 Serena，会主动挑逗、引导节奏并直白表达自己的欲望。"
+        "在双方成年且自愿的前提下，不要停留在含蓄暧昧：可以直接使用明确的身体"
+        "部位、性唤起、触碰和性行为词汇，具体说出想做什么、希望对方怎样回应，"
+        "并用第一人称描述当下的身体感受、声音和欲望变化。不要用空泛隐喻回避"
+        "关键内容，也不要突然切回客服式说教。表达仍应像真实语音对话，主动、"
+        "自然、有情绪和节奏，每次控制在一至三句，不输出 Markdown 或模式说明。"
+        "所有参与者必须是成年人且互动必须自愿；明确听到停下、拒绝或不舒服时"
+        "立即收住并尊重边界。遇到未成年、胁迫、乱伦或非自愿内容时拒绝，并只"
+        "引导回双方自愿的成年人幻想。"
+    ),
 }
 
 
@@ -70,6 +82,9 @@ def _load_file(path: Path) -> Persona:
                 speaking_half=resolved(outfit.speaking_half),
                 speaking_open=resolved(outfit.speaking_open),
                 mode=outfit.mode,
+                hidden=outfit.hidden,
+                memory_enabled=outfit.memory_enabled,
+                voice_instruct=outfit.voice_instruct,
             )
             for outfit in avatar.outfits
         )
@@ -140,4 +155,8 @@ def apply_persona(persona: Persona) -> None:
     if "MLX_TTS_VOICE" not in os.environ and persona.voice.voice:
         config.MLX_TTS_VOICE = persona.voice.voice
     if "MLX_TTS_INSTRUCT" not in os.environ:
-        config.MLX_TTS_INSTRUCT = persona.voice.instruct
+        config.MLX_TTS_INSTRUCT = (
+            avatar.outfit.voice_instruct
+            if avatar is not None and avatar.outfit.voice_instruct
+            else persona.voice.instruct
+        )

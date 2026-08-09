@@ -64,7 +64,10 @@ class AvatarOutfit:
     speaking_closed: str = ""
     speaking_half: str = ""
     speaking_open: str = ""
-    mode: str = "companion"  # companion | focused | late_night
+    mode: str = "companion"  # companion | focused | late_night | secret_18
+    hidden: bool = False
+    memory_enabled: bool = True
+    voice_instruct: str = ""
 
     def for_state(self, state: str) -> str:
         value = getattr(self, state, "")
@@ -96,7 +99,9 @@ class Avatar:
         outfit_id = outfit_id.strip()
         available = {outfit.id for outfit in self.outfits}
         if outfit_id not in available:
-            choices = ", ".join(outfit.id for outfit in self.outfits)
+            choices = ", ".join(
+                outfit.id for outfit in self.outfits if not outfit.hidden
+            )
             raise ValueError(f"头像套装 {outfit_id} 不存在（可用: {choices}）")
         return replace(self, selected_outfit=outfit_id)
 
@@ -187,6 +192,11 @@ class Persona:
                         speaking_half=_text(outfit_data, "speaking_half"),
                         speaking_open=_text(outfit_data, "speaking_open"),
                         mode=_text(outfit_data, "mode", "companion"),
+                        hidden=bool(outfit_data.get("hidden", False)),
+                        memory_enabled=bool(
+                            outfit_data.get("memory_enabled", True)
+                        ),
+                        voice_instruct=_text(outfit_data, "voice_instruct"),
                     )
                 )
             selected_outfit = _text(

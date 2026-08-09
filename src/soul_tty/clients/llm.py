@@ -443,11 +443,18 @@ class Chat:
     def __init__(self, model: str):
         self.model = model
         self.messages = [{"role": "system", "content": config.SYSTEM_PROMPT}]
+        self._private_messages: list[dict[str, str]] | None = None
         self.last_stop_reason: str | None = None
 
     def update_system_prompt(self, prompt: str) -> None:
         """热更新 system prompt；不影响对话历史。"""
         self.messages[0] = {"role": "system", "content": prompt}
+        if self._private_messages is not None:
+            self._private_messages[0] = {"role": "system", "content": prompt}
+
+    def clear_private_history(self) -> None:
+        """退出私密模式时销毁隔离历史，之后绝不会被主代理请求携带。"""
+        self._private_messages = None
 
     def ask_stream(
         self,
@@ -456,6 +463,7 @@ class Chat:
         *,
         recall: str = "",
         response_instruction: str = "",
+        private: bool = False,
     ) -> Iterator[str]:
         """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。
 
@@ -472,20 +480,32 @@ class Chat:
         不附带任何专属 header。
         """
         self.last_stop_reason = None
-        self.messages.append({"role": "user", "content": text})
-        messages = self.messages
+        if private:
+            if self._private_messages is None:
+                self._private_messages = [dict(item) for item in self.messages]
+            history = self._private_messages
+        else:
+            history = self.messages
+        history.append({"role": "user", "content": text})
+        messages = history
         temporary_context = [item for item in (recall, response_instruction) if item]
         if temporary_context:
             messages = [
-                *self.messages[:-1],
+                *history[:-1],
                 *(
                     {"role": "system", "content": item}
                     for item in temporary_context
                 ),
-                self.messages[-1],
+                history[-1],
             ]
+        endpoint = config.PRIVATE_LLM_URL if private else config.LLM_URL
+        request_model = (
+            (config.PRIVATE_LLM_MODEL or self.model)
+            if private
+            else self.model
+        )
         payload = {
-            "model": self.model,
+            "model": request_model,
             "messages": messages,
             "stream": True,
             "temperature": config.LLM_TEMPERATURE,
@@ -504,8 +524,8 @@ class Chat:
         token_chunks = 0
         observability.event(
             "llm.request.start",
-            endpoint=config.LLM_URL,
-            model=self.model,
+            endpoint=endpoint,
+            model=request_model,
             message_count=len(messages),
             prompt_chars=sum(len(str(item.get("content", ""))) for item in messages),
             recall=bool(recall),
@@ -515,7 +535,7 @@ class Chat:
             with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
                 with client.stream(
                     "POST",
-                    f"{config.LLM_URL}/v1/chat/completions",
+                    f"{endpoint}/v1/chat/completions",
                     json=payload,
                 ) as resp:
                     resp.raise_for_status()
@@ -573,7 +593,7 @@ class Chat:
                 "llm.request.error",
                 "主 LLM 流式请求失败",
                 duration_ms=observability.elapsed_ms(request_started_at),
-                endpoint=config.LLM_URL,
+                endpoint=endpoint,
             )
             raise
         if pending.strip() and not (cancel is not None and cancel.is_set()):
@@ -591,21 +611,35 @@ class Chat:
         )
         if answer:
             # 被插话时保留已经说出的部分，下一轮上下文才与人真正听到的一致。
-            self.messages.append({"role": "assistant", "content": answer})
+            history.append({"role": "assistant", "content": answer})
         else:
-            self.messages.pop()  # 在首 token 前被取消，本轮不进历史
+            history.pop()  # 在首 token 前被取消，本轮不进历史
         # 裁剪历史:system + 最近 MAX_HISTORY 轮(每轮 2 条)
-        if len(self.messages) > 1 + config.MAX_HISTORY * 2:
-            self.messages = [self.messages[0]] + self.messages[-config.MAX_HISTORY * 2:]
+        if len(history) > 1 + config.MAX_HISTORY * 2:
+            trimmed = [history[0]] + history[-config.MAX_HISTORY * 2:]
+            if private:
+                self._private_messages = trimmed
+            else:
+                self.messages = trimmed
 
-    def record_silence(self, text: str) -> None:
+    def record_silence(self, text: str, *, private: bool = False) -> None:
         """把主动沉默作为真实对话结果记入短期上下文，但不发送 LLM 请求。"""
         self.last_stop_reason = "intentional_silence"
-        self.messages.extend(
+        if private:
+            if self._private_messages is None:
+                self._private_messages = [dict(item) for item in self.messages]
+            history = self._private_messages
+        else:
+            history = self.messages
+        history.extend(
             (
                 {"role": "user", "content": text},
                 {"role": "assistant", "content": "……"},
             )
         )
-        if len(self.messages) > 1 + config.MAX_HISTORY * 2:
-            self.messages = [self.messages[0]] + self.messages[-config.MAX_HISTORY * 2:]
+        if len(history) > 1 + config.MAX_HISTORY * 2:
+            trimmed = [history[0]] + history[-config.MAX_HISTORY * 2:]
+            if private:
+                self._private_messages = trimmed
+            else:
+                self.messages = trimmed

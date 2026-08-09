@@ -43,7 +43,22 @@ def _make_worker(
 
 
 class BufferRetentionTests(unittest.TestCase):
-    """queue 溢出不影响 memory buffer——buffer 是无条件的 append。"""
+    """queue 溢出不影响 memory buffer；私密轮次则必须在入口被排除。"""
+
+    def test_private_turn_never_enters_memory_buffer(self):
+        with TemporaryDirectory() as tmp:
+            worker = _make_worker(tmp)
+
+            accepted = worker.submit(
+                "私密内容",
+                "私密回答",
+                memory_allowed=False,
+            )
+
+            self.assertTrue(accepted)
+            self.assertEqual(list(worker._memory_buffer), [])
+            queued = worker.queue.get_nowait()
+            self.assertFalse(queued.memory_allowed)
 
     def test_buffer_keeps_all_submitted_turns_regardless_of_queue_size(self):
         with TemporaryDirectory() as tmp:

@@ -42,6 +42,12 @@ SHERPA_VAD_TRIGGER_MS = int(os.environ.get("SHERPA_VAD_TRIGGER_MS", "120"))
 LLM_URL = os.environ.get("LLM_URL", "http://127.0.0.1:8180").rstrip("/")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # 空 = 自动取 /v1/models 第一个
 
+# 私密会话绕过可能自动写记忆的主代理，默认直连本地 llama.cpp。
+PRIVATE_LLM_URL = os.environ.get(
+    "PRIVATE_LLM_URL", "http://127.0.0.1:8180"
+).rstrip("/")
+PRIVATE_LLM_MODEL = os.environ.get("PRIVATE_LLM_MODEL", "")
+
 # 辅助 LLM：每次启动只发一两个一次性请求，且都不进入正式对话历史：
 #   1. 启动欢迎语（短句）
 #   2. 换装动态台词（短句）

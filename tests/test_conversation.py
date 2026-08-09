@@ -235,6 +235,32 @@ class ChatCancellationTests(unittest.TestCase):
 
         self.assertEqual(main_url, "http://main-llm.test/v1/chat/completions")
 
+    @patch("soul_tty.clients.llm.httpx.Client", RepeatingClient)
+    def test_private_chat_bypasses_main_memory_proxy(self):
+        with (
+            patch.object(config, "LLM_URL", "http://memory-proxy.test"),
+            patch.object(config, "PRIVATE_LLM_URL", "http://direct-llm.test"),
+            patch.object(config, "PRIVATE_LLM_MODEL", "direct-model"),
+        ):
+            chat = Chat("proxy-model")
+            list(chat.ask_stream("private", private=True))
+            private_url = RepeatingClient.request[1]
+            payload = RepeatingClient.request[2]["json"]
+            public_history = list(chat.messages)
+            chat.clear_private_history()
+            list(chat.ask_stream("public"))
+            public_payload = RepeatingClient.request[2]["json"]
+
+        self.assertEqual(
+            private_url,
+            "http://direct-llm.test/v1/chat/completions",
+        )
+        self.assertEqual(payload["model"], "direct-model")
+        self.assertEqual(len(public_history), 1)
+        self.assertFalse(
+            any(item.get("content") == "private" for item in public_payload["messages"])
+        )
+
     @patch("soul_tty.clients.llm.httpx.Client", GreetingClient)
     def test_auxiliary_greeting_routes_to_aux_llm_url_independently(self):
         """辅助请求走 AUX_LLM_URL，与主 Chat 端点解耦。"""
@@ -622,9 +648,9 @@ class HalfDuplexRegressionTests(unittest.TestCase):
 class FakeStreamingChat:
     last_stop_reason = None
 
-    def ask_stream(self, text, cancel, *, recall=""):
+    def ask_stream(self, text, cancel, *, recall="", private=False):
         # recall 是临时 system message，测试不消费它，只确认不会让 mock 崩
-        del recall
+        del recall, private
         yield "第一句。"
         yield "第二句！"
 
@@ -673,6 +699,24 @@ class AvatarStateRegressionTests(unittest.TestCase):
 
         self.assertEqual(answer, "第一句。第二句！")
         record.assert_called_once_with("你好", answer, voice_ref=None)
+
+    def test_private_mode_marks_completed_turn_as_memory_forbidden(self):
+        with (
+            patch.object(config, "TTS_ENABLED", False),
+            patch.object(main_module, "_memory_persistence_allowed", False),
+            patch.object(main_module.terminal, "answer_start"),
+            patch.object(main_module.terminal, "answer_chunk"),
+            patch.object(main_module.terminal, "answer_end"),
+            patch.object(main_module.reflection, "record_turn") as record,
+        ):
+            answer = main_module._answer(FakeStreamingChat(), "只在这里说")
+
+        record.assert_called_once_with(
+            "只在这里说",
+            answer,
+            voice_ref=None,
+            memory_allowed=False,
+        )
 
     def test_cancelled_answer_does_not_change_relationship(self):
         cancel = threading.Event()

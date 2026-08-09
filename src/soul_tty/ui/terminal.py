@@ -136,15 +136,19 @@ class TerminalInput:
         on_scroll,
         on_toggle_details=None,
         on_cycle_mode=None,
+        on_secret_mode=None,
     ) -> None:
         self.on_scroll = on_scroll
         self.on_toggle_details = on_toggle_details
         self.on_cycle_mode = on_cycle_mode
+        self.on_secret_mode = on_secret_mode
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
         self.thread: threading.Thread | None = None
         self._pending_input = b""
+        self._secret_pending = b""
+        self._secret_pending_at = 0.0
 
     def start(self) -> None:
         if not sys.stdin.isatty() or not _console.is_terminal:
@@ -181,6 +185,17 @@ class TerminalInput:
         plain = cls._CSI_EVENT.sub(b"", data)
         return plain.count(b"0")
 
+    @classmethod
+    def secret_toggles(
+        cls,
+        data: bytes,
+        pending: bytes = b"",
+    ) -> tuple[int, bytes]:
+        """识别隐藏 `1`→`8` 序列；鼠标/CSI 坐标永远不参与匹配。"""
+        plain = cls._CSI_EVENT.sub(b"", data)
+        combined = pending + plain
+        return combined.count(b"18"), (b"1" if combined.endswith(b"1") else b"")
+
     @staticmethod
     def split_incomplete_escape(data: bytes) -> tuple[bytes, bytes]:
         """保留末尾未收完的 CSI 序列，避免其中的坐标被当成按键。"""
@@ -213,6 +228,21 @@ class TerminalInput:
                 if self.on_cycle_mode is not None:
                     for _ in range(self.outfit_toggles(data)):
                         self.on_cycle_mode()
+                if self.on_secret_mode is not None:
+                    if (
+                        self._secret_pending
+                        and time.monotonic() - self._secret_pending_at > 1.5
+                    ):
+                        self._secret_pending = b""
+                    toggles, self._secret_pending = self.secret_toggles(
+                        data,
+                        self._secret_pending,
+                    )
+                    self._secret_pending_at = (
+                        time.monotonic() if self._secret_pending else 0.0
+                    )
+                    for _ in range(toggles):
+                        self.on_secret_mode()
             except OSError:
                 return
 
@@ -307,12 +337,14 @@ class Dashboard:
         self._outfit_switch_index = 0
         self._outfit_greeting_serial = 0
         self._mode_switch_index = 0
+        self._secret_return_outfit = "default"
         self._outfit_greeting_timer: threading.Timer | None = None
         self._outfit_greeting_generator = _outfit_greeting_generator
         self.input = TerminalInput(
             self.scroll,
             self.toggle_details,
             self.cycle_mode,
+            self.toggle_secret_mode,
         )
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
@@ -330,6 +362,10 @@ class Dashboard:
             if persona.appearance.avatar
             else "companion"
         )
+        if persona.appearance.avatar is not None:
+            conversation.set_memory_persistence_allowed(
+                persona.appearance.avatar.outfit.memory_enabled
+            )
         self.live = Live(
             self.render(),
             console=_console,
@@ -412,31 +448,9 @@ class Dashboard:
             self._outfit_greeting_timer = timer
         timer.start()
 
-    def cycle_mode(self) -> None:
-        """按 companion → focused → late_night 循环切换行为模式，同时切换头像。"""
+    def _switch_outfit(self, outfit_id: str) -> None:
         with self._lock:
-            avatar = self.persona.appearance.avatar
-            if avatar is None:
-                return
-            # 当前 outfit 在固定顺序中的位置
-            current_outfit = avatar.outfit
-            try:
-                idx = _MODE_ORDER.index(current_outfit.mode)
-            except ValueError:
-                idx = -1
-            next_mode = _MODE_ORDER[(idx + 1) % len(_MODE_ORDER)]
-
-            # 找到第一套 mode 匹配 next_mode 的 outfit，切换过去
-            next_outfit_id = None
-            for o in avatar.outfits:
-                if o.mode == next_mode:
-                    next_outfit_id = o.id
-                    break
-
-            if next_outfit_id is None:
-                return  # 没有匹配 outfit，理论上不会发生
-
-            persona = self.persona.wearing(next_outfit_id)
+            persona = self.persona.wearing(outfit_id)
             avatars, mouths = self._load_avatar_set(persona)
 
             if self._native_frames_ready:
@@ -456,6 +470,9 @@ class Dashboard:
 
             outfit = persona.appearance.avatar.outfit
             self.mode = outfit.mode
+            conversation.set_memory_persistence_allowed(
+                outfit.memory_enabled
+            )
 
             # 重新 apply_persona 更新 config.SYSTEM_PROMPT（包含新 mode 修饰符）
             from ..personas import apply_persona
@@ -466,6 +483,8 @@ class Dashboard:
             chat = conversation._active_chat
             if chat is not None:
                 chat.update_system_prompt(config.SYSTEM_PROMPT)
+                if outfit.memory_enabled:
+                    chat.clear_private_history()
 
             self._mark_voice_activity_locked(time.monotonic())
             greeting = self._local_outfit_greeting(outfit)
@@ -477,6 +496,51 @@ class Dashboard:
             self.refresh(paint_avatar=True)
 
         self._schedule_outfit_greeting(outfit, serial)
+
+    def cycle_mode(self) -> None:
+        """只在三个公开模式间循环；秘密模式不属于普通换装列表。"""
+        with self._lock:
+            avatar = self.persona.appearance.avatar
+            if avatar is None:
+                return
+            current_outfit = avatar.outfit
+            if current_outfit.hidden:
+                next_outfit_id = self._secret_return_outfit
+            else:
+                try:
+                    idx = _MODE_ORDER.index(current_outfit.mode)
+                except ValueError:
+                    idx = -1
+                next_mode = _MODE_ORDER[(idx + 1) % len(_MODE_ORDER)]
+                next_outfit_id = next(
+                    (
+                        outfit.id
+                        for outfit in avatar.outfits
+                        if outfit.mode == next_mode and not outfit.hidden
+                    ),
+                    "",
+                )
+        if next_outfit_id:
+            self._switch_outfit(next_outfit_id)
+
+    def toggle_secret_mode(self) -> None:
+        """隐藏序列触发；再次输入同一序列恢复进入前的公开套装。"""
+        with self._lock:
+            avatar = self.persona.appearance.avatar
+            if avatar is None:
+                return
+            current = avatar.outfit
+            if current.hidden:
+                target = self._secret_return_outfit
+            else:
+                target = next(
+                    (outfit.id for outfit in avatar.outfits if outfit.hidden),
+                    "",
+                )
+                if target:
+                    self._secret_return_outfit = current.id
+        if target:
+            self._switch_outfit(target)
 
     def cycle_outfit(self) -> None:
         """兼容旧调用名称；换装现在同时切换对应行为模式。"""

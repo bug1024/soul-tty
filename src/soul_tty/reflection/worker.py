@@ -121,18 +121,25 @@ class ReflectionWorker:
         user_text: str,
         agent_text: str,
         voice_ref: int | None = None,
+        *,
+        memory_allowed: bool = True,
     ) -> bool:
         if not user_text.strip() or not agent_text.strip() or self._stop.is_set():
             return False
         turn = CompletedTurn(
-            user_text.strip(), agent_text.strip(), voice_ref=voice_ref
+            user_text.strip(),
+            agent_text.strip(),
+            voice_ref=voice_ref,
+            memory_allowed=memory_allowed,
         )
         with self._lock:
             # 从完整回答结束开始等待空闲窗口，避免立刻与下一轮主对话争抢模型。
             self._last_activity = time.monotonic()
-            # 记忆 buffer：无条件追加；deque 在 maxlen 满了之后静默丢最旧
-            self._memory_seq += 1
-            self._memory_buffer.append((self._memory_seq, turn))
+            # 私密模式的 turn 仍可影响即时 Emotion/Bond，但永远不进入长期
+            # Memory buffer，后续 extractor 因此看不到其原文。
+            if memory_allowed:
+                self._memory_seq += 1
+                self._memory_buffer.append((self._memory_seq, turn))
         try:
             self.queue.put_nowait(turn)
             return True
@@ -403,10 +410,17 @@ def record_turn(
     user_text: str,
     agent_text: str,
     voice_ref: int | None = None,
+    *,
+    memory_allowed: bool = True,
 ) -> bool:
     if _service is None:
         return False
-    return _service.submit(user_text, agent_text, voice_ref=voice_ref)
+    return _service.submit(
+        user_text,
+        agent_text,
+        voice_ref=voice_ref,
+        memory_allowed=memory_allowed,
+    )
 
 
 def user_activity() -> None:

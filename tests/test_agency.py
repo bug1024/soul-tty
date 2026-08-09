@@ -221,7 +221,8 @@ class AgencyConversationIntegrationTests(unittest.TestCase):
             messages = []
             recorded = []
 
-            def record_silence(self, text):
+            def record_silence(self, text, *, private=False):
+                del private
                 self.recorded.append(text)
                 self.last_stop_reason = "intentional_silence"
 

@@ -31,7 +31,7 @@ class PersonaTests(unittest.TestCase):
         persona = load_persona("serena")
         self.assertEqual(
             [outfit.id for outfit in persona.appearance.avatar.outfits],
-            ["default", "late-night", "work"],
+            ["default", "late-night", "work", "secret-18"],
         )
 
         work = persona.wearing("work")
@@ -42,6 +42,11 @@ class PersonaTests(unittest.TestCase):
         self.assertIn("/work/", work.appearance.avatar.for_state("speaking_half"))
         self.assertIn("编程", work.appearance.avatar.outfit.description)
         self.assertTrue(work.appearance.avatar.outfit.switch_greetings)
+
+        secret = persona.wearing("secret-18")
+        self.assertTrue(secret.appearance.avatar.outfit.hidden)
+        self.assertFalse(secret.appearance.avatar.outfit.memory_enabled)
+        self.assertIn("/secret-18/", secret.appearance.avatar.for_state("idle"))
 
     def test_rejects_unknown_outfit(self):
         with self.assertRaisesRegex(
@@ -67,6 +72,18 @@ class PersonaTests(unittest.TestCase):
             self.assertIn("你处于陪伴模式", config.SYSTEM_PROMPT)
             self.assertEqual(config.TTS_BACKEND, "mlx")
             self.assertEqual(config.MLX_TTS_VOICE, "Serena")
+
+    def test_secret_mode_applies_private_persona_and_voice(self):
+        persona = load_persona("serena").wearing("secret-18")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(config, "MLX_TTS_INSTRUCT", "old"),
+        ):
+            apply_persona(persona)
+
+            self.assertIn("顶级魅魔", config.SYSTEM_PROMPT)
+            self.assertIn("成年", config.SYSTEM_PROMPT)
+            self.assertIn("成熟魅惑", config.MLX_TTS_INSTRUCT)
 
     def test_environment_keeps_priority_over_persona(self):
         persona = load_persona("serena")

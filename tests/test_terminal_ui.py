@@ -523,6 +523,16 @@ class TerminalUITests(unittest.TestCase):
         self.assertEqual(terminal.TerminalInput.detail_toggles(b"\t\t"), 2)
         self.assertEqual(terminal.TerminalInput.outfit_toggles(data), 0)
         self.assertEqual(terminal.TerminalInput.outfit_toggles(b"00"), 2)
+        self.assertEqual(
+            terminal.TerminalInput.secret_toggles(b"18"),
+            (1, b""),
+        )
+        count, pending = terminal.TerminalInput.secret_toggles(b"1")
+        self.assertEqual((count, pending), (0, b"1"))
+        self.assertEqual(
+            terminal.TerminalInput.secret_toggles(b"8", pending),
+            (1, b""),
+        )
 
     def test_mouse_click_coordinates_never_trigger_outfit_switch(self):
         click = b"\x1b[<0;120;30M\x1b[<0;120;30m"
@@ -530,6 +540,12 @@ class TerminalUITests(unittest.TestCase):
 
         self.assertEqual(terminal.TerminalInput.outfit_toggles(click), 0)
         self.assertEqual(terminal.TerminalInput.outfit_toggles(right_click), 0)
+        self.assertEqual(
+            terminal.TerminalInput.secret_toggles(
+                b"\x1b[<0;18;30M\x1b[<0;18;30m"
+            )[0],
+            0,
+        )
 
     def test_split_mouse_escape_is_buffered_until_complete(self):
         complete, pending = terminal.TerminalInput.split_incomplete_escape(
@@ -578,6 +594,40 @@ class TerminalUITests(unittest.TestCase):
             dashboard._next_idle_emotion_at,
             dashboard._last_voice_activity,
         )
+
+    def test_secret_sequence_mode_is_hidden_and_disables_memory(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        memory_flags = []
+
+        def render(persona, state, terminal_enabled, renderer_override=None):
+            return terminal.avatar_ui.AvatarRender(symbols=terminal.Text(state))
+
+        with (
+            patch.object(terminal, "_console", console),
+            patch.object(terminal.avatar_ui, "render_avatar", side_effect=render),
+            patch.object(
+                terminal.conversation,
+                "set_memory_persistence_allowed",
+                side_effect=memory_flags.append,
+            ),
+        ):
+            dashboard = terminal.Dashboard(persona, runtime)
+            dashboard.live.update = lambda *args, **kwargs: None
+            dashboard.toggle_secret_mode()
+            self.assertEqual(
+                dashboard.persona.appearance.avatar.selected_outfit,
+                "secret-18",
+            )
+            dashboard.toggle_secret_mode()
+
+        self.assertEqual(
+            dashboard.persona.appearance.avatar.selected_outfit,
+            "default",
+        )
+        self.assertEqual(memory_flags[-2:], [False, True])
 
     def test_dashboard_details_toggle_is_explicit_and_reversible(self):
         output = io.StringIO()

@@ -51,6 +51,8 @@ class CompletedTurn:
     voice_ref: int | None = None
     # coalesce 后：[(local_turn_index, voice_ref)]，与合并后文本编号对应
     voice_indexed: tuple[tuple[int, int], ...] = ()
+    # False 表示本轮只参与即时关系/情绪评估，不进入长期 Memory buffer。
+    memory_allowed: bool = True
 
 
 @dataclass(frozen=True)
@@ -309,4 +311,3 @@ def apply_evaluation(
 
 
 EvaluationCallback = Callable[[dict[str, Any]], None]
-

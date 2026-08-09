@@ -93,6 +93,8 @@ def _main() -> None:
             selected = args.outfit or avatar.selected_outfit
             avatar.wearing(selected)
             for outfit in avatar.outfits:
+                if outfit.hidden:
+                    continue
                 marker = " (当前)" if outfit.id == selected else ""
                 print(f"{outfit.id:<12} {outfit.label}{marker}")
             return

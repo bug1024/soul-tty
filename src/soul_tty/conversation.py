@@ -30,6 +30,9 @@ _recall_provider: Callable[[str], str] | None = None
 _voice_submit_provider: Callable[[bytes], int | None] | None = None
 # Agency：每轮在 Memory / LLM 之前决定回应方式；本地常数时间，不走网络。
 _response_policy_provider: Callable[[str], object] | None = None
+# 当前模式是否允许把完成轮次送入长期 Memory。由 UI 换装时原子切换；
+# 每轮回答开始时取快照，避免回答途中切换模式造成隐私竞态。
+_memory_persistence_allowed = True
 
 
 def set_emotion_instruct_provider(
@@ -63,6 +66,11 @@ def set_response_policy_provider(
     """注册 Agency ResponsePolicy；None 表示保持传统的有问必答。"""
     global _response_policy_provider
     _response_policy_provider = provider
+
+
+def set_memory_persistence_allowed(allowed: bool) -> None:
+    global _memory_persistence_allowed
+    _memory_persistence_allowed = bool(allowed)
 
 
 def _current_tts_instruct() -> str:
@@ -321,6 +329,7 @@ def _print_answer(
     *,
     recall: str = "",
     response_instruction: str = "",
+    private: bool = False,
     on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
     """流式打印 LLM 回答；给了 speaker 就按语义段送入 TTS 流水线。
@@ -365,6 +374,8 @@ def _print_answer(
     # 才使用新增参数；传统 ANSWER 路径的调用形状保持不变。
     if response_instruction:
         stream_options["response_instruction"] = response_instruction
+    if private:
+        stream_options["private"] = True
     for token in chat.ask_stream(text, cancel, **stream_options):
         terminal.answer_chunk(token)
         parts.append(token)
@@ -391,6 +402,7 @@ def _answer_impl(
     on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
     cancel = cancel or threading.Event()
+    memory_allowed = _memory_persistence_allowed
     policy_started_at = time.perf_counter()
     decision = _current_response_decision(text)
     response_instruction = getattr(decision, "instruction", "") if decision else ""
@@ -402,7 +414,7 @@ def _answer_impl(
         reason=getattr(decision, "reason", "disabled") if decision else "disabled",
     )
     if mode == "silence":
-        chat.record_silence(text)
+        chat.record_silence(text, private=not memory_allowed)
         terminal.intentional_silence()
         return ""
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
@@ -426,12 +438,14 @@ def _answer_impl(
             answer = _print_answer(
                 chat, text, speaker, cancel, on_token, recall=recall,
                 response_instruction=response_instruction,
+                private=not memory_allowed,
                 on_speech_queued=on_speech_queued,
             )
     else:
         answer = _print_answer(
             chat, text, cancel=cancel, on_token=on_token, recall=recall,
             response_instruction=response_instruction,
+            private=not memory_allowed,
             on_speech_queued=on_speech_queued,
         )
         if config.TTS_ENABLED and answer and not cancel.is_set():
@@ -451,7 +465,10 @@ def _answer_impl(
                     )
                     terminal.notice(f"TTS 失败: {e}")
     if answer and not cancel.is_set():
-        reflection.record_turn(text, answer, voice_ref=voice_ref)
+        reflection_options = {"voice_ref": voice_ref}
+        if not memory_allowed:
+            reflection_options["memory_allowed"] = False
+        reflection.record_turn(text, answer, **reflection_options)
     return answer
 
 
