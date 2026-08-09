@@ -28,6 +28,7 @@ final class Helper {
     var engine: AudioEngine?
     var stats = Stats()
     let lock = NSLock()
+    let socketWriteLock = NSLock()
 
     // capture queue + writer thread(修复:audio callback 不应直接写 socket)
     private let captureQueue: DispatchQueue
@@ -113,7 +114,8 @@ final class Helper {
             pcm = captureBuffer.removeFirst()
             captureBufferLock.unlock()
 
-            // blocking writeAll
+            // blocking writeAll(串行化:所有 socket 写走同一把锁)
+            socketWriteLock.lock()
             var sent = 0
             let data = pcm
             while sent < data.count {
@@ -123,12 +125,13 @@ final class Helper {
                 }
                 if n < 0 {
                     if errno == EINTR { continue }
-                    // 写入失败:退出 writer 线程
+                    socketWriteLock.unlock()
                     fputs("[macos-voice-io] capture writer write error: \(String(cString: strerror(errno)))\n", stderr)
                     return
                 }
                 sent += n
             }
+            socketWriteLock.unlock()
             lock.lock()
             stats.captureFrames += 1
             lock.unlock()
@@ -160,7 +163,9 @@ final class Helper {
                 fputs("[macos-voice-io] STOP received\n", stderr)
                 return
             case .ping:
+                socketWriteLock.lock()
                 try Message(type: .pong, payload: Data()).write(to: clientFd)
+                socketWriteLock.unlock()
                 stats.pingCount += 1
             case .playbackPCM:
                 try handlePlayback(msg.payload)
@@ -268,15 +273,19 @@ final class Helper {
     /// 当前 commit 仅实现播放 / capture,所以 SET_GAIN 不解析;留空函数。
     func sendError(_ text: String) throws {
         let msg = Message(type: .error, payload: Data(text.utf8))
+        socketWriteLock.lock()
         try msg.write(to: clientFd)
+        socketWriteLock.unlock()
     }
 
     func sendPlaybackDrained() {
         let msg = Message(type: .playbackDrained, payload: Data()).encode()
+        socketWriteLock.lock()
         let _ = msg.withUnsafeBytes { raw -> Int in
             guard let base = raw.baseAddress else { return 0 }
             return send(clientFd, base, msg.count, 0)
         }
+        socketWriteLock.unlock()
     }
 }
 

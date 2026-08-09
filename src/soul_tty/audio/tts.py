@@ -34,7 +34,7 @@ _PLAYBACK_LEVEL_FRAME_MS = 50
 # 播放线性增益（commit 02 引入）。module 级单值 + lock 让
 # set_playback_gain 跨线程安全；播放线程在 _write_metered_pcm 内
 # 读一次就锁定整个 frame 的增益，避免逐 sample 抖动。
-_PLAYBACK_GAIN: float = 1.0
+_PLAYBACK_GAIN: float = config.TTS_PLAYBACK_GAIN
 _PLAYBACK_GAIN_LOCK = threading.Lock()
 
 
@@ -56,6 +56,23 @@ def get_playback_gain() -> float:
     """读取当前 TTS 播放增益（默认 1.0）。"""
     with _PLAYBACK_GAIN_LOCK:
         return _PLAYBACK_GAIN
+
+
+def apply_playback_gain(pcm: bytes) -> bytes:
+    """对 int16 PCM 应用当前播放增益。
+
+    与 ``_write_metered_pcm`` 内的增益逻辑一致,但返回处理后的 bytes,
+    不写 stream。供 AudioIO 播放路径使用。
+    """
+    gain = get_playback_gain()
+    if not pcm or gain == 1.0:
+        return pcm
+    usable = len(pcm) - len(pcm) % 2
+    if usable == 0:
+        return pcm
+    samples = np.frombuffer(pcm[:usable], dtype="<i2").astype(np.float32)
+    samples = np.clip(samples * gain, -32768, 32767).astype("<i2")
+    return samples.tobytes() + pcm[usable:]
 
 
 # commit 07+ 修:把 TTS 播放也接进 AudioIO,让 macos_voice 后端的
@@ -347,6 +364,9 @@ def speak(
 
     与按句流水线相比,整段送合成能保留跨句韵律,听感更连贯流畅。
     `instruct` 同 synthesize_stream：空串时回退 persona 默认。
+
+    commit 07+ fix:优先走 AudioIO(让 macos_voice 后端拿到 playback
+    reference,完整 AEC)。无 AudioIO 时 fallback 到 sd.RawOutputStream。
     """
     if config.TTS_BACKEND == "macos":
         if on_audio_level is not None:
@@ -357,16 +377,33 @@ def speak(
             if on_audio_level is not None:
                 on_audio_level(0.0)
         return
+
+    audio_io = get_audio_io()
     meter = PlaybackLevelMeter(on_audio_level)
-    with sd.RawOutputStream(
-        samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
-    ) as stream:
-        try:
+    try:
+        if audio_io is not None:
+            # commit 07+ fix:走 AudioIO,让 macos_voice/AVAudioEngine
+            # 拿到 playback reference,完整 AEC
+            for pcm in synthesize_stream(text, cancel, instruct=instruct):
+                if cancel is not None and cancel.is_set():
+                    audio_io.flush_playback()
+                    return
+                if pcm:
+                    pcm = apply_playback_gain(pcm)
+                    meter.update(pcm)
+                    audio_io.write_playback(pcm, config.TTS_SAMPLE_RATE)
+            # 等扬声器真正播完(最长 15s)
+            audio_io.wait_playback_drained(timeout=15.0)
+            return
+        # fallback:无 AudioIO 时走 sd.RawOutputStream
+        with sd.RawOutputStream(
+            samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
+        ) as stream:
             for pcm in synthesize_stream(text, cancel, instruct=instruct):
                 if pcm:
                     _write_metered_pcm(stream, pcm, meter)
-        finally:
-            meter.close()
+    finally:
+        meter.close()
 
 
 def _speak_macos(text: str, cancel: threading.Event | None = None) -> None:

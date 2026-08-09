@@ -73,6 +73,7 @@ final class AudioEngine {
     // 播放生命周期追踪(commit 07+ fix)
     private var pendingPlaybackBuffers = 0
     private let pendingPlaybackLock = NSLock()
+    private var playbackGeneration: UInt64 = 0
     var onPlaybackDrained: (() -> Void)?
 
     init() throws {
@@ -263,11 +264,18 @@ final class AudioEngine {
         let engineBuffer = try Resampler.resample(buffer: buffer, to: playbackFormat)
         pendingPlaybackLock.lock()
         pendingPlaybackBuffers += 1
+        let genAtSchedule = playbackGeneration
         let tag = pendingPlaybackBuffers
         pendingPlaybackLock.unlock()
-        playerNode.scheduleBuffer(engineBuffer, at: nil, options: []) { [weak self] in
+        playerNode.scheduleBuffer(engineBuffer, at: nil, options: [],
+                                  completionCallbackType: .dataPlayedBack) { [weak self] _ in
             guard let self = self else { return }
             self.pendingPlaybackLock.lock()
+            // 如果 flush 增加了 generation,这个 buffer 已无效
+            if self.playbackGeneration != genAtSchedule {
+                self.pendingPlaybackLock.unlock()
+                return
+            }
             self.pendingPlaybackBuffers -= 1
             let left = self.pendingPlaybackBuffers
             self.pendingPlaybackLock.unlock()
@@ -284,9 +292,10 @@ final class AudioEngine {
         playerNode.reset()
         pendingPlaybackLock.lock()
         pendingPlaybackBuffers = 0
+        playbackGeneration += 1  // 使所有已调度 callback 无效
         pendingPlaybackLock.unlock()
         playerNode.play()
-        fputs("[AudioEngine] playback flushed\n", stderr)
+        fputs("[AudioEngine] playback flushed (gen=\(playbackGeneration))\n", stderr)
     }
 
     /// 0.0 = 静音,1.0 = 原始音量,>1.0 可能爆音(系统会 clip)。

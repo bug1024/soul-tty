@@ -171,19 +171,24 @@ class FloorManager:
         副作用:真正决定打断时,state 从 AGENT_SPEAKING → INTERRUPTED。
         backchannel:如果当前 AGENT_SPEAKING 且文本是 backchannel,
         不打断但记下来(供 agent 下一轮参考)。
-        回声过滤:heard 与 agent 已播放文本相似度 ≥ 阈值 → 不打断。
+        回声过滤:第一优先级——先判断回声,再判断 state。
         """
         with self._lock:
-            if self._state != FloorState.AGENT_SPEAKING:
-                return False
             if not text:
                 return False
+
+            # commit 07+ fix:回声判断第一优先级,不依赖 state
             spoken = self._effective_agent_text()
-            if _is_probable_echo(text, spoken):
+            if spoken and _is_probable_echo(text, spoken, self._echo_similarity):
                 return False
+
+            if self._state != FloorState.AGENT_SPEAKING:
+                return False
+
             if self._backchannel_enabled and is_backchannel(text):
                 self._pending_backchannel = text.strip()
                 return False
+
             self._state = FloorState.INTERRUPTED
             return True
 
@@ -191,24 +196,25 @@ class FloorManager:
         """DuplexListener FINAL 时调。返回分类结果(不再只返回 bool)。
 
         修复(commit 07+):
-        - 回声 final → ECHO,不改变 state/agent_text
+        - 回声判断不依赖 ``AGENT_SPEAKING`` state(grace period 也生效)
+        - 回声 final → ECHO,不改 state/不清 agent_text
         - backchannel → BACKCHANNEL
         - 真打断 → INTERRUPT(如果之前已 INTERRUPTED)或 USER
-        - 关键区别:ECHO 不会清空 agent_text/state,避免后续回声被误判
         """
         cleaned = text.strip() if text else ""
         with self._lock:
+            # commit 07+ fix:回声判断第一优先级,不依赖 agent_active
+            spoken = self._effective_agent_text()
+            if cleaned and spoken and _is_probable_echo(cleaned, spoken, self._echo_similarity):
+                # 如果 grace period 导致 IDLE→USER_SPEAKING,恢复 IDLE
+                if self._state == FloorState.USER_SPEAKING:
+                    self._state = FloorState.IDLE
+                return UserFinalDisposition.ECHO
+
             agent_active = self._state in (
                 FloorState.AGENT_SPEAKING,
                 FloorState.INTERRUPTED,
             )
-
-            # 1) Agent 仍在说,且这条 final 是回声
-            if agent_active and cleaned and self._effective_agent_text():
-                spoken = self._effective_agent_text()
-                if _is_probable_echo(cleaned, spoken):
-                    # 不改 state,不清 agent_text
-                    return UserFinalDisposition.ECHO
 
             # 2) backchannel
             if (
@@ -217,7 +223,6 @@ class FloorManager:
                 and is_backchannel(cleaned)
             ):
                 self._pending_backchannel = cleaned
-                # 真 backchannel 在 final 阶段也不改 state(agent 继续说话)
                 return UserFinalDisposition.BACKCHANNEL
 
             # 3) 真插话:partial 阶段没来得及触发,但 final 到达时仍 AGENT_SPEAKING
@@ -234,7 +239,6 @@ class FloorManager:
                     except Exception:
                         pass
 
-            # 真插话 final 清掉 backchannel
             if cleaned:
                 self._pending_backchannel = None
 

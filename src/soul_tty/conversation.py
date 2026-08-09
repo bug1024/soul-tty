@@ -179,6 +179,10 @@ def _answer(
             on_speech_queued=on_speech_queued,
         )
         if config.TTS_ENABLED and answer and not cancel.is_set():
+            # commit 07+ fix:whole-answer 也调 on_speech_queued,
+            # 让 floor.agent_text 有回声参考
+            if on_speech_queued is not None:
+                on_speech_queued(answer)
             try:
                 terminal.speaking()
                 tts.speak(answer, cancel, terminal.audio_level, instruct=instruct)
@@ -599,7 +603,7 @@ def _spawn_answer(
             # commit 07+ fix:等到扬声器真正播完再 agent_end
             if audio_io is not None and not state.cancel.is_set():
                 try:
-                    audio_io.wait_playback_drained(timeout=2.0)
+                    audio_io.wait_playback_drained(timeout=15.0)
                 except Exception:
                     pass
             if floor is not None:
