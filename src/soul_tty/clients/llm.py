@@ -188,6 +188,9 @@ def generate_greeting(
     relationship_tier: str = "",
     repeat_launch: bool = False,
     special: bool = False,
+    presence_scene: str = "",
+    presence_state: str = "",
+    presence_description: str = "",
 ) -> str | None:
     """生成不进入对话历史的短欢迎语；失败时 UI 继续使用本地时间兜底。"""
     payload = {
@@ -207,9 +210,12 @@ def generate_greeting(
                 "content": (
                     f"现在是{period}，你是{display_name}，"
                     f"羁绊阶段是{relationship_tier or '未建立'}，"
+                    f"当前场景是{presence_scene or '普通在线'}，"
+                    f"陪伴状态是{presence_state or '安静陪伴'}，"
+                    f"状态描述是{presence_description or '似乎并不急着说话'}，"
                     f"短时间重复启动={'是' if repeat_launch else '否'}，"
                     f"低频特殊开场={'是' if special else '否'}。"
-                    "请让熟悉程度、当前时段和启动节奏自然影响语气；"
+                    "请让熟悉程度、当前时段、陪伴状态和启动节奏自然影响语气；"
                     "特殊开场为是时可以更有个性，但仍要克制。只输出欢迎语。"
                 ),
             },

@@ -534,6 +534,7 @@ def _main() -> None:
         def refresh_greeting() -> None:
             started_at = time.perf_counter()
             try:
+                welcome = terminal.welcome_context()
                 greeting = llm.generate_greeting(
                     aux_model,
                     persona.display_name,
@@ -543,6 +544,9 @@ def _main() -> None:
                     ),
                     repeat_launch=launch_context.repeat_launch,
                     special=launch_context.special_greeting,
+                    presence_scene=welcome.scene if welcome else "",
+                    presence_state=welcome.state if welcome else "",
+                    presence_description=welcome.description if welcome else "",
                 )
             except Exception:
                 observability.exception(

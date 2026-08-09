@@ -42,6 +42,7 @@ _AVATAR_COLUMN = 7
 _USER_COLOR = "#67B7D1"
 _DIALOGUE_TEXT_COLOR = "#D1D5DB"
 _MUTED_TEXT_COLOR = "#6B7280"
+_TECH_FOOTNOTE_COLOR = "#5E5866"
 
 _STATE_LABELS = {
     "idle": "待机中",
@@ -126,6 +127,64 @@ _IDLE_PRESENCE_HINTS = (
 class RuntimeDetails:
     model: str
     tts: str | None
+
+
+@dataclass(frozen=True)
+class WelcomeView:
+    scene: str
+    state: str
+    description: str
+    greeting: str
+
+
+def _welcome_view(
+    *,
+    display_name: str,
+    relationship_tier: str = "",
+    agency_state=None,
+    memory_presence=None,
+) -> WelcomeView:
+    """把真实的关系、记忆和 Agency 快照收敛成首页陪伴语义。"""
+    memory_count = max(0, int(getattr(memory_presence, "count", 0) or 0))
+    if relationship_tier in {"", "stranger"} and memory_count == 0:
+        return WelcomeView(
+            scene="first_meeting",
+            state="初次见面",
+            description="正在认识你",
+            greeting=f"你好，我是 {display_name}。今晚愿意陪我聊聊吗？",
+        )
+
+    if str(getattr(memory_presence, "recent_recall", "") or "").strip():
+        return WelcomeView(
+            scene="recall",
+            state="想起过去",
+            description="有一件事情想和你聊聊",
+            greeting="对了，我刚刚突然想起一件事。",
+        )
+
+    social_energy = float(getattr(agency_state, "social_energy", 0.68) or 0)
+    solitude_need = float(getattr(agency_state, "solitude_need", 0.22) or 0)
+    desire_to_talk = float(getattr(agency_state, "desire_to_talk", 0.62) or 0)
+    if agency_state is not None and social_energy <= 0.35 and solitude_need >= 0.60:
+        return WelcomeView(
+            scene="quiet",
+            state="静静陪伴",
+            description="不太想说话",
+            greeting="我今天有点安静。不过你来了也挺好。",
+        )
+    if agency_state is not None and desire_to_talk >= 0.70:
+        return WelcomeView(
+            scene="wants_to_talk",
+            state="想聊两句",
+            description="今天似乎有些话想说",
+            greeting="你来了。刚好想和你聊两句。",
+        )
+    return WelcomeView(
+        scene="companion",
+        state="安静陪伴",
+        description="似乎并不急着说话",
+        greeting="这里静悄悄的，我在等你。",
+    )
 
 
 class TerminalInput:
@@ -313,18 +372,28 @@ class Dashboard:
         self.voice_event = ""
         self.voice_language = ""
         self._voice_observed_at: float | None = None  # TTL 过期判定
-        self.greeting = relationship_voice or _fallback_greeting(
-            tier=self.relationship_level,
-            repeat_launch=_launch_context.repeat_launch,
-            special=_launch_context.special_greeting,
-        )
-        self.base_greeting = self.greeting
-        self._pending_relationship_voice = ""
-
         # Presence Panel 只保存业务服务的真实快照；None 表示对应能力未启用。
         self.agency_state = _agency_profile
         self.memory_presence = _memory_profile
         self.reflection_service = _reflection_service
+        welcome = _welcome_view(
+            display_name=persona.display_name,
+            relationship_tier=self.relationship_level,
+            agency_state=self.agency_state,
+            memory_presence=self.memory_presence,
+        )
+        launch_greeting = (
+            _fallback_greeting(
+                tier=self.relationship_level,
+                repeat_launch=_launch_context.repeat_launch,
+                special=_launch_context.special_greeting,
+            )
+            if _launch_context.repeat_launch or _launch_context.special_greeting
+            else ""
+        )
+        self.greeting = relationship_voice or launch_greeting or welcome.greeting
+        self.base_greeting = self.greeting
+        self._pending_relationship_voice = ""
 
         self.partial_text = ""
         self.presence_hint = ""
@@ -1048,7 +1117,27 @@ class Dashboard:
     def set_memory_presence(self, presence) -> None:
         """保存长期记忆摘要；旁路更新不单独触发全屏重绘。"""
         with self._lock:
+            previous_recall = str(
+                getattr(self.memory_presence, "recent_recall", "") or ""
+            ).strip()
             self.memory_presence = presence
+            current_recall = str(
+                getattr(presence, "recent_recall", "") or ""
+            ).strip()
+            if current_recall and current_recall != previous_recall:
+                greeting = "对了，我刚刚突然想起一件事。"
+                self.base_greeting = greeting
+                if not self._idle_emotion_active:
+                    self.greeting = greeting
+
+    def welcome_view(self) -> WelcomeView:
+        with self._lock:
+            return _welcome_view(
+                display_name=self.persona.display_name,
+                relationship_tier=self.relationship_level,
+                agency_state=self.agency_state,
+                memory_presence=self.memory_presence,
+            )
 
     def update(self, index: int, text: str) -> None:
         role, _ = self.messages[index]
@@ -1171,6 +1260,11 @@ def update_memory(presence) -> None:
         _dashboard.set_memory_presence(presence)
 
 
+def welcome_context() -> WelcomeView | None:
+    """供动态欢迎语生成器读取首页语义，不暴露内部状态向量。"""
+    return _dashboard.welcome_view() if _dashboard is not None else None
+
+
 def update_voice_observation(
     emotion: str, event: str, language: str
 ) -> None:
@@ -1251,8 +1345,9 @@ def _technical_profile(
     if stage < 3:
         return Align.center(Text(""))
     if not expanded:
-        summary = Text(style="dim")
-        summary.append("LOCAL")
+        # 首页技术签名是注脚而非正文：保留一点灰紫色温度，但不沿用标题主色。
+        summary = Text(style=_TECH_FOOTNOTE_COLOR)
+        summary.append("本地运行")
         summary.append(f" · {_short_model(runtime.model)}")
         summary.append(f" · {_tts_name(runtime)}")
         summary.append(" · Sherpa-ONNX")
@@ -1703,6 +1798,12 @@ def _splash_panel(
     reflection_service=None,
 ) -> Panel:
     primary = persona.appearance.primary_color
+    welcome = _welcome_view(
+        display_name=persona.display_name,
+        relationship_tier=relationship_tier,
+        agency_state=agency_state,
+        memory_presence=memory_presence,
+    )
 
     # ── 标题 ──
     title = Text(
@@ -1712,26 +1813,31 @@ def _splash_panel(
     greeting_text = Text(no_wrap=True, overflow="ellipsis")
     if stage >= 2:
         greeting_text.append(
-            f"“{greeting or _fallback_greeting()}”", style="italic",
+            f"“{greeting or welcome.greeting}”", style="italic",
         )
 
-    # ── 状态行 ──
+    # ── 状态行：思考/说话时保留实时反馈，其余时间表达陪伴状态 ──
     status = Text()
     if stage >= 3:
-        symbols = {"idle": "○", "listening": "◉", "thinking": "◇", "speaking": "≋"}
-        status_label = _STATE_LABELS.get(state, "待机中")
-        if quiet_presence and state == "listening":
+        if state in {"thinking", "speaking"}:
+            symbol = {"thinking": "◇", "speaking": "≋"}[state]
+            status_label = _STATE_LABELS[state]
+        elif quiet_presence:
+            symbol = "○"
             status_label = "安静陪伴"
-        status.append(f"{symbols.get(state, '○')} {status_label}", style=f"bold {primary}")
+        else:
+            symbol = "○"
+            status_label = welcome.state
+        status.append(f"{symbol} {status_label}", style=f"bold {primary}")
 
-    hint = Text(
-        status_hint
-        or {
-            "idle": "随时可以开始",
-            "listening": "直接说话即可",
+    default_hint = (
+        {
             "thinking": "我正在认真想",
             "speaking": "正在把回答说给你听",
-        }.get(state, "随时可以开始"),
+        }.get(state, welcome.description)
+    )
+    hint = Text(
+        status_hint or default_hint,
         style="dim",
         no_wrap=True,
         overflow="ellipsis",
@@ -1783,22 +1889,33 @@ def _splash_panel(
             _MOOD_LABELS.get(emotion_mood, emotion_mood), style=primary
         )
         relationship = Text()
-        if relationship_score is not None:
-            relationship.append("♡ ", style=primary)
-            relationship.append("关系  ", style="dim")
-            relationship.append(
-                _RELATIONSHIP_LEVEL_ZH.get(relationship_tier, relationship_tier),
-                style=primary,
-            )
+        relationship.append("♡ ", style=primary)
+        relationship.append("关系  ", style="dim")
+        relationship.append(
+            _RELATIONSHIP_LEVEL_ZH.get(
+                relationship_tier,
+                relationship_tier or "初识阶段",
+            ),
+            style=primary,
+        )
+        memory = Text()
+        memory.append("◆ ", style=primary)
+        memory.append("记忆  ", style="dim")
+        memory.append(
+            "未启用"
+            if memory_presence is None
+            else f"{max(0, int(getattr(memory_presence, 'count', 0) or 0))} 条",
+            style=primary,
+        )
         all_details = Group(
             Align.center(title),
             Align.center(greeting_text),
             Text(""),
             Align.center(status),
             Align.center(hint),
-            Text(""),
             Align.center(emotion),
             Align.center(relationship),
+            Align.center(memory),
             Text(""),
             _technical_profile(persona, runtime, stage, expanded=False),
         )

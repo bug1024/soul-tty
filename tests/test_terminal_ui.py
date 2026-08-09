@@ -48,10 +48,10 @@ class TerminalUITests(unittest.TestCase):
         expected = (
             "SERENA",
             "早上好，今天也请多关照。",
-            "◉ 正在聆听",
-            "直接说话即可",
+            "○ 初次见面",
+            "正在认识你",
             "0 换装",
-            "LOCAL · Qwen3.5-9B · 文字模式 · Sherpa-ONNX",
+            "本地运行 · Qwen3.5-9B · 文字模式 · Sherpa-ONNX",
         )
         for text in expected:
             self.assertTrue(any(text in line for line in lines), text)
@@ -59,6 +59,69 @@ class TerminalUITests(unittest.TestCase):
         self.assertFalse(any("sherpa-onnx ·" in line for line in lines))
         self.assertNotIn("72%", output.getvalue())
         self.assertNotIn("65%", output.getvalue())
+
+    def test_welcome_scenes_follow_real_relationship_memory_and_agency(self):
+        first = terminal._welcome_view(
+            display_name="Serena",
+            relationship_tier="stranger",
+            memory_presence=MemoryPresence(count=0),
+        )
+        self.assertEqual((first.state, first.description), ("初次见面", "正在认识你"))
+
+        normal = terminal._welcome_view(
+            display_name="Serena",
+            relationship_tier="acquaintance",
+            memory_presence=MemoryPresence(count=8),
+            agency_state=AgencyState(),
+        )
+        self.assertEqual(normal.scene, "companion")
+
+        eager = terminal._welcome_view(
+            display_name="Serena",
+            relationship_tier="familiar",
+            memory_presence=MemoryPresence(count=12),
+            agency_state=AgencyState(desire_to_talk=0.82),
+        )
+        self.assertEqual((eager.state, eager.description), ("想聊两句", "今天似乎有些话想说"))
+
+        quiet = terminal._welcome_view(
+            display_name="Serena",
+            relationship_tier="familiar",
+            memory_presence=MemoryPresence(count=12),
+            agency_state=AgencyState(social_energy=0.20, solitude_need=0.75),
+        )
+        self.assertEqual((quiet.state, quiet.description), ("静静陪伴", "不太想说话"))
+
+        recalled = terminal._welcome_view(
+            display_name="Serena",
+            relationship_tier="familiar",
+            memory_presence=MemoryPresence(count=15, recent_recall="Soul-TTY 设计"),
+            agency_state=AgencyState(),
+        )
+        self.assertEqual((recalled.state, recalled.scene), ("想起过去", "recall"))
+
+    def test_home_shows_only_companion_summary_fields(self):
+        output = io.StringIO()
+        console = Console(file=output, width=120, color_system=None, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        with patch.object(terminal, "_console", console):
+            console.print(terminal._splash_panel(
+                persona,
+                runtime,
+                3,
+                state="listening",
+                greeting="这里静悄悄的，我在等你。",
+                relationship_score=0.4,
+                relationship_tier="acquaintance",
+                memory_presence=MemoryPresence(count=8),
+                agency_state=AgencyState(),
+            ))
+        rendered = output.getvalue()
+        for text in ("情绪", "关系", "记忆", "8 条", "本地运行"):
+            self.assertIn(text, rendered)
+        for text in ("压力", "活力", "主动性", "精力状态"):
+            self.assertNotIn(text, rendered)
 
     def test_greeting_fallback_tracks_the_local_time_period(self):
         self.assertEqual(terminal.day_period(8), "早上")
@@ -264,6 +327,15 @@ class TerminalUITests(unittest.TestCase):
         colon_columns = [cell_len(line.split("：", 1)[0]) for line in lines]
         self.assertEqual(len(lines), 4)
         self.assertEqual(len(set(colon_columns)), 1)
+
+    def test_compact_technical_profile_uses_footnote_color_not_title_color(self):
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        profile = terminal._technical_profile(persona, runtime, 3)
+        summary = profile.renderable
+
+        self.assertEqual(summary.style, terminal._TECH_FOOTNOTE_COLOR)
+        self.assertNotEqual(summary.style, persona.appearance.primary_color)
 
     def test_splash_hides_exact_relationship_score_by_default(self):
         output = io.StringIO()

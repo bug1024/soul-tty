@@ -327,6 +327,9 @@ class GreetingGenerationTests(unittest.TestCase):
             relationship_tier="默契",
             repeat_launch=True,
             special=True,
+            presence_scene="wants_to_talk",
+            presence_state="想聊两句",
+            presence_description="今天似乎有些话想说",
         )
         payload = GreetingClient.request[1]["json"]
 
@@ -341,6 +344,8 @@ class GreetingGenerationTests(unittest.TestCase):
         self.assertIn("羁绊阶段是默契", payload["messages"][1]["content"])
         self.assertIn("短时间重复启动=是", payload["messages"][1]["content"])
         self.assertIn("低频特殊开场=是", payload["messages"][1]["content"])
+        self.assertIn("当前场景是wants_to_talk", payload["messages"][1]["content"])
+        self.assertIn("陪伴状态是想聊两句", payload["messages"][1]["content"])
         self.assertIn("不要声称记得具体往事", payload["messages"][0]["content"])
         self.assertEqual(payload["max_tokens"], 32)
 

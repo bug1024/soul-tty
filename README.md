@@ -4,8 +4,24 @@
 
 **Soul-TTY** 是一个本地优先的终端语音伙伴与状态化 Agent 实验。默认角色 **Serena** 住在终端中：你可以直接和她说话、随时打断她，也能从声音、情绪、记忆与关系变化中感受到角色的连续存在。
 
+## 三层界面
+
 <p align="center">
-  <img src="assets/screenshots/serena-0.png" alt="Serena in Soul-TTY" width="900">
+  <img src="assets/screenshots/serena-0.png" alt="Serena 首页欢迎区" width="900">
+  <br>
+  <sub>首页 · 陪伴入口</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/serena-01.png" alt="Serena 状态页" width="900">
+  <br>
+  <sub>状态页 · 情绪、关系、记忆与感知</sub>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/serena-02.png" alt="Serena 开发页" width="900">
+  <br>
+  <sub>开发页 · 运行状态与旁路诊断</sub>
 </p>
 
 ## Serena 能做什么
@@ -29,13 +45,13 @@
 <table>
   <tr>
     <td align="center" width="33%"><img src="assets/screenshots/serena-3.png" alt="Serena 默认装"></td>
-    <td align="center" width="33%"><img src="assets/screenshots/serena-2.png" alt="Serena 深夜装"></td>
     <td align="center" width="33%"><img src="assets/screenshots/serena-1.png" alt="Serena 工作装"></td>
+    <td align="center" width="33%"><img src="assets/screenshots/serena-2.png" alt="Serena 深夜装"></td>
   </tr>
   <tr>
     <td align="center"><b>默认装</b><br><sub>日常陪伴，自然而有活力</sub></td>
-    <td align="center"><b>深夜装</b><br><sub>更放松、更安静的深夜节奏</sub></td>
     <td align="center"><b>工作装</b><br><sub>克制、专注，适合编程与思考</sub></td>
+    <td align="center"><b>深夜装</b><br><sub>更放松、更安静的深夜节奏</sub></td>
   </tr>
 </table>
 
