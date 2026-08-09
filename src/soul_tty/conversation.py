@@ -6,10 +6,13 @@ import queue
 import re
 import sys
 import threading
+import time
 import wave
 from collections.abc import Callable
 
-from . import config, prompt, reflection
+import numpy as np
+
+from . import config, observability, prompt, reflection
 from .audio import asr, capture, duplex, tts
 from .clients import llm
 from .ui import terminal
@@ -69,6 +72,10 @@ def _current_recall(user_text: str) -> str:
     try:
         return provider(user_text) or ""
     except Exception:
+        observability.exception(
+            "memory.recall.error",
+            "记忆召回失败，已降级为空",
+        )
         return ""
 
 
@@ -79,6 +86,10 @@ def _current_voice_ref(pcm: bytes | None) -> int | None:
     try:
         return _voice_submit_provider(pcm)
     except Exception:
+        observability.exception(
+            "voice_state.submit.error",
+            "声音感知任务提交失败",
+        )
         return None
 
 
@@ -95,10 +106,186 @@ HALLUCINATIONS = (
     "感谢收看", "感謝收看", "请订阅", "請訂閱", "字幕",
 )
 
-# 句子结束符:切句送 TTS 用。只在句末标点切——按逗号切会让每个分句
-# 独立合成,分句间有合成间隔且韵律不连贯,听起来一顿一顿的。
-_SENT_END = re.compile(r"[。!！?？;；…\n]")
 _NON_SPEECH_TEXT = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+_STRONG_SPEECH_END = frozenset("。!！?？;；\n")
+_SOFT_SPEECH_END = frozenset("，,、：:")
+_TRAILING_CLOSERS = frozenset("”’\"'）)]】》〉」』")
+
+
+def _speakable_chars(text: str) -> int:
+    return len(_NON_SPEECH_TEXT.sub("", text.lower()))
+
+
+def _pcm_energy(pcm: bytes | None) -> tuple[float, float]:
+    """返回 int16 PCM 的 peak / RMS（0~1），用于定位假唤醒。"""
+    if not pcm:
+        return 0.0, 0.0
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    if not samples.size:
+        return 0.0, 0.0
+    peak = float(np.max(np.abs(samples))) / 32768.0
+    rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64)))) / 32768.0
+    return round(peak, 6), round(rms, 6)
+
+
+def _punctuation_cuts(text: str, punctuation: frozenset[str]) -> list[int]:
+    """返回包含尾随引号/括号的自然切点，避免下一段只剩一个闭合符号。"""
+    cuts: list[int] = []
+    for index, char in enumerate(text):
+        if char not in punctuation:
+            continue
+        cut = index + 1
+        while cut < len(text) and text[cut] in _TRAILING_CLOSERS:
+            cut += 1
+        if not cuts or cuts[-1] != cut:
+            cuts.append(cut)
+    return cuts
+
+
+def _hard_cut(text: str, max_chars: int) -> int | None:
+    """按可朗读字符数兜底切分，并避免截断连续英文、数字和小数。"""
+    seen = 0
+    cut = None
+    for index, char in enumerate(text):
+        if _NON_SPEECH_TEXT.sub("", char.lower()):
+            seen += 1
+        if seen >= max_chars:
+            cut = index + 1
+            break
+    if cut is None:
+        return None
+    # 不在 ASCII 单词、版本号或小数中间下刀；最长只向后保护 16 个字符，
+    # 防止异常的超长无空格 token 让缓冲无限增长。
+    protected_until = min(len(text), cut + 16)
+    while (
+        cut < protected_until
+        and cut > 0
+        and text[cut - 1].isascii()
+        and text[cut - 1].isalnum()
+        and text[cut].isascii()
+        and (text[cut].isalnum() or text[cut] in "._-")
+    ):
+        cut += 1
+    return cut
+
+
+class _SemanticSpeechBuffer:
+    """把 LLM token 聚合成适合自然发音的语义段。
+
+    优先完整句；过长句子在逗号等自然短语边界提前提交。第一段更短，
+    后续段稍长，让首音速度和跨句情绪之间保持平衡。
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._pending_since: float | None = None
+        self._segments = 0
+
+    def feed(self, token: str, *, now: float | None = None) -> list[str]:
+        if not token:
+            return []
+        current = time.monotonic() if now is None else now
+        if not self._buffer:
+            self._pending_since = current
+        self._buffer += token
+        emitted: list[str] = []
+        while (cut := self._choose_cut(current)) is not None:
+            segment = self._buffer[:cut].strip()
+            self._buffer = self._buffer[cut:].lstrip()
+            if segment and _speakable_chars(segment):
+                emitted.append(segment)
+                self._segments += 1
+            self._pending_since = current if self._buffer else None
+        return emitted
+
+    def flush(self) -> list[str]:
+        segment = self._buffer.strip()
+        self._buffer = ""
+        self._pending_since = None
+        if not segment or not _speakable_chars(segment):
+            return []
+        self._segments += 1
+        return [segment]
+
+    def _choose_cut(self, now: float) -> int | None:
+        if not self._buffer:
+            return None
+        minimum = (
+            config.TTS_SEMANTIC_FIRST_MIN_CHARS
+            if self._segments == 0
+            else config.TTS_SEMANTIC_MIN_CHARS
+        )
+        speakable = _speakable_chars(self._buffer)
+        waited_ms = (
+            (now - self._pending_since) * 1000
+            if self._pending_since is not None
+            else 0.0
+        )
+        soft = _punctuation_cuts(self._buffer, _SOFT_SPEECH_END)
+        usable_soft = [
+            cut for cut in soft
+            if _speakable_chars(self._buffer[:cut]) >= minimum
+        ]
+        strong = _punctuation_cuts(self._buffer, _STRONG_SPEECH_END)
+        strong_cut = next(
+            (
+                cut for cut in strong
+                if _speakable_chars(self._buffer[:cut]) >= minimum
+            ),
+            None,
+        )
+        if strong_cut is not None:
+            strong_chars = _speakable_chars(self._buffer[:strong_cut])
+            if strong_chars <= config.TTS_SEMANTIC_TARGET_CHARS:
+                return strong_cut
+            # 一个完整句已经明显过长时，不因已经看见句号而放弃前面的
+            # 自然逗号；优先在目标长度附近启动首段。
+            before_strong = [
+                cut for cut in usable_soft
+                if cut < strong_cut
+                and _speakable_chars(self._buffer[:cut])
+                <= config.TTS_SEMANTIC_MAX_CHARS
+            ]
+            if before_strong:
+                return min(
+                    before_strong,
+                    key=lambda cut: abs(
+                        _speakable_chars(self._buffer[:cut])
+                        - config.TTS_SEMANTIC_TARGET_CHARS
+                    ),
+                )
+            return strong_cut
+
+        if usable_soft and (
+            speakable >= config.TTS_SEMANTIC_TARGET_CHARS
+            or waited_ms >= config.TTS_SEMANTIC_MAX_WAIT_MS
+        ):
+            # 取最靠近目标长度、但不超过硬上限的自然边界。
+            bounded = [
+                cut for cut in usable_soft
+                if _speakable_chars(self._buffer[:cut])
+                <= config.TTS_SEMANTIC_MAX_CHARS
+            ]
+            if bounded:
+                return min(
+                    bounded,
+                    key=lambda cut: abs(
+                        _speakable_chars(self._buffer[:cut])
+                        - config.TTS_SEMANTIC_TARGET_CHARS
+                    ),
+                )
+
+        if speakable >= config.TTS_SEMANTIC_MAX_CHARS:
+            if usable_soft:
+                bounded = [
+                    cut for cut in usable_soft
+                    if _speakable_chars(self._buffer[:cut])
+                    <= config.TTS_SEMANTIC_MAX_CHARS
+                ]
+                if bounded:
+                    return bounded[-1]
+            return _hard_cut(self._buffer, config.TTS_SEMANTIC_MAX_CHARS)
+        return None
 
 
 def _print_answer(
@@ -111,45 +298,61 @@ def _print_answer(
     recall: str = "",
     on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
-    """流式打印 LLM 回答;给了 speaker 就按句切分实时送 TTS。
+    """流式打印 LLM 回答；给了 speaker 就按语义段送入 TTS 流水线。
 
     ``on_speech_queued``:每句实际送进 TTS 的文本(commit 07+ 用于回声参考,
     比 ``on_token`` 更准确,因为 LLM token 可能还没送到 TTS 就中断了)。
     """
     terminal.answer_start()
     parts = []
-    buf = ""
+    speech_buffer = _SemanticSpeechBuffer() if speaker is not None else None
     playback_started = False
+    segment_index = 0
+    answer_started_at = time.perf_counter()
+
+    def queue_speech(segment: str) -> None:
+        nonlocal playback_started, segment_index
+        segment_index += 1
+        queued_ms = observability.elapsed_ms(answer_started_at)
+        observability.event(
+            "tts.segment_queued",
+            duration_ms=queued_ms,
+            segment_index=segment_index,
+            segment_chars=_speakable_chars(segment),
+            first=not playback_started,
+        )
+        if not playback_started:
+            # 兼容现有日志查询，同时新增更准确的 segment 事件。
+            observability.event(
+                "tts.first_sentence_queued",
+                duration_ms=queued_ms,
+                sentence_chars=len(segment),
+            )
+            terminal.speaking()
+            playback_started = True
+        if on_speech_queued is not None:
+            on_speech_queued(segment)
+        assert speaker is not None
+        speaker.say(segment)
+
     for token in chat.ask_stream(text, cancel, recall=recall):
         terminal.answer_chunk(token)
         parts.append(token)
         if on_token is not None:
             on_token(token)
-        buf += token
-        while speaker is not None and (m := _SENT_END.search(buf)):
-            sent = buf[:m.end()].strip()
-            buf = buf[m.end():]
-            if sent:
-                if not playback_started:
-                    terminal.speaking()
-                    playback_started = True
-                if on_speech_queued is not None:
-                    on_speech_queued(sent)
-                speaker.say(sent)
+        if speech_buffer is not None:
+            for segment in speech_buffer.feed(token):
+                queue_speech(segment)
     terminal.answer_end()
     if chat.last_stop_reason == "repetition":
         terminal.notice("检测到模型重复生成，已自动截断")
-    if speaker is not None and buf.strip():
-        if not playback_started:
-            terminal.speaking()
-        sent = buf.strip()
-        if on_speech_queued is not None:
-            on_speech_queued(sent)
-        speaker.say(sent)
+    if speech_buffer is not None:
+        for segment in speech_buffer.flush():
+            queue_speech(segment)
     return "".join(parts).strip()
 
 
-def _answer(
+def _answer_impl(
     chat: llm.Chat,
     text: str,
     cancel: threading.Event | None = None,
@@ -162,7 +365,14 @@ def _answer(
     # Provider 未注册时（emotion 关闭）回退到 config.MLX_TTS_INSTRUCT。
     instruct = _current_tts_instruct()
     # 本轮检索到的相关记忆；临时插入，不进 system prompt / 不进 history。
+    recall_started_at = time.perf_counter()
     recall = _current_recall(text)
+    observability.event(
+        "memory.recall.complete",
+        duration_ms=observability.elapsed_ms(recall_started_at),
+        hit=bool(recall),
+        query_chars=len(text),
+    )
     # 提交 utterance PCM 给 VoiceStateService（不阻塞）
     voice_ref = _current_voice_ref(pcm)
     if config.TTS_ENABLED and not config.TTS_WHOLE_ANSWER:
@@ -188,10 +398,59 @@ def _answer(
                 tts.speak(answer, cancel, terminal.audio_level, instruct=instruct)
             except Exception as e:
                 if not cancel.is_set():
+                    observability.exception(
+                        "tts.error",
+                        "TTS 合成或播放失败",
+                        backend=config.TTS_BACKEND,
+                    )
                     terminal.notice(f"TTS 失败: {e}")
     if answer and not cancel.is_set():
         reflection.record_turn(text, answer, voice_ref=voice_ref)
     return answer
+
+
+def _answer(
+    chat: llm.Chat,
+    text: str,
+    cancel: threading.Event | None = None,
+    on_token: Callable[[str], None] | None = None,
+    pcm: bytes | None = None,
+    on_speech_queued: Callable[[str], None] | None = None,
+    *,
+    turn_id: str | None = None,
+) -> str:
+    """为一轮回答绑定 turn_id，并记录端到端耗时。"""
+    effective_turn_id = turn_id or observability.current_turn_id()
+    if effective_turn_id == "-":
+        effective_turn_id = observability.new_turn_id()
+    answer_started_at = time.perf_counter()
+    with observability.bind_turn(effective_turn_id):
+        observability.event(
+            "answer.start",
+            input_chars=len(text),
+            history_messages=len(getattr(chat, "messages", ())),
+            tts_whole_answer=config.TTS_WHOLE_ANSWER,
+        )
+        try:
+            answer = _answer_impl(
+                chat,
+                text,
+                cancel,
+                on_token,
+                pcm,
+                on_speech_queued,
+            )
+        except Exception:
+            observability.exception("answer.error", "主对话回答失败")
+            raise
+        observability.event(
+            "answer.complete",
+            duration_ms=observability.elapsed_ms(answer_started_at),
+            output_chars=len(answer),
+            cancelled=bool(cancel is not None and cancel.is_set()),
+            stop_reason=chat.last_stop_reason or "complete",
+        )
+        return answer
 
 
 def _usable_transcript(text: str) -> bool:
@@ -212,16 +471,30 @@ def _is_probable_echo(heard: str, spoken: str) -> bool:
 
 
 def _transcribe(pcm: bytes) -> str | None:
+    started_at = time.perf_counter()
     try:
         text = asr.transcribe(pcm)
     except Exception as e:
+        observability.exception("asr.error", "语音识别失败")
         terminal.notice(f"识别失败: {e}，继续聆听")
         return None
+    observability.event(
+        "asr.complete",
+        duration_ms=observability.elapsed_ms(started_at),
+        audio_ms=round(len(pcm) / (config.SAMPLE_RATE * 2) * 1000, 2),
+        text_chars=len(text or ""),
+        usable=_usable_transcript(text),
+    )
     return text if _usable_transcript(text) else None
 
 
 def _answer_interruptibly(
-    chat: llm.Chat, text: str, listener, pcm: bytes | None = None
+    chat: llm.Chat,
+    text: str,
+    listener,
+    pcm: bytes | None = None,
+    *,
+    turn_id: str | None = None,
 ) -> str | None:
     """后台回答，前台同时确认插话；返回已确认的下一句用户文本。"""
     cancel = threading.Event()
@@ -230,7 +503,14 @@ def _answer_interruptibly(
 
     def run_answer() -> None:
         try:
-            _answer(chat, text, cancel, answer_parts.append, pcm=pcm)
+            _answer(
+                chat,
+                text,
+                cancel,
+                answer_parts.append,
+                pcm=pcm,
+                turn_id=turn_id,
+            )
             outcome.put(None)
         except BaseException as e:
             outcome.put(e)
@@ -283,18 +563,27 @@ def _show_partial(text: str) -> None:
         terminal.partial(text)
 
 
-def _show_final(text: str) -> None:
+def _show_final(text: str, *, interrupted: bool = False) -> None:
     reflection.user_activity()
-    terminal.user_text(text)
+    if interrupted:
+        terminal.user_text(text, interrupted=True)
+    else:
+        terminal.user_text(text)
 
 
 def _answer_half_duplex(
-    chat: llm.Chat, mic, text: str, pcm: bytes | None = None
+    chat: llm.Chat,
+    mic,
+    text: str,
+    pcm: bytes | None = None,
+    *,
+    turn_id: str | None = None,
 ) -> None:
     mic.pause()
     try:
-        _answer(chat, text, pcm=pcm)
+        _answer(chat, text, pcm=pcm, turn_id=turn_id)
     except Exception as e:
+        observability.exception("answer.half_duplex.error", "半双工回答失败")
         terminal.notice(f"LLM 调用失败: {e}")
     finally:
         mic.reset_vad()
@@ -306,10 +595,16 @@ def _answer_half_duplex(
 def _run_sherpa_half_duplex_mic(chat: llm.Chat, audio) -> None:
     """PCM 持续送入在线模型；partial 只展示，endpoint final 才触发回答。"""
     terminal.model_loading(True)
+    model_started_at = time.perf_counter()
     session = (
         asr.VadGatedSherpaStream()
         if config.SHERPA_VAD_GATE_ENABLED
         else asr.SherpaStream()
+    )
+    observability.event(
+        "asr.model_ready",
+        duration_ms=observability.elapsed_ms(model_started_at),
+        mode="half_duplex",
     )
     terminal.model_loading(False)
     mic = audio.Mic()
@@ -324,8 +619,27 @@ def _run_sherpa_half_duplex_mic(chat: llm.Chat, audio) -> None:
                 text = update.text if _usable_transcript(update.text) else None
                 if not text:
                     continue
+                turn_id = observability.new_turn_id()
+                observability.event(
+                    "asr.final",
+                    turn_id=turn_id,
+                    text_chars=len(text),
+                    audio_ms=(
+                        round(len(update.pcm) / (config.SAMPLE_RATE * 2) * 1000, 2)
+                        if update.pcm
+                        else 0.0
+                    ),
+                    mode="half_duplex",
+                    disposition="user",
+                )
                 _show_final(text)
-                _answer_half_duplex(chat, mic, text, pcm=update.pcm)
+                _answer_half_duplex(
+                    chat,
+                    mic,
+                    text,
+                    pcm=update.pcm,
+                    turn_id=turn_id,
+                )
                 session.reset()
     finally:
         mic.stop()
@@ -341,6 +655,7 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
     pending_text = None
     try:
         while True:
+            was_interruption = pending_text is not None
             if pending_text is None:
                 try:
                     pcm = listener.get(timeout=0.5)
@@ -351,11 +666,31 @@ def _run_barge_in_mic(chat: llm.Chat) -> None:
                 text, pending_text = pending_text, None
             if not text:
                 continue
+            turn_id = observability.new_turn_id()
+            observability.event(
+                "asr.final",
+                turn_id=turn_id,
+                text_chars=len(text),
+                audio_ms=(
+                    round(len(pcm) / (config.SAMPLE_RATE * 2) * 1000, 2)
+                    if pcm
+                    else 0.0
+                ),
+                mode="barge_in",
+                disposition="interrupt" if was_interruption else "user",
+            )
             reflection.user_activity()
-            terminal.user_text(text)
+            terminal.user_text(text, interrupted=was_interruption)
             try:
-                pending_text = _answer_interruptibly(chat, text, listener, pcm=pcm)
+                pending_text = _answer_interruptibly(
+                    chat,
+                    text,
+                    listener,
+                    pcm=pcm,
+                    turn_id=turn_id,
+                )
             except Exception as e:
+                observability.exception("answer.barge_in.error", "插话模式回答失败")
                 terminal.notice(f"LLM 调用失败: {e}")
                 continue
             # 不论正常结束还是被打断，都必须清掉播放尾音与 VAD 局部状态。
@@ -389,9 +724,12 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
     - portaudio 后端:sounddevice 无硬件 AEC,需配合耳机。
     """
     from .audio.io import get_audio_io
-    from .interaction.floor import FloorManager, UserFinalDisposition
+    from .interaction.floor import (
+        FloorManager,
+        UserFinalDisposition,
+        UserPartialDisposition,
+    )
 
-    listener = duplex.DuplexListener(queue_maxsize=64)
     floor = FloorManager()
 
     # commit 07+:复用 cli.py 提前创建的 audio_io(用于 TTS 播放回灌)。
@@ -404,6 +742,23 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
         audio_io.start()
         tts.set_audio_io(audio_io)
         owns_audio_io = True
+
+    # AEC 后仍可能有低能量播放残差。把实时播放状态交给采集门控，在残差
+    # 进入 VAD/ASR 前先变成静音；真人靠近麦克风说话时仍能立即打开门控。
+    model_started_at = time.perf_counter()
+    listener = duplex.DuplexListener(
+        queue_maxsize=64,
+        playback_active=(
+            (lambda: audio_io.playback_active)
+            if audio_io is not None
+            else None
+        ),
+    )
+    observability.event(
+        "asr.model_ready",
+        duration_ms=observability.elapsed_ms(model_started_at),
+        mode="full_duplex",
+    )
 
     if config.AUDIO_IO_BACKEND == "macos_voice":
         assert audio_io is not None  # cli.py 必须提前注入
@@ -419,9 +774,12 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
         mic_for_answer = mic
 
     terminal.listening(initial=True)
+    speech_started_at: float | None = None
     try:
         for event in listener.events():
             if event.kind == duplex.DuplexEventKind.SPEECH_START:
+                speech_started_at = time.perf_counter()
+                observability.event("asr.speech_start", mode="full_duplex")
                 # 用户开始说话 → 通知 FloorManager
                 floor.user_start()
                 # 注意:SPEECH_START 不等于打断。用户可能只是发出一个简短
@@ -430,12 +788,36 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                 continue
 
             if event.kind == duplex.DuplexEventKind.PARTIAL:
-                _show_partial(event.text)
                 # FloorManager 决定是否打断
-                if floor.user_partial(event.text):
+                should_interrupt = floor.user_partial(
+                    event.text,
+                    near_end=event.near_end,
+                )
+                partial_disposition = floor.last_partial_disposition
+
+                # 回声和证据不足的 1~2 字 partial 不进入 UI，也不应被记作
+                # 用户活动；否则即使 FINAL 被过滤，界面仍会像自说自话。
+                if partial_disposition in (
+                    UserPartialDisposition.ECHO,
+                    UserPartialDisposition.HOLD,
+                ):
+                    continue
+
+                if partial_disposition == UserPartialDisposition.BACKCHANNEL:
+                    reflection.user_activity()
+                    terminal.notice(f"…{event.text.strip()}")
+                    continue
+
+                _show_partial(event.text)
+                if should_interrupt:
                     answer_state = _current_answer_state()
                     if answer_state is not None and not answer_state.cancel.is_set():
                         answer_state.cancel.set()
+                        observability.event(
+                            "interrupt.confirmed",
+                            partial_chars=len(event.text),
+                            source="partial",
+                        )
                         terminal.interrupted(event.text)
                         # commit 07+ fix:立即清空 Swift 端已排队播放 buffer
                         if audio_io is not None:
@@ -443,34 +825,86 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                                 audio_io.flush_playback()
                             except Exception:
                                 pass
-                else:
-                    # 没打断:看一下是不是 backchannel("嗯"之类),给 UI 一个轻量提示
-                    bc = floor.pending_backchannel
-                    if bc is not None and bc == event.text.strip():
-                        terminal.notice(f"…{bc}")
                 continue
 
             if event.kind == duplex.DuplexEventKind.FINAL:
                 text = event.text if _usable_transcript(event.text) else None
-                cleaned = event.text.strip() if event.text else ""
-                disposition = floor.user_final(cleaned, pcm=event.pcm)
+                pcm_peak, pcm_rms = _pcm_energy(event.pcm)
+                # 被 ASR 策略过滤的 hallucination 等同空 FINAL，绝不能让它
+                # 把 FloorManager 从 AGENT_SPEAKING 推到 IDLE 并清空回声参考。
+                cleaned = text.strip() if text else ""
+                disposition = floor.user_final(
+                    cleaned,
+                    pcm=event.pcm,
+                    near_end=event.near_end,
+                    voice_rms=pcm_rms,
+                )
 
                 # commit 07+ fix:按 disposition 分流
                 if disposition == UserFinalDisposition.ECHO:
                     # Serena 自己的回声 → 不触发新 answer
+                    observability.event(
+                        "asr.final.filtered",
+                        mode="full_duplex",
+                        disposition="echo",
+                        text_chars=len(cleaned),
+                        pcm_peak=pcm_peak,
+                        pcm_rms=pcm_rms,
+                    )
                     if config.DUPLEX_DEBUG:
                         terminal.notice(f"[echo-final] {cleaned}")
                     continue
 
                 if disposition == UserFinalDisposition.BACKCHANNEL:
                     # 用户说"嗯/好的",不打断,不 spawn
+                    observability.event(
+                        "asr.final.filtered",
+                        mode="full_duplex",
+                        disposition="backchannel",
+                        text_chars=len(cleaned),
+                        pcm_peak=pcm_peak,
+                        pcm_rms=pcm_rms,
+                    )
                     if cleaned:
                         terminal.notice(f"…{cleaned}")
+                    continue
+
+                if disposition == UserFinalDisposition.IGNORED:
+                    observability.event(
+                        "asr.final.filtered",
+                        mode="full_duplex",
+                        disposition="ignored",
+                        text_chars=len(cleaned),
+                        pcm_peak=pcm_peak,
+                        pcm_rms=pcm_rms,
+                    )
                     continue
 
                 # 真用户输入(USER 或 INTERRUPT)
                 if not text:
                     continue
+
+                turn_id = observability.new_turn_id()
+                observability.event(
+                    "asr.final",
+                    turn_id=turn_id,
+                    duration_ms=(
+                        observability.elapsed_ms(speech_started_at)
+                        if speech_started_at is not None
+                        else None
+                    ),
+                    text_chars=len(text),
+                    audio_ms=(
+                        round(len(event.pcm) / (config.SAMPLE_RATE * 2) * 1000, 2)
+                        if event.pcm
+                        else 0.0
+                    ),
+                    mode="full_duplex",
+                    disposition=disposition.value,
+                    pcm_peak=pcm_peak,
+                    pcm_rms=pcm_rms,
+                )
+                speech_started_at = None
 
                 if disposition == UserFinalDisposition.INTERRUPT:
                     # partial 阶段没来得及打断,但最终仍需要 cancel
@@ -484,9 +918,27 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                             except Exception:
                                 pass
 
-                _show_final(text)
+                _show_final(
+                    text,
+                    interrupted=(
+                        disposition == UserFinalDisposition.INTERRUPT
+                    ),
+                )
+                wait_started_at = time.perf_counter()
                 _wait_answer_done(timeout_s=0.5)
-                _spawn_answer(chat, text, pcm=event.pcm, floor=floor, audio_io=audio_io)
+                observability.event(
+                    "answer.previous_wait.complete",
+                    turn_id=turn_id,
+                    duration_ms=observability.elapsed_ms(wait_started_at),
+                )
+                _spawn_answer(
+                    chat,
+                    text,
+                    pcm=event.pcm,
+                    floor=floor,
+                    audio_io=audio_io,
+                    turn_id=turn_id,
+                )
                 continue
 
             # SPEECH_END 当前不单独消费(都在 FINAL 里走完)
@@ -518,7 +970,10 @@ def _run_duplex_mic(chat: llm.Chat) -> None:
                 audio_io.stop()
                 tts.set_audio_io(None)
             except Exception:
-                pass
+                observability.exception(
+                    "shutdown.audio_io.error",
+                    "关闭会话 AudioIO 失败",
+                )
 
 
 def _safe_cleanup(*callables) -> None:
@@ -565,6 +1020,7 @@ def _spawn_answer(
     pcm: bytes | None = None,
     floor=None,
     audio_io=None,
+    turn_id: str | None = None,
 ) -> None:
     """后台跑 ``_answer``,cancel 可由 ``_current_answer_state().cancel`` 触发。
 
@@ -579,41 +1035,60 @@ def _spawn_answer(
       (保证扬声器真正播完前,``agent_text`` 仍用于回声判定)
     """
     state = _AnswerState()
+    effective_turn_id = turn_id or observability.new_turn_id()
     with _active_answer_lock:
         global _active_answer_state
         _active_answer_state = state
 
     def _run() -> None:
-        if floor is not None:
-            floor.agent_start()
-        try:
-            # 用 on_speech_queued 替代 on_token:实际送 TTS 的文本才是回声参考
-            on_speech_queued = None
+        with observability.bind_turn(effective_turn_id):
             if floor is not None:
-                def _on_speech_queued(sent: str) -> None:
-                    floor.agent_chunk(sent)
-                on_speech_queued = _on_speech_queued
-            _answer(
-                chat, text, state.cancel, pcm=pcm,
-                on_speech_queued=on_speech_queued,
-            )
-        except BaseException as e:
-            state.error = e
-        finally:
-            # commit 07+ fix:等到扬声器真正播完再 agent_end
-            if audio_io is not None and not state.cancel.is_set():
-                try:
-                    audio_io.wait_playback_drained(timeout=15.0)
-                except Exception:
-                    pass
-            if floor is not None:
-                floor.agent_end()
-            state.done.set()
-            with _active_answer_lock:
-                global _active_answer_state
-                # 只清掉自己;防止被新 answer 覆盖后误清
-                if _active_answer_state is state:
-                    _active_answer_state = None
+                floor.agent_start()
+            try:
+                # 用 on_speech_queued 替代 on_token:实际送 TTS 的文本才是回声参考
+                on_speech_queued = None
+                if floor is not None:
+                    def _on_speech_queued(sent: str) -> None:
+                        floor.agent_chunk(sent)
+                    on_speech_queued = _on_speech_queued
+                _answer(
+                    chat,
+                    text,
+                    state.cancel,
+                    pcm=pcm,
+                    on_speech_queued=on_speech_queued,
+                    turn_id=effective_turn_id,
+                )
+            except BaseException as e:
+                state.error = e
+                observability.exception(
+                    "answer.worker.error",
+                    "双工回答线程失败",
+                )
+            finally:
+                # commit 07+ fix:等到扬声器真正播完再 agent_end
+                if audio_io is not None and not state.cancel.is_set():
+                    drain_started_at = time.perf_counter()
+                    try:
+                        drained = audio_io.wait_playback_drained(timeout=15.0)
+                        observability.event(
+                            "audio.playback_drained",
+                            duration_ms=observability.elapsed_ms(drain_started_at),
+                            drained=drained,
+                        )
+                    except Exception:
+                        observability.exception(
+                            "audio.playback_drain.error",
+                            "等待播放队列排空失败",
+                        )
+                if floor is not None:
+                    floor.agent_end()
+                state.done.set()
+                with _active_answer_lock:
+                    global _active_answer_state
+                    # 只清掉自己;防止被新 answer 覆盖后误清
+                    if _active_answer_state is state:
+                        _active_answer_state = None
 
     threading.Thread(target=_run, name="soul-tty-duplex-answer", daemon=True).start()
 

@@ -364,6 +364,26 @@ class TerminalUITests(unittest.TestCase):
             "listening",
         )
 
+    def test_interruption_final_updates_one_existing_user_message(self):
+        """partial 打断与 FINAL 应合并为一条，而不是在对话区重复显示。"""
+        output = io.StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+
+        with patch.object(terminal, "_console", console):
+            dashboard = terminal.Dashboard(persona, runtime)
+            dashboard.live.update = lambda *args, **kwargs: None
+            terminal._dashboard = dashboard
+            terminal.interrupted("好了不用了")
+            terminal.user_text("好了不用了不用了", interrupted=True)
+
+        self.assertEqual(
+            dashboard.messages,
+            [("you", "[打断] 好了不用了不用了")],
+        )
+        self.assertIsNone(dashboard.interrupt_index)
+
     def test_dashboard_paints_native_avatar_in_reserved_card_area(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)

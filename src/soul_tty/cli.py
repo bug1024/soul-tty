@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from . import config, conversation, presence, prompt, reflection
+from . import config, conversation, observability, presence, prompt, reflection
 from .clients import llm
 from .personas import apply_persona, available_personas, load_persona
 from .personas.models import AvatarOutfit
@@ -28,7 +28,7 @@ def _on_emotion_update(emotion_service, snap) -> None:
         emit_emotion_update(emotion_service, snap)
 
 
-def main() -> None:
+def _main() -> None:
     parser = argparse.ArgumentParser(prog="soul-tty", description=__doc__)
     parser.add_argument(
         "command",
@@ -160,11 +160,22 @@ def main() -> None:
             emotion_service.current_tts_instruct
         )
 
+    model_started_at = time.perf_counter()
     try:
         main_model = llm.pick_model(config.LLM_URL, config.LLM_MODEL)
     except Exception as exc:
+        observability.exception(
+            "startup.llm_unavailable",
+            "主 LLM 服务不可用",
+            endpoint=config.LLM_URL,
+        )
         print(f"主 LLM 服务不可用: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    observability.event(
+        "startup.main_model.ready",
+        duration_ms=observability.elapsed_ms(model_started_at),
+        model=main_model,
+    )
 
     # 辅助 LLM 默认走主 LLM（同 URL/同 model）；只有用户显式配置了不同的
     # AUX_LLM_URL 才单独去 auto-discover 一个独立模型，避免无谓请求。
@@ -175,7 +186,25 @@ def main() -> None:
         try:
             aux_model = llm.pick_model(aux_url, aux_model_name)
         except Exception:
+            observability.exception(
+                "startup.aux_llm_fallback",
+                "辅助 LLM 不可用，回退主模型",
+                endpoint=aux_url,
+            )
             aux_model = main_model
+
+    observability.event(
+        "runtime.ready",
+        persona=persona.id,
+        model=main_model,
+        llm_endpoint=config.LLM_URL,
+        aux_shared=aux_url == config.LLM_URL,
+        tts_backend=config.TTS_BACKEND,
+        audio_backend=config.AUDIO_IO_BACKEND,
+        duplex=config.DUPLEX_ENABLED,
+        memory=config.MEMORY_ENABLED,
+        reflection=config.REFLECTION_ENABLED,
+    )
 
     launch_context = (
         presence.LaunchContext()
@@ -400,6 +429,7 @@ def main() -> None:
         )
 
         def refresh_greeting() -> None:
+            started_at = time.perf_counter()
             try:
                 greeting = llm.generate_greeting(
                     aux_model,
@@ -412,7 +442,17 @@ def main() -> None:
                     special=launch_context.special_greeting,
                 )
             except Exception:
+                observability.exception(
+                    "aux.greeting.error",
+                    "动态欢迎语生成失败",
+                    duration_ms=observability.elapsed_ms(started_at),
+                )
                 return
+            observability.event(
+                "aux.greeting.complete",
+                duration_ms=observability.elapsed_ms(started_at),
+                generated=bool(greeting),
+            )
             if greeting:
                 terminal.update_greeting(greeting, outfit_id=initial_outfit)
 
@@ -460,7 +500,21 @@ def main() -> None:
         from .audio import tts as _tts
 
         audio_io = _get_audio_io("macos_voice")
-        audio_io.start()
+        audio_started_at = time.perf_counter()
+        try:
+            audio_io.start()
+        except Exception:
+            observability.exception(
+                "startup.audio_io.error",
+                "macOS Voice I/O 启动失败",
+                duration_ms=observability.elapsed_ms(audio_started_at),
+            )
+            raise
+        observability.event(
+            "startup.audio_io.ready",
+            duration_ms=observability.elapsed_ms(audio_started_at),
+            backend="macos_voice",
+        )
         _tts.set_audio_io(audio_io)
 
     chat = llm.Chat(main_model)
@@ -484,5 +538,33 @@ def main() -> None:
             try:
                 audio_io.stop()
             except Exception:
-                pass
+                observability.exception(
+                    "shutdown.audio_io.error",
+                    "关闭 AudioIO 失败",
+                )
         terminal.close()
+
+
+def main() -> None:
+    """安装文件日志后运行 CLI；日志初始化失败也不能阻止语音会话。"""
+    started_at = time.perf_counter()
+    log_path = None
+    try:
+        log_path = observability.configure()
+    except Exception as exc:
+        print(f"soul-tty 日志初始化失败: {exc}", file=sys.stderr)
+    observability.event(
+        "session.start",
+        argv_count=max(0, len(sys.argv) - 1),
+        log_file=str(log_path) if log_path else "disabled",
+    )
+    try:
+        _main()
+    except Exception:
+        observability.exception("session.fatal", "Soul TTY 未处理异常")
+        raise
+    finally:
+        observability.event(
+            "session.stop",
+            duration_ms=observability.elapsed_ms(started_at),
+        )

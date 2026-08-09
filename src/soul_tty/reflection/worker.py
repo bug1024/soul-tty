@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .. import config
+from .. import config, observability
 from ..memory.models import ExtractionStatus
 from .relationship import (
     CompletedTurn,
@@ -222,10 +222,22 @@ class ReflectionWorker:
                     current = self.state
                 self._last_evaluation = time.monotonic()
                 # 关系评估：失败不影响 Emotion/Memory，只不让 Bond 更新
+                evaluation_started_at = time.perf_counter()
+                observability.event("reflection.evaluation.start")
                 try:
                     result = self.evaluator(current, item)
                 except Exception:
+                    observability.exception(
+                        "reflection.evaluation.error",
+                        "关系与情绪旁路评估失败",
+                        duration_ms=observability.elapsed_ms(evaluation_started_at),
+                    )
                     result = None
+                observability.event(
+                    "reflection.evaluation.complete",
+                    duration_ms=observability.elapsed_ms(evaluation_started_at),
+                    success=result is not None,
+                )
                 if self._stop.is_set():
                     return
                 if result is not None:
@@ -328,12 +340,34 @@ class ReflectionWorker:
         turns, max_seq = self._drain_memory_buffer()
         if not turns or self.memory_extractor is None:
             return
+        extraction_started_at = time.perf_counter()
+        observability.event(
+            "memory.extraction.start",
+            turn_count=len(turns),
+        )
         try:
             status = self.memory_extractor(turns)
         except Exception:
+            observability.exception(
+                "memory.extraction.error",
+                "长期记忆抽取失败",
+                duration_ms=observability.elapsed_ms(extraction_started_at),
+            )
             return  # 异常时 buffer 不动，下次重试
         if not isinstance(status, ExtractionStatus):
+            observability.event(
+                "memory.extraction.invalid_result",
+                level=30,
+                duration_ms=observability.elapsed_ms(extraction_started_at),
+                result_type=type(status).__name__,
+            )
             return
+        observability.event(
+            "memory.extraction.complete",
+            duration_ms=observability.elapsed_ms(extraction_started_at),
+            status=status.value,
+            turn_count=len(turns),
+        )
         with self._lock:
             self._last_memory_at = time.monotonic()
         if status is ExtractionStatus.FAILED:

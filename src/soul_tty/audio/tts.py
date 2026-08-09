@@ -8,13 +8,14 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator
 
 import httpx
 import numpy as np
 import sounddevice as sd
 
-from .. import config
+from .. import config, observability
 
 _SENTINEL = object()
 _MLX_SENTENCE = re.compile(r".+?(?:[。！？!?；;\n]+|$)", re.DOTALL)
@@ -163,6 +164,86 @@ def _write_metered_pcm(stream, pcm: bytes, meter: PlaybackLevelMeter) -> None:
         stream.write(frame)
 
 
+class _PlaybackLevelTimeline:
+    """只给口型提供实时节拍，不改变 AudioIO 的播放块边界。
+
+    macOS helper 会在排队 buffer 数归零时上报 ``PLAYBACK_DRAINED``。
+    因此绝不能为了口型把声学播放切成逐个 50ms buffer，否则 AEC reference
+    会反复中断。PCM 仍整块交给 helper；本线程只在旁路按 50ms 读取副本。
+    """
+
+    def __init__(
+        self,
+        meter: PlaybackLevelMeter,
+        cancel: threading.Event | None = None,
+    ) -> None:
+        self._meter = meter
+        self._cancel = cancel
+        self._stop = threading.Event()
+        self._queue: queue.Queue[bytes | object] = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="soul-tty-mouth-timeline",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def feed(self, pcm: bytes) -> None:
+        if pcm and not self._stop.is_set():
+            self._queue.put(pcm)
+
+    def finish(self, *, interrupted: bool = False) -> None:
+        if interrupted:
+            self._stop.set()
+            with self._queue.mutex:
+                self._queue.queue.clear()
+        self._queue.put(_SENTINEL)
+        self._thread.join(timeout=2.0 if interrupted else None)
+
+    def _run(self) -> None:
+        samples_per_frame = max(
+            1,
+            int(config.TTS_SAMPLE_RATE * _PLAYBACK_LEVEL_FRAME_MS / 1000),
+        )
+        frame_bytes = samples_per_frame * 2
+        bytes_per_second = config.TTS_SAMPLE_RATE * 2
+        deadline = time.monotonic()
+
+        while not self._stop.is_set():
+            pcm = self._queue.get()
+            if pcm is _SENTINEL:
+                return
+            assert isinstance(pcm, bytes)
+            for offset in range(0, len(pcm), frame_bytes):
+                if self._stop.is_set() or (
+                    self._cancel is not None and self._cancel.is_set()
+                ):
+                    return
+                frame = pcm[offset : offset + frame_bytes]
+                if not frame:
+                    continue
+
+                # 网络合成发生停顿时，新的音频也只会从当前时刻开始播放，
+                # 不能为追赶过期 deadline 而瞬间刷完多帧。
+                now = time.monotonic()
+                deadline = max(deadline, now)
+                self._meter.update(frame)
+                deadline += len(frame) / bytes_per_second
+                if self._stop.wait(max(0.0, deadline - time.monotonic())):
+                    return
+
+
+def _queue_metered_audio_io(
+    audio_io,
+    pcm: bytes,
+    timeline: _PlaybackLevelTimeline,
+) -> None:
+    """整块排入 AudioIO，同时把同一份 PCM 副本送到口型旁路线。"""
+    pcm = apply_playback_gain(pcm)
+    audio_io.write_playback(pcm, config.TTS_SAMPLE_RATE)
+    timeline.feed(pcm)
+
+
 # commit 06+ 注:TTS 完整 AEC 需要把播放也走 AudioIO.write_playback,
 # 这样 AVAudioEngine 才能拿到 playback reference。当前默认 portaudio 路径
 # 仍走 sd.RawOutputStream;commit 07+ 才会把 speak() / StreamingSpeaker 切到
@@ -182,8 +263,8 @@ def _aligned_pcm(chunks: Iterator[bytes], cancel: threading.Event | None):
         remainder = chunk[aligned:]
 
 
-def _split_mlx_text(text: str) -> list[str]:
-    """清除不可朗读的 Markdown，并按完整句拆分请求。"""
+def _normalize_mlx_text(text: str) -> str:
+    """清除不可朗读的 Markdown 和可能诱发异常长音的符号。"""
     text = _MARKDOWN_LINK.sub(r"\1", text)
     text = _INLINE_CODE.sub(r"\1", text)
     text = _MARKDOWN_PREFIX.sub("", text)
@@ -195,6 +276,12 @@ def _split_mlx_text(text: str) -> list[str]:
     text = _TRAILING_LONG_PAUSE.sub("。", text)
     text = _LONG_PAUSE_PUNCTUATION.sub("，", text)
     text = re.sub(r"[“”‘’\"']", "", text)
+    return text.strip()
+
+
+def _split_mlx_text(text: str) -> list[str]:
+    """规范化文本，并按完整句拆分独立请求。"""
+    text = _normalize_mlx_text(text)
     sentences = [
         match.group().strip()
         for match in _MLX_SENTENCE.finditer(text)
@@ -344,6 +431,25 @@ def synthesize_mlx_stream(
             )
 
 
+def synthesize_mlx_semantic_segment(
+    text: str,
+    cancel: threading.Event | None = None,
+    *,
+    instruct: str = "",
+) -> Iterator[bytes]:
+    """把已由上层切好的语义段作为一个 TTS 请求，保留段内韵律上下文。"""
+    segment = _normalize_mlx_text(text)
+    if not segment or not _SPEAKABLE.search(segment):
+        return
+    with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+        yield from _synthesize_mlx_segment(
+            segment,
+            cancel,
+            client,
+            instruct=instruct,
+        )
+
+
 def synthesize_stream(
     text: str,
     cancel: threading.Event | None = None,
@@ -368,6 +474,13 @@ def speak(
     commit 07+ fix:优先走 AudioIO(让 macos_voice 后端拿到 playback
     reference,完整 AEC)。无 AudioIO 时 fallback 到 sd.RawOutputStream。
     """
+    started_at = time.perf_counter()
+    observability.event(
+        "tts.start",
+        backend=config.TTS_BACKEND,
+        mode="whole_answer",
+        input_chars=len(text),
+    )
     if config.TTS_BACKEND == "macos":
         if on_audio_level is not None:
             on_audio_level(0.55)
@@ -376,12 +489,25 @@ def speak(
         finally:
             if on_audio_level is not None:
                 on_audio_level(0.0)
+            observability.event(
+                "tts.complete",
+                duration_ms=observability.elapsed_ms(started_at),
+                backend="macos",
+                cancelled=bool(cancel is not None and cancel.is_set()),
+            )
         return
 
     audio_io = get_audio_io()
     meter = PlaybackLevelMeter(on_audio_level)
+    timeline = (
+        _PlaybackLevelTimeline(meter, cancel)
+        if audio_io is not None
+        else None
+    )
     try:
+        first_pcm_seen = False
         if audio_io is not None:
+            assert timeline is not None
             # commit 07+ fix:走 AudioIO,让 macos_voice/AVAudioEngine
             # 拿到 playback reference,完整 AEC
             for pcm in synthesize_stream(text, cancel, instruct=instruct):
@@ -389,9 +515,14 @@ def speak(
                     audio_io.flush_playback()
                     return
                 if pcm:
-                    pcm = apply_playback_gain(pcm)
-                    meter.update(pcm)
-                    audio_io.write_playback(pcm, config.TTS_SAMPLE_RATE)
+                    if not first_pcm_seen:
+                        first_pcm_seen = True
+                        observability.event(
+                            "tts.first_pcm",
+                            duration_ms=observability.elapsed_ms(started_at),
+                            pcm_bytes=len(pcm),
+                        )
+                    _queue_metered_audio_io(audio_io, pcm, timeline)
             # 等扬声器真正播完(最长 15s)
             audio_io.wait_playback_drained(timeout=15.0)
             return
@@ -401,9 +532,27 @@ def speak(
         ) as stream:
             for pcm in synthesize_stream(text, cancel, instruct=instruct):
                 if pcm:
+                    if not first_pcm_seen:
+                        first_pcm_seen = True
+                        observability.event(
+                            "tts.first_pcm",
+                            duration_ms=observability.elapsed_ms(started_at),
+                            pcm_bytes=len(pcm),
+                        )
                     _write_metered_pcm(stream, pcm, meter)
     finally:
+        if timeline is not None:
+            timeline.finish(
+                interrupted=cancel is not None and cancel.is_set()
+            )
         meter.close()
+        observability.event(
+            "tts.complete",
+            duration_ms=observability.elapsed_ms(started_at),
+            backend=config.TTS_BACKEND,
+            first_pcm_seen=first_pcm_seen,
+            cancelled=bool(cancel is not None and cancel.is_set()),
+        )
 
 
 def _speak_macos(text: str, cancel: threading.Event | None = None) -> None:
@@ -451,6 +600,7 @@ class StreamingSpeaker:
         self._cancel = cancel or threading.Event()
         self._on_audio_level = on_audio_level
         self._instruct = instruct
+        self._turn_id = observability.current_turn_id()
         self._audio_io = audio_io if audio_io is not None else get_audio_io()
         self._sent_q: queue.Queue = queue.Queue()
         self._audio_q: queue.Queue = queue.Queue(maxsize=8)
@@ -498,34 +648,71 @@ class StreamingSpeaker:
         return False
 
     def _synth_loop(self):
-        while True:
-            s = self._sent_q.get()
-            if s is _SENTINEL:
-                break
-            try:
-                for pcm in synthesize_stream(
-                    s, self._cancel, instruct=self._instruct
-                ):
-                    if not self._put_audio(pcm):
-                        break
-            except Exception as e:
-                if not self._cancel.is_set():
-                    print(f"(TTS 合成失败: {e})")
+        with observability.bind_turn(self._turn_id):
+            pipeline_started_at = time.perf_counter()
+            first_pcm_seen = False
+            observability.event("tts.start", backend=config.TTS_BACKEND, mode="streaming")
+            while True:
+                s = self._sent_q.get()
+                if s is _SENTINEL:
+                    break
+                try:
+                    stream = (
+                        synthesize_mlx_semantic_segment(
+                            s, self._cancel, instruct=self._instruct
+                        )
+                        if config.TTS_BACKEND == "mlx"
+                        else synthesize_stream(
+                            s, self._cancel, instruct=self._instruct
+                        )
+                    )
+                    for pcm in stream:
+                        if pcm and not first_pcm_seen:
+                            first_pcm_seen = True
+                            observability.event(
+                                "tts.first_pcm",
+                                duration_ms=observability.elapsed_ms(pipeline_started_at),
+                                pcm_bytes=len(pcm),
+                            )
+                        if not self._put_audio(pcm):
+                            break
+                except Exception as e:
+                    if not self._cancel.is_set():
+                        observability.exception("tts.synthesis.error", "TTS 合成失败")
+                        print(f"(TTS 合成失败: {e})")
+                if self._cancel.is_set():
+                    break
             if self._cancel.is_set():
-                break
-        if self._cancel.is_set():
-            self._drain(self._audio_q)
-            try:
-                self._audio_q.put_nowait(_SENTINEL)
-            except queue.Full:
-                pass
-        else:
-            self._audio_q.put(_SENTINEL)
+                self._drain(self._audio_q)
+                try:
+                    self._audio_q.put_nowait(_SENTINEL)
+                except queue.Full:
+                    pass
+            else:
+                self._audio_q.put(_SENTINEL)
+            observability.event(
+                "tts.synthesis.complete",
+                duration_ms=observability.elapsed_ms(pipeline_started_at),
+                first_pcm_seen=first_pcm_seen,
+                cancelled=self._cancel.is_set(),
+            )
 
     def _play_loop(self):
+        with observability.bind_turn(self._turn_id):
+            self._play_loop_in_turn()
+
+    def _play_loop_in_turn(self):
         meter = PlaybackLevelMeter(self._on_audio_level)
+        timeline = (
+            _PlaybackLevelTimeline(meter, self._cancel)
+            if self._audio_io is not None
+            else None
+        )
+        playback_started_at = time.perf_counter()
+        first_audio_seen = False
         try:
             if self._audio_io is not None:
+                assert timeline is not None
                 # commit 07+:把 PCM 推到 AudioIO(由它决定走 macos_voice
                 # 的 playerNode / portaudio 的 sd.RawOutputStream 长连接)。
                 # 这样 macos_voice 后端 AVAudioEngine 能拿到 playback
@@ -535,15 +722,21 @@ class StreamingSpeaker:
                     if pcm is _SENTINEL:
                         break
                     if pcm:
-                        meter.update(pcm)
+                        if not first_audio_seen:
+                            first_audio_seen = True
+                            observability.event("audio.playback_start")
                         try:
-                            self._audio_io.write_playback(
-                                pcm, config.TTS_SAMPLE_RATE
+                            _queue_metered_audio_io(
+                                self._audio_io,
+                                pcm,
+                                timeline,
                             )
                         except Exception as e:
                             if not self._cancel.is_set():
                                 print(f"(TTS 播放失败: {e})")
                             break
+                if not self._cancel.is_set():
+                    self._audio_io.wait_playback_drained(timeout=15.0)
             else:
                 # 兼容路径:非 duplex(默认半双工/插话模式)仍自己开
                 # sd.RawOutputStream,跟 commit 02+ 行为一致。
@@ -555,12 +748,24 @@ class StreamingSpeaker:
                         if pcm is _SENTINEL:
                             break
                         if pcm:
+                            if not first_audio_seen:
+                                first_audio_seen = True
+                                observability.event("audio.playback_start")
                             _write_metered_pcm(stream, pcm, meter)
         except Exception as e:
             if not self._cancel.is_set():
+                observability.exception("tts.playback.error", "TTS 播放失败")
                 print(f"(TTS 播放失败: {e})")
         finally:
+            if timeline is not None:
+                timeline.finish(interrupted=self._cancel.is_set())
             meter.close()
+            observability.event(
+                "audio.playback_complete",
+                duration_ms=observability.elapsed_ms(playback_started_at),
+                started=first_audio_seen,
+                cancelled=self._cancel.is_set(),
+            )
 
     def _macos_loop(self) -> None:
         """使用 macOS 系统音色直接播放。"""

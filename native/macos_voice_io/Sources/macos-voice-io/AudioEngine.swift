@@ -142,7 +142,7 @@ final class AudioEngine {
         let input = engine.inputNode
         playbackFormat = engine.mainMixerNode.outputFormat(forBus: 0)
         let inputFormat = input.outputFormat(forBus: 0)
-        fputs("[AudioEngine] post-VPIO input=\(inputFormat) playbackFormat=\(playbackFormat)\n", stderr)
+        fputs("[AudioEngine] post-VPIO input=\(inputFormat) playbackFormat=\(playbackFormat!)\n", stderr)
 
         // 5) 最后才构造播放 graph
         engine.attach(playerNode)
@@ -166,7 +166,7 @@ final class AudioEngine {
             // 提取第一个通道的数据(麦克风通道)
             let chData = buffer.floatChannelData?[0]
             var peak: Float = 0
-            var frameLength = Int(buffer.frameLength)
+            let frameLength = Int(buffer.frameLength)
             if let ch = chData {
                 for i in 0..<frameLength {
                     let v = abs(ch[i])
@@ -179,6 +179,18 @@ final class AudioEngine {
             if self._tapFrames == 1 || self._tapFrames % 50 == 0 {
                 fputs("[AudioEngine] tap frame=\(self._tapFrames) "
                       + "len=\(frameLength) peak=\(peak)\n", stderr)
+                if self.audioDebug, let channels = buffer.floatChannelData {
+                    var channelPeaks: [String] = []
+                    for channel in 0..<Int(buffer.format.channelCount) {
+                        var channelPeak: Float = 0
+                        for i in 0..<frameLength {
+                            channelPeak = max(channelPeak, abs(channels[channel][i]))
+                        }
+                        channelPeaks.append("ch\(channel)=\(channelPeak)")
+                    }
+                    fputs("[AudioEngine] channel peaks "
+                          + channelPeaks.joined(separator: " ") + "\n", stderr)
+                }
             }
 
             do {
@@ -312,6 +324,7 @@ final class AudioEngine {
 
     private var _tapFrames: Int = 0
     private var _startupPeakLock = NSLock()
+    private let audioDebug = ProcessInfo.processInfo.environment["SOUL_TTY_AUDIO_DEBUG"] == "1"
 
     private func _trackStartupPeak(_ peak: Float, frameLength: Int) {
         _startupPeakLock.lock()

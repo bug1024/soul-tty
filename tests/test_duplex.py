@@ -307,6 +307,121 @@ def test_duplex_listener_session_exception_does_not_propagate():
     listener.on_frame(_voiced_frame(30), 16000)
 
 
+def test_playback_capture_gate_silences_low_aec_residual(monkeypatch):
+    """外放时低于阈值的 AEC 残差应变成等长静音，而不是进入 ASR。"""
+    from soul_tty.audio import duplex
+
+    now = [10.0]
+    monkeypatch.setattr(duplex.time, "monotonic", lambda: now[0])
+    gate = duplex.PlaybackCaptureGate(
+        lambda: True,
+        peak_threshold=0.025,
+        hold_ms=900,
+    )
+    residual = (b"\x00\x01") * 480  # peak = 256 / 32768
+    assert gate.process(residual) == bytes(len(residual))
+
+
+def test_playback_capture_gate_passes_near_end_voice_and_holds(monkeypatch):
+    """真人强声音打开门后，短暂低谷也应继续通过以免切碎语音。"""
+    from soul_tty.audio import duplex
+
+    now = [10.0]
+    monkeypatch.setattr(duplex.time, "monotonic", lambda: now[0])
+    gate = duplex.PlaybackCaptureGate(
+        lambda: True,
+        peak_threshold=0.025,
+        hold_ms=900,
+    )
+    voice = (b"\x00\x10") * 480
+    quiet = (b"\x00\x01") * 480
+    assert gate.process(voice) == voice
+    now[0] += 0.5
+    assert gate.process(quiet) == quiet
+    now[0] += 0.5
+    assert gate.process(quiet) == bytes(len(quiet))
+
+
+def test_playback_capture_gate_requires_sustained_near_end_voice(monkeypatch):
+    """单帧爆音不能把后续外放残差整段放进 ASR，持续人声才开门。"""
+    from soul_tty.audio import duplex
+
+    now = [10.0]
+    monkeypatch.setattr(duplex.time, "monotonic", lambda: now[0])
+    gate = duplex.PlaybackCaptureGate(
+        lambda: True,
+        peak_threshold=0.020,
+        hold_ms=900,
+        confirm_frames=3,
+    )
+    loud = (b"\x00\x10") * 480
+    quiet = (b"\x00\x01") * 480
+
+    # 一次瞬时峰值后立刻回落：保持关闭。
+    assert gate.process(loud) == bytes(len(loud))
+    assert gate.process(quiet) == bytes(len(quiet))
+
+    # 连续三个 30ms 强帧：前两帧仍抑制，第三帧开始放行。
+    assert gate.process(loud) == bytes(len(loud))
+    assert gate.process(loud) == bytes(len(loud))
+    assert gate.process(loud) == loud
+    now[0] += 0.3
+    assert gate.process(quiet) == quiet
+
+
+def test_playback_capture_gate_allows_quiet_but_sustained_interrupt(monkeypatch):
+    """较轻的人声持续约 240ms 后也应开门，不能只接受大声喊停。"""
+    from soul_tty.audio import duplex
+
+    monkeypatch.setattr(duplex.time, "monotonic", lambda: 10.0)
+    gate = duplex.PlaybackCaptureGate(
+        lambda: True,
+        peak_threshold=0.015,
+        hold_ms=900,
+        confirm_frames=8,
+    )
+    # little-endian 0x0200，归一化峰值 0.015625：刚高于默认门槛。
+    quiet_voice = (b"\x00\x02") * 480
+
+    for _ in range(7):
+        assert gate.process(quiet_voice) == bytes(len(quiet_voice))
+    assert gate.process(quiet_voice) == quiet_voice
+
+
+def test_playback_capture_gate_is_transparent_when_not_playing():
+    from soul_tty.audio import duplex
+
+    gate = duplex.PlaybackCaptureGate(
+        lambda: False,
+        peak_threshold=0.025,
+        hold_ms=900,
+    )
+    quiet = (b"\x00\x01") * 480
+    assert gate.process(quiet) == quiet
+
+
+def test_playback_capture_gate_latches_across_chunk_gaps(monkeypatch):
+    """短暂 drained 不应把流式 TTS 分块间的残差放进 ASR。"""
+    from soul_tty.audio import duplex
+
+    now = [10.0]
+    playing = [True]
+    monkeypatch.setattr(duplex.time, "monotonic", lambda: now[0])
+    gate = duplex.PlaybackCaptureGate(
+        lambda: playing[0],
+        peak_threshold=0.020,
+        hold_ms=900,
+        tail_ms=1500,
+    )
+    quiet = (b"\x00\x01") * 480
+    assert gate.process(quiet) == bytes(len(quiet))
+    playing[0] = False
+    now[0] += 1.0
+    assert gate.process(quiet) == bytes(len(quiet))
+    now[0] += 0.6
+    assert gate.process(quiet) == quiet
+
+
 # ── commit 04: run_microphone 派发 ──────────────────────────────────────
 
 

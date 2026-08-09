@@ -48,27 +48,55 @@ def test_streaming_speaker_uses_audio_io_when_set():
 
     received: list[bytes] = []
     io_lock = threading.Lock()
+    played = threading.Event()
 
     class _FakeIO:
         def write_playback(self, pcm: bytes, sr: int):
             with io_lock:
                 received.append(pcm)
+            played.set()
+
+        def flush_playback(self):
+            pass
+
+        def wait_playback_drained(self, timeout: float):
+            return True
 
     audio_io = _FakeIO()
     cancel = threading.Event()
     with StreamingSpeaker(cancel, audio_io=audio_io) as speaker:
         # 模拟一句"测试"被合成线程合成出来:直接送 PCM 进 _audio_q
         speaker._audio_q.put(b"\x00\x01" * 16)
-        speaker._audio_q.put(object())  # 不是 _SENTINEL,但让队列一直有数据
-        # 不实际等 _SENTINEL 退出(避免等合成线程),cancel 强制退出
+        assert played.wait(0.5), "audio_io.write_playback 必须被调用"
         cancel.set()
-
-    # 等 worker 处理完
-    deadline = threading.Event()
-    threading.Thread(target=lambda: (deadline.wait(0.5), None), daemon=True).start()
-    import time
-    time.sleep(0.2)
     assert len(received) >= 1, "audio_io.write_playback 必须被调用"
+
+
+def test_audio_io_meter_tracks_playback_without_splitting_aec_buffers():
+    """口型按 50ms 推进，但 AudioIO 必须只收到原始的一个连续块。"""
+    levels: list[float] = []
+    written: list[bytes] = []
+
+    class _FakeIO:
+        def write_playback(self, pcm: bytes, sr: int):
+            written.append(pcm)
+
+    samples = tts.config.TTS_SAMPLE_RATE // 20
+    voiced = (12000).to_bytes(2, "little", signed=True) * samples
+    silence = b"\x00\x00" * samples
+    pcm = voiced + silence + voiced
+    meter = tts.PlaybackLevelMeter(levels.append)
+    timeline = tts._PlaybackLevelTimeline(meter)
+
+    tts._queue_metered_audio_io(_FakeIO(), pcm, timeline)
+    timeline.finish()
+
+    # 声学链路维持一个连续 buffer，不能因口型刷新切成三个 50ms buffer。
+    assert written == [pcm]
+    assert len(levels) == 3
+    assert levels[0] > 0.55
+    assert levels[1] < 0.16
+    assert levels[2] > 0.55
 
 
 def test_streaming_speaker_falls_back_when_no_audio_io(monkeypatch):

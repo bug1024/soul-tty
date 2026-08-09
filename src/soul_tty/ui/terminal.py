@@ -291,6 +291,7 @@ class Dashboard:
         self.presence_hint = ""
         self.messages: list[tuple[str, str]] = []
         self.answer_index: int | None = None
+        self.interrupt_index: int | None = None
         self.scroll_offset = 0
         self.show_details = config.DASHBOARD_DETAILS
         self.mouth_frame = 1
@@ -743,6 +744,12 @@ class Dashboard:
                     if self.answer_index >= overflow
                     else None
                 )
+            if self.interrupt_index is not None:
+                self.interrupt_index = (
+                    self.interrupt_index - overflow
+                    if self.interrupt_index >= overflow
+                    else None
+                )
             self.scroll_offset = min(
                 self.scroll_offset,
                 max(0, len(self.messages) - 1),
@@ -751,6 +758,14 @@ class Dashboard:
 
     def remove(self, index: int) -> None:
         self.messages.pop(index)
+        for attr in ("answer_index", "interrupt_index"):
+            current = getattr(self, attr)
+            if current is None:
+                continue
+            if current == index:
+                setattr(self, attr, None)
+            elif current > index:
+                setattr(self, attr, current - 1)
         if self.scroll_offset:
             self.scroll_offset = max(0, self.scroll_offset - 1)
 
@@ -1569,10 +1584,17 @@ def partial(text: str) -> None:
         )
 
 
-def user_text(text: str) -> None:
+def user_text(text: str, *, interrupted: bool = False) -> None:
     if _dashboard is not None:
         _dashboard.mark_voice_activity(refresh=False)
         _dashboard.partial_text = ""
+        if interrupted and _dashboard.interrupt_index is not None:
+            index = _dashboard.interrupt_index
+            _dashboard.interrupt_index = None
+            _dashboard.update(index, f"[打断] {text}")
+            return
+        # 上一次打断若没有可用 FINAL，不允许它影响下一条普通输入。
+        _dashboard.interrupt_index = None
         _dashboard.add("you", text)
         return
     if sys.stdout.isatty():
@@ -1685,7 +1707,16 @@ def warning(text: str) -> None:
 
 def interrupted(text: str) -> None:
     if _dashboard is not None:
-        _dashboard.add("you", f"[打断] {text}")
+        if _dashboard.interrupt_index is None:
+            _dashboard.interrupt_index = _dashboard.add(
+                "you",
+                f"[打断] {text}",
+            )
+        else:
+            _dashboard.update(
+                _dashboard.interrupt_index,
+                f"[打断] {text}",
+            )
         _dashboard.set_state("thinking")
         return
     _console.print(f"\n  [yellow]Ⅱ[/yellow] 已打断  [bold]YOU[/bold]  {text}")

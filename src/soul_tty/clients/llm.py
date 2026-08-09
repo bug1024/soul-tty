@@ -11,12 +11,13 @@
 import json
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Iterator
 
 import httpx
 
-from .. import config
+from .. import config, observability
 
 _SENTENCE_END = re.compile(r"[。！？!?\n]")
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
@@ -486,59 +487,95 @@ class Chat:
         pending = ""
         recent_sentences: list[str] = []
         stop_generation = False
-        with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
-            with client.stream(
-                "POST",
-                f"{config.LLM_URL}/v1/chat/completions",
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if cancel is not None and cancel.is_set():
-                        break
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(data)["choices"][0]["delta"]
-                    except Exception:
-                        continue
-                    # delta 可能是 {"content": "..."} 或 {"reasoning_content": "..."} 或直接是字符串
-                    if isinstance(delta, dict):
-                        token = delta.get("content") or delta.get("reasoning_content") or ""
-                    else:
-                        token = delta if isinstance(delta, str) else ""
-                    if not token:
-                        continue
-                    pending += token
-                    if _tail_is_repeating("".join(parts) + pending):
-                        self.last_stop_reason = "repetition"
-                        pending = ""
-                        break
-                    while match := _SENTENCE_END.search(pending):
-                        sentence = pending[: match.end()]
-                        pending = pending[match.end() :]
-                        normalized = _normalized_sentence(sentence)
-                        if (
-                            len(normalized) >= 4
-                            and normalized in recent_sentences[-8:]
-                        ):
+        request_started_at = time.perf_counter()
+        first_token_seen = False
+        token_chunks = 0
+        observability.event(
+            "llm.request.start",
+            endpoint=config.LLM_URL,
+            model=self.model,
+            message_count=len(messages),
+            prompt_chars=sum(len(str(item.get("content", ""))) for item in messages),
+            recall=bool(recall),
+        )
+        try:
+            with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+                with client.stream(
+                    "POST",
+                    f"{config.LLM_URL}/v1/chat/completions",
+                    json=payload,
+                ) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if cancel is not None and cancel.is_set():
+                            break
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            delta = json.loads(data)["choices"][0]["delta"]
+                        except Exception:
+                            continue
+                        # delta 可能是 content/reasoning_content 或直接字符串
+                        if isinstance(delta, dict):
+                            token = delta.get("content") or delta.get("reasoning_content") or ""
+                        else:
+                            token = delta if isinstance(delta, str) else ""
+                        if not token:
+                            continue
+                        token_chunks += 1
+                        if not first_token_seen:
+                            first_token_seen = True
+                            observability.event(
+                                "llm.first_token",
+                                duration_ms=observability.elapsed_ms(request_started_at),
+                            )
+                        pending += token
+                        if _tail_is_repeating("".join(parts) + pending):
                             self.last_stop_reason = "repetition"
                             pending = ""
-                            stop_generation = True
                             break
-                        parts.append(sentence)
-                        if normalized:
-                            recent_sentences.append(normalized)
-                        yield sentence
-                    if stop_generation:
-                        break
+                        while match := _SENTENCE_END.search(pending):
+                            sentence = pending[: match.end()]
+                            pending = pending[match.end() :]
+                            normalized = _normalized_sentence(sentence)
+                            if (
+                                len(normalized) >= 4
+                                and normalized in recent_sentences[-8:]
+                            ):
+                                self.last_stop_reason = "repetition"
+                                pending = ""
+                                stop_generation = True
+                                break
+                            parts.append(sentence)
+                            if normalized:
+                                recent_sentences.append(normalized)
+                            yield sentence
+                        if stop_generation:
+                            break
+        except Exception:
+            observability.exception(
+                "llm.request.error",
+                "主 LLM 流式请求失败",
+                duration_ms=observability.elapsed_ms(request_started_at),
+                endpoint=config.LLM_URL,
+            )
+            raise
         if pending.strip() and not (cancel is not None and cancel.is_set()):
             parts.append(pending)
             yield pending
         answer = "".join(parts).strip()
+        observability.event(
+            "llm.request.complete",
+            duration_ms=observability.elapsed_ms(request_started_at),
+            first_token_seen=first_token_seen,
+            token_chunks=token_chunks,
+            output_chars=len(answer),
+            cancelled=bool(cancel is not None and cancel.is_set()),
+            stop_reason=self.last_stop_reason or "complete",
+        )
         if answer:
             # 被插话时保留已经说出的部分，下一轮上下文才与人真正听到的一致。
             self.messages.append({"role": "assistant", "content": answer})

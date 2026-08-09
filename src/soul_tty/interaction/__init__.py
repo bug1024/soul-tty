@@ -9,6 +9,8 @@ from .floor import (
     FloorManager,
     FloorState,
     UserFinalDisposition,
+    UserPartialDisposition,
+    is_explicit_interrupt,
     is_backchannel,
 )
 from .playback_transcript import PlaybackTranscript
@@ -19,5 +21,7 @@ __all__ = [
     "FloorState",
     "PlaybackTranscript",
     "UserFinalDisposition",
+    "UserPartialDisposition",
+    "is_explicit_interrupt",
     "is_backchannel",
 ]

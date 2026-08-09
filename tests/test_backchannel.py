@@ -98,9 +98,13 @@ def test_backchannel_when_disabled_interrupts():
 
 
 def test_long_text_still_interrupts_even_with_backchannel_on():
-    """'嗯但是我觉得' 这种长文本不受 backchannel 白名单影响,正常打断。"""
-    fm = _make_manager()
+    """长自然插话经连续 partial 确认后正常打断。"""
+    fm = FloorManager(
+        backchannel_enabled=True,
+        natural_interrupt_enabled=True,
+    )
     fm.agent_start()
+    assert fm.user_partial("嗯但是我觉得") is False
     interrupted = fm.user_partial("嗯但是我觉得应该")
     assert interrupted is True
     assert fm.state == FloorState.INTERRUPTED

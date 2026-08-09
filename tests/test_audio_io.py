@@ -447,6 +447,63 @@ def test_macos_voice_io_start_raises_if_helper_missing(monkeypatch, tmp_path):
         io.start()
 
 
+def test_helper_stderr_is_drained_without_touching_interactive_terminal(
+    monkeypatch,
+):
+    """正常 TTY 下 helper 日志不能绕过 Rich Live 写进终端。"""
+    import io as stdlib_io
+    import sys
+
+    from soul_tty.audio.io import macos_voice as mv
+
+    class InteractiveStderr(stdlib_io.StringIO):
+        def isatty(self):
+            return True
+
+    stderr = InteractiveStderr()
+    proc = type(
+        "P",
+        (),
+        {"stderr": stdlib_io.BytesIO(b"tap frame=50\nplayback drained\n")},
+    )()
+    audio = mv.MacOSVoiceIO(helper_path="/nonexistent")
+    audio._helper_process = proc
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.delenv("SOUL_TTY_AUDIO_DEBUG", raising=False)
+
+    audio._pump_helper_stderr()
+
+    assert stderr.getvalue() == ""
+
+
+def test_helper_stderr_can_be_forwarded_in_explicit_audio_debug_mode(
+    monkeypatch,
+):
+    import io as stdlib_io
+    import sys
+
+    from soul_tty.audio.io import macos_voice as mv
+
+    class InteractiveStderr(stdlib_io.StringIO):
+        def isatty(self):
+            return True
+
+    stderr = InteractiveStderr()
+    proc = type(
+        "P",
+        (),
+        {"stderr": stdlib_io.BytesIO(b"tap frame=50\n")},
+    )()
+    audio = mv.MacOSVoiceIO(helper_path="/nonexistent")
+    audio._helper_process = proc
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setenv("SOUL_TTY_AUDIO_DEBUG", "1")
+
+    audio._pump_helper_stderr()
+
+    assert stderr.getvalue() == "[helper] tap frame=50\n"
+
+
 # ── config 暴露 ─────────────────────────────────────────────────────
 
 

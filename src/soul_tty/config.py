@@ -92,9 +92,50 @@ BACKCHANNEL_ENABLED = os.environ.get("BACKCHANNEL_ENABLED", "1") not in (
 )
 # Duplex 调试日志:echo final / disposition 等额外输出
 DUPLEX_DEBUG = os.environ.get("DUPLEX_DEBUG", "0") not in ("0", "false", "False")
-# 回声 grace period(ms):agent 说完后保留最近文本用于回声判定,
-# 避免房间尾声被当成用户输入
-DUPLEX_ECHO_GRACE_MS = int(os.environ.get("DUPLEX_ECHO_GRACE_MS", "800"))
+# 回声 grace period(ms):覆盖播放尾声、房间混响和 ASR endpoint 延迟。
+DUPLEX_ECHO_GRACE_MS = int(os.environ.get("DUPLEX_ECHO_GRACE_MS", "1800"))
+# 非明确制止词至少累积这么多紧凑字符才允许在 partial 阶段触发打断。
+DUPLEX_PARTIAL_MIN_CHARS = int(
+    os.environ.get("DUPLEX_PARTIAL_MIN_CHARS", "3")
+)
+# 非明确制止词至少需要多少次连续、累积式 partial 才确认自然插话。
+# 明确的“停/等等/不对”等不等待，仍走低延迟快路径。
+DUPLEX_PARTIAL_CONFIRMATIONS = int(
+    os.environ.get("DUPLEX_PARTIAL_CONFIRMATIONS", "2")
+)
+# 外放环境下声学能量不足以可靠区分真人与残余回声。默认只允许明确制止词
+# 打断；开启此实验项后，普通自然插话才可凭持续近端声学证据打断。
+DUPLEX_NATURAL_INTERRUPT_ENABLED = os.environ.get(
+    "DUPLEX_NATURAL_INTERRUPT_ENABLED", "0"
+) not in ("0", "false", "False")
+# 明确制止词被外放叠加识别坏时，用整段近端语音 RMS 做 FINAL 级兜底。
+# 该路径只在 Agent 仍播放、且文本具备最小语义长度时生效。
+DUPLEX_STRONG_INTERRUPT_RMS = float(
+    os.environ.get("DUPLEX_STRONG_INTERRUPT_RMS", "0.030")
+)
+DUPLEX_STRONG_INTERRUPT_MIN_CHARS = int(
+    os.environ.get("DUPLEX_STRONG_INTERRUPT_MIN_CHARS", "3")
+)
+# Agent 外放期间只把足够强的近端声音送给 VAD/ASR。VPIO 已做 AEC，但房间
+# 混响仍会留下低能量残差；若不在识别前拦截，残差会被 ASR 猜成与原文完全
+# 不同的短句，文本回声匹配无法识别。
+DUPLEX_PLAYBACK_GATE_ENABLED = os.environ.get(
+    "DUPLEX_PLAYBACK_GATE_ENABLED", "1"
+) not in ("0", "false", "False")
+DUPLEX_PLAYBACK_GATE_PEAK = float(
+    os.environ.get("DUPLEX_PLAYBACK_GATE_PEAK", "0.015")
+)
+DUPLEX_PLAYBACK_GATE_HOLD_MS = int(
+    os.environ.get("DUPLEX_PLAYBACK_GATE_HOLD_MS", "900")
+)
+# 单个瞬时峰值不足以证明真人正在插话。连续命中若干个 30ms 帧后才打开
+# 采集门，避免一次敲击/爆音把后续 900ms 的外放残差整段送进 ASR。
+DUPLEX_PLAYBACK_GATE_CONFIRM_FRAMES = int(
+    os.environ.get("DUPLEX_PLAYBACK_GATE_CONFIRM_FRAMES", "8")
+)
+DUPLEX_PLAYBACK_GATE_TAIL_MS = int(
+    os.environ.get("DUPLEX_PLAYBACK_GATE_TAIL_MS", "1500")
+)
 
 # LLM
 SYSTEM_PROMPT = os.environ.get(
@@ -210,6 +251,27 @@ SOUL_TTY_STATE_DIR = Path(
         str(Path.home() / ".local" / "state" / "soul-tty"),
     )
 ).expanduser()
+
+# ---------------------------------------------------------------------------
+# 结构化运行日志。默认写用户状态目录，不向 Rich/Kitty 交互终端输出。
+# JSONL 每条自动携带 session_id / turn_id，文件按大小轮转。
+# ---------------------------------------------------------------------------
+SOUL_TTY_LOG_ENABLED = os.environ.get("SOUL_TTY_LOG_ENABLED", "1") not in (
+    "0", "false", "False",
+)
+SOUL_TTY_LOG_FILE = Path(
+    os.environ.get(
+        "SOUL_TTY_LOG_FILE",
+        str(SOUL_TTY_STATE_DIR / "logs" / "soul-tty.jsonl"),
+    )
+).expanduser()
+SOUL_TTY_LOG_LEVEL = os.environ.get("SOUL_TTY_LOG_LEVEL", "INFO").upper()
+SOUL_TTY_LOG_MAX_BYTES = int(
+    os.environ.get("SOUL_TTY_LOG_MAX_BYTES", str(10 * 1024 * 1024))
+)
+SOUL_TTY_LOG_BACKUP_COUNT = int(
+    os.environ.get("SOUL_TTY_LOG_BACKUP_COUNT", "5")
+)
 
 # ---------------------------------------------------------------------------
 # 长期记忆。写入走 Reflection 旁路，读取分两条：
@@ -338,9 +400,24 @@ AUDIO_IO_BACKEND = os.environ.get("AUDIO_IO_BACKEND", "portaudio")
 AVATAR_LIP_SYNC_ENABLED = os.environ.get("AVATAR_LIP_SYNC_ENABLED", "1") not in (
     "0", "false", "False"
 )
-# 默认等 LLM 完整回答后开始播报；MLX 客户端仍会逐句请求，以隔离单句的
-# 随机采样退化。设为 0 则在 LLM 生成期间就按句进入合成队列，首音更快。
-TTS_WHOLE_ANSWER = os.environ.get("TTS_WHOLE_ANSWER", "1") not in ("0", "false", "False")
+# 默认使用语义段流水线：LLM 先积累一个完整短语/短句，再把它作为整体交给
+# TTS；播放当前段时并行生成下一段。显式设为 1 可回退到完整回答后再播报。
+TTS_WHOLE_ANSWER = os.environ.get("TTS_WHOLE_ANSWER", "0") not in (
+    "0", "false", "False"
+)
+# 首段不能只是一个机械的语气词；优先积累到完整短句。长句则在自然逗号处
+# 提前启动，后续段适当放宽长度以保留更多韵律上下文。
+TTS_SEMANTIC_FIRST_MIN_CHARS = int(
+    os.environ.get("TTS_SEMANTIC_FIRST_MIN_CHARS", "8")
+)
+TTS_SEMANTIC_MIN_CHARS = int(os.environ.get("TTS_SEMANTIC_MIN_CHARS", "12"))
+TTS_SEMANTIC_TARGET_CHARS = int(
+    os.environ.get("TTS_SEMANTIC_TARGET_CHARS", "28")
+)
+TTS_SEMANTIC_MAX_CHARS = int(os.environ.get("TTS_SEMANTIC_MAX_CHARS", "56"))
+TTS_SEMANTIC_MAX_WAIT_MS = int(
+    os.environ.get("TTS_SEMANTIC_MAX_WAIT_MS", "650")
+)
 MACOS_VOICE = os.environ.get("MACOS_VOICE", "Tingting")
 MACOS_SPEECH_RATE = int(os.environ.get("MACOS_SPEECH_RATE", "205"))
 

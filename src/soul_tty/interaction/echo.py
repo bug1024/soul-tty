@@ -15,6 +15,35 @@ import re
 _NON_SPEECH_TEXT = re.compile(r"[^0-9a-z一-鿿]+")
 
 
+def normalize_speech_text(text: str) -> str:
+    """移除标点与空白，得到适合回声比较的紧凑文本。"""
+    return _NON_SPEECH_TEXT.sub("", text.lower())
+
+
+def _best_window_similarity(heard: str, spoken: str) -> float:
+    """在整段播放文本中寻找与 ASR 结果最相似的局部窗口。
+
+    回声不一定来自播放尾部，ASR 也经常产生一两个同音错字；只比较播放
+    transcript 的尾部会漏掉长回答中间位置的残余回声。
+    """
+    if not heard or not spoken:
+        return 0.0
+    tolerance = max(2, len(heard) // 4)
+    min_size = max(3, len(heard) - tolerance)
+    max_size = min(len(spoken), len(heard) + tolerance)
+    if min_size > max_size:
+        return difflib.SequenceMatcher(None, heard, spoken).ratio()
+    best = 0.0
+    for size in range(min_size, max_size + 1):
+        for start in range(0, len(spoken) - size + 1):
+            ratio = difflib.SequenceMatcher(
+                None, heard, spoken[start : start + size]
+            ).ratio()
+            if ratio > best:
+                best = ratio
+    return best
+
+
 def is_probable_echo(
     heard: str, spoken: str, similarity: float = 0.72
 ) -> bool:
@@ -28,14 +57,16 @@ def is_probable_echo(
     Returns:
         True → 当作回声过滤掉；False → 可能是真插话。
     """
-    heard_n = _NON_SPEECH_TEXT.sub("", heard.lower())
-    spoken_n = _NON_SPEECH_TEXT.sub("", spoken.lower())
-    if len(heard_n) < 3 or not spoken_n:
+    heard_n = normalize_speech_text(heard)
+    spoken_n = normalize_speech_text(spoken)
+    if not heard_n or not spoken_n:
         return False
-    if heard_n in spoken_n:
+    # 两个汉字的精确片段也可以安全识别为回声；单字信息量太低。
+    if len(heard_n) >= 2 and heard_n in spoken_n:
         return True
-    window = spoken_n[-max(len(heard_n) * 2, 24):]
-    return difflib.SequenceMatcher(None, heard_n, window).ratio() >= similarity
+    if len(heard_n) < 3:
+        return False
+    return _best_window_similarity(heard_n, spoken_n) >= similarity
 
 
-__all__ = ["is_probable_echo", "_NON_SPEECH_TEXT"]
+__all__ = ["is_probable_echo", "normalize_speech_text", "_NON_SPEECH_TEXT"]

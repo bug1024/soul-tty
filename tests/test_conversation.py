@@ -12,11 +12,16 @@ from soul_tty.audio.tts import (
     _write_metered_pcm,
     _trim_trailing_silence,
     speak,
+    synthesize_mlx_semantic_segment,
     synthesize_mlx_stream,
 )
 from soul_tty.clients.llm import Chat
 from soul_tty.clients import llm as llm_client
-from soul_tty.conversation import _is_probable_echo, _usable_transcript
+from soul_tty.conversation import (
+    _SemanticSpeechBuffer,
+    _is_probable_echo,
+    _usable_transcript,
+)
 
 
 class ConversationPolicyTests(unittest.TestCase):
@@ -34,6 +39,62 @@ class ConversationPolicyTests(unittest.TestCase):
     def test_keeps_real_interruption(self):
         spoken = "西湖位于杭州，是一处著名景区。"
         self.assertFalse(_is_probable_echo("等一下，换个话题", spoken))
+
+
+class SemanticSpeechBufferTests(unittest.TestCase):
+    def test_merges_too_short_opening_with_next_complete_sentence(self):
+        buffer = _SemanticSpeechBuffer()
+
+        self.assertEqual(buffer.feed("好呀。", now=0.0), [])
+        self.assertEqual(
+            buffer.feed("我一直在这里等你开口。", now=0.1),
+            ["好呀。我一直在这里等你开口。"],
+        )
+
+    def test_long_sentence_starts_at_natural_clause_boundary(self):
+        buffer = _SemanticSpeechBuffer()
+        text = (
+            "我刚才其实一直在这里等你开口，只是没有急着打扰你，"
+            "后面还有很多想慢慢说给你听的话。"
+        )
+
+        segments = buffer.feed(text, now=0.0)
+
+        self.assertEqual(
+            segments,
+            [
+                "我刚才其实一直在这里等你开口，只是没有急着打扰你，",
+                "后面还有很多想慢慢说给你听的话。",
+            ],
+        )
+        self.assertEqual(buffer.flush(), [])
+
+    def test_wait_budget_releases_an_existing_natural_phrase(self):
+        buffer = _SemanticSpeechBuffer()
+
+        self.assertEqual(buffer.feed("我正在认真想这件事，", now=0.0), [])
+        self.assertEqual(
+            buffer.feed("稍等", now=0.7),
+            ["我正在认真想这件事，"],
+        )
+        self.assertEqual(buffer.flush(), ["稍等"])
+
+    def test_keeps_closing_quote_with_the_sentence(self):
+        buffer = _SemanticSpeechBuffer()
+
+        self.assertEqual(
+            buffer.feed("她轻声说：“晚上好，我一直在这里。”", now=0.0),
+            ["她轻声说：“晚上好，我一直在这里。”"],
+        )
+
+    def test_hard_limit_does_not_split_ascii_word(self):
+        buffer = _SemanticSpeechBuffer()
+        text = "这是一段没有任何标点的中文内容" + "SuperLongModelName" + "继续往后"
+        with patch.object(config, "TTS_SEMANTIC_MAX_CHARS", 18):
+            segments = buffer.feed(text, now=0.0)
+
+        self.assertTrue(segments)
+        self.assertFalse(segments[0].endswith("Super"))
 
 
 class FakeResponse:
@@ -372,6 +433,14 @@ class MLXTTSClientTests(unittest.TestCase):
         self.assertEqual(RecordingPCMClient.created, 1)
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
+    def test_semantic_segment_preserves_multiple_sentences_in_one_request(self):
+        list(synthesize_mlx_semantic_segment("好呀。我一直在这里等你！"))
+        inputs = [request[2]["json"]["input"] for request in RecordingPCMClient.requests]
+
+        self.assertEqual(inputs, ["好呀。我一直在这里等你！"])
+        self.assertEqual(RecordingPCMClient.created, 1)
+
+    @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_strips_markdown_and_never_sends_symbol_only_segments(self):
         text = "普通句！\n**气死我了！你怎么这么笨！**\n"
         list(synthesize_mlx_stream(text))
@@ -569,7 +638,7 @@ class RecordingSpeaker:
 
 
 class AvatarStateRegressionTests(unittest.TestCase):
-    def test_streaming_tts_enters_speaking_before_first_sentence(self):
+    def test_streaming_tts_enters_speaking_before_first_semantic_segment(self):
         events = []
         speaker = RecordingSpeaker(events)
         with (
@@ -588,8 +657,7 @@ class AvatarStateRegressionTests(unittest.TestCase):
             events,
             [
                 ("state", "speaking"),
-                ("say", "第一句。"),
-                ("say", "第二句！"),
+                ("say", "第一句。第二句！"),
             ],
         )
 
@@ -835,4 +903,3 @@ def test_emit_emotion_update_pushes_section_without_persona_lookup():
 
     assert "[Emotion Context]" in chat.prompt
     assert chat.prompt == config.SYSTEM_PROMPT
-

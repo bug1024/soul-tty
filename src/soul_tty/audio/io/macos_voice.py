@@ -240,14 +240,37 @@ class MacOSVoiceIO(AudioIO):
         self._helper_process = None
 
     def _pump_helper_stderr(self) -> None:
-        """持续把 helper stderr 转发到我们自己的 stderr。"""
+        """持续排空 helper stderr，避免 PIPE 堵塞。
+
+        交互终端由 Rich Live + Kitty 图片协议独占。后台线程若直接写 stderr，
+        会绕过 Live 的光标管理并触发终端滚屏，导致原生头像 placement 上下
+        移动。TTY 下默认只排空；显式开启 ``SOUL_TTY_AUDIO_DEBUG=1`` 时才
+        恢复转发。非交互运行仍保留日志，方便服务端诊断。
+        """
         proc = self._helper_process
         if proc is None or proc.stderr is None:
             return
         import sys
+
+        debug = os.environ.get("SOUL_TTY_AUDIO_DEBUG", "0") not in {
+            "0",
+            "false",
+            "False",
+        }
+        interactive = bool(getattr(sys.stderr, "isatty", lambda: False)())
+        forward = debug or not interactive
         for line in iter(proc.stderr.readline, b""):
+            decoded = line.decode("utf-8", "replace").rstrip()
+            lowered = decoded.lower()
+            if any(word in lowered for word in ("error", "failed", "denied")):
+                log.warning("macos-voice-io helper: %s", decoded)
+            else:
+                log.debug("macos-voice-io helper: %s", decoded)
+            if not forward:
+                continue
             try:
-                sys.stderr.write(f"[helper] {line.decode('utf-8', 'replace')}")
+                sys.stderr.write(f"[helper] {decoded}\n")
+                sys.stderr.flush()
             except Exception:
                 pass
 
