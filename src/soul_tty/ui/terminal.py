@@ -865,6 +865,15 @@ class Dashboard:
             if changed and refresh:
                 self.refresh()
 
+    def set_intentional_silence(self) -> None:
+        """表现「听见了但选择不说」，区别于卡死或请求失败。"""
+        with self._lock:
+            self.state = "listening"
+            self.partial_text = ""
+            self._idle_emotion_active = True
+            self.presence_hint = "她听见了，只是没有急着开口"
+            self.refresh()
+
     def _idle_emotion_tick(
         self,
         generator: Callable[[], str | None] | None,
@@ -1689,6 +1698,15 @@ def speaking() -> None:
         return
     accent = _current().appearance.accent_color
     _console.print(f"  [{accent}]≋[/{accent}] [dim]正在说话[/dim]")
+
+
+def intentional_silence() -> None:
+    """Agency 主动选择 SILENCE；不伪装成空回答或系统错误。"""
+    if _dashboard is not None:
+        _dashboard.set_intentional_silence()
+        return
+    accent = _current().appearance.accent_color
+    _console.print(f"  [{accent}]…[/{accent}] [dim]安静陪伴[/dim]")
 
 
 def notice(text: str) -> None:

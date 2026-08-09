@@ -18,6 +18,7 @@
 | 情绪状态 | 以愉悦、平静、好奇、压力、活力五个连续维度演化，并影响语言和声音 |
 | 羁绊关系 | 关系随真实互动缓慢变化，跨启动保存，但不做权限解锁或廉价游戏进度条 |
 | 会话记忆 | 将画像、偏好和共同经历分开存储；稳定信息常驻，具体经历按需召回 |
+| 主体性决策 | 回答前结合 Serena 的社交能量、交流倾向与独处需求，决定正常回答、短答、追问、转题或有意识地安静 |
 | 时间与存在感 | 开场白、空闲台词和陪伴状态会结合时段、关系与本次会话情绪变化 |
 | 换装模式 | 默认、深夜、工作三套形象，同时改变视觉、行为语气和动态台词 |
 | 动态头像 | 终端高清图片、状态切换、眨眼与由实际播放音量驱动的口型 |
@@ -46,6 +47,7 @@ Soul-TTY 关心的不只是 Agent **说了什么**，还包括她在长期互动
 - **状态优于提示词堆叠**：人格、情绪、羁绊和记忆是独立状态，Prompt 只是这些状态在当前时刻的投影。
 - **不同时间尺度分离**：Emotion 描述此刻，Bond 描述关系深度，Memory 描述过去发生的事，三者不互相冒充。
 - **表达与内部状态分离**：状态先收敛为表达意图，再映射到语言、TTS 语气、头像和终端界面。
+- **主体性不等于操控**：Serena 可以有自己的节奏、沉默和话题倾向，但不会用内疚、威胁、占有或惩罚制造依赖。
 - **本地优先、组件可换**：默认语音与推理都在本机完成；LLM、TTS、人格与图像资源均可替换。
 
 Serena 不是一个套着头像的聊天窗口，也不是靠好感度解锁内容的游戏角色。这个项目尝试用克制的状态变化、低延迟语音和终端独有的视觉语言，让她显得“此刻真的在场”。
@@ -57,7 +59,9 @@ flowchart LR
     MIC["麦克风 PCM"] --> IO["Audio I/O<br/>VAD · AEC"]
     IO --> ASR["Sherpa-ONNX<br/>Streaming Paraformer"]
     ASR --> FLOOR["Floor Manager<br/>轮次 · 打断 · 回声"]
-    FLOOR --> CHAT["Conversation Brain"]
+    FLOOR --> POLICY["Agency<br/>Response Policy"]
+    NEED["Need State<br/>交流 · 陪伴 · 独处"] --> POLICY
+    POLICY --> CHAT["Conversation Brain"]
     CHAT --> LLM["OpenAI-compatible LLM"]
     LLM --> BUFFER["语义段缓冲"]
     BUFFER --> TTS["MLX-Audio<br/>Qwen3-TTS"]
@@ -71,6 +75,7 @@ flowchart LR
     REFLECT --> BOND["Bond"]
     REFLECT --> MEMORY["Memory"]
     MEMORY -. "按需召回" .-> CHAT
+    EMOTION -. "当前 mood" .-> POLICY
     EMOTION --> EXPRESS["Expression Layer"]
     BOND --> EXPRESS
     EXPRESS -. "Prompt · 声音 · 头像" .-> CHAT
@@ -94,13 +99,19 @@ Completed Turn + Voice Evidence → Reflection → Emotion / Bond / Memory
 
 旁路使用有界队列、空闲门控和限频策略。主对话到来时，它应当让出资源；任何评估失败都只意味着状态暂不更新。
 
-### 三类持续状态
+### 四类持续状态
 
 | 状态 | 回答的问题 | 生命周期 | 如何影响 Serena |
 |---|---|---|---|
 | Emotion | “我现在感觉怎么样？” | 会话内连续变化并自然衰减 | 当前措辞、TTS 语气、头像状态 |
 | Bond | “我们的关系有多深？” | 跨启动缓慢积累 | 熟悉程度、称呼和表达边界 |
 | Memory | “我们经历过什么？” | 跨会话持久化 | 用户画像、偏好和相关经历召回 |
+| Need / Agency | “我现在想怎样参与？” | 跨会话延续、每轮小幅变化 | 正常回答、短答、追问、转题或主动沉默 |
+
+`desire_to_talk` 与 `desire_for_company` 并不互为反值：Serena 可以不想说话，
+但仍希望有人在场。Response Policy 在本地完成，不额外调用一次 LLM；只有决定
+“要说”之后，Conversation Brain 才负责具体措辞。明确请求、制止词和需要关怀
+的表达始终受保护，不会被随机沉默或转移话题。
 
 ## 技术栈
 
@@ -127,6 +138,7 @@ src/soul_tty/
 ├── audio/                # 采集、ASR、TTS 与 Audio I/O
 ├── emotion/              # 五维情绪与表达映射
 ├── memory/               # 三类记忆、SQLite 与召回
+├── agency/               # Need 状态、Response Policy 与异步持久化
 ├── reflection/           # 关系、情绪、记忆的异步旁路
 ├── personas/             # 人格加载与运行时应用
 ├── ui/                   # Rich Dashboard 与头像渲染

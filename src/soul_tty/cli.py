@@ -204,6 +204,7 @@ def _main() -> None:
         duplex=config.DUPLEX_ENABLED,
         memory=config.MEMORY_ENABLED,
         reflection=config.REFLECTION_ENABLED,
+        agency=config.AGENCY_ENABLED,
     )
 
     launch_context = (
@@ -386,6 +387,57 @@ def _main() -> None:
     else:
         terminal.configure_relationship()
 
+    # Agency 位于 Conversation Brain 之前：每轮只做本地决策，不调用辅助
+    # LLM，也不等待状态落盘。Emotion 只提供当前 mood 快照，二者不互相改写。
+    agency_service = None
+    if config.AGENCY_ENABLED:
+        from .agency import AgencyService, ResponsePolicy
+        agency_path = (
+            config.AGENCY_STATE_PATH
+            if "AGENCY_STATE_PATH" in os.environ
+            else config.SOUL_TTY_STATE_DIR
+            / "agency"
+            / f"{reflection.safe_persona_id(persona.id)}.json"
+        )
+        try:
+            agency_service = AgencyService(
+                agency_path,
+                policy=ResponsePolicy(
+                    silence_rate=config.AGENCY_SILENCE_RATE,
+                    change_topic_rate=config.AGENCY_CHANGE_TOPIC_RATE,
+                    ask_rate=config.AGENCY_ASK_RATE,
+                    min_turns_before_silence=(
+                        config.AGENCY_MIN_TURNS_BEFORE_SILENCE
+                    ),
+                ),
+            )
+        except Exception:
+            observability.exception(
+                "agency.startup.error",
+                "Agency 初始化失败，已降级为正常回答",
+            )
+            agency_service = None
+
+        if agency_service is not None:
+            def decide_response(user_text: str):
+                current_mood = (
+                    emotion_service.snapshot().mood
+                    if emotion_service is not None
+                    else "calm"
+                )
+                relationship_level = (
+                    relationship_service.state.level
+                    if relationship_service is not None
+                    else ""
+                )
+                return agency_service.decide(
+                    user_text,
+                    mood=current_mood,
+                    relationship_level=relationship_level,
+                )
+
+            conversation.set_response_policy_provider(decide_response)
+
     outfit_greeting_generator = None
     if config.LLM_GREETING_ENABLED:
 
@@ -534,6 +586,9 @@ def _main() -> None:
             emotion_service.stop()
         if voice_service is not None:
             voice_service.close()
+        conversation.set_response_policy_provider(None)
+        if agency_service is not None:
+            agency_service.close()
         if audio_io is not None:
             try:
                 audio_io.stop()

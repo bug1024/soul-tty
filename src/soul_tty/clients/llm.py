@@ -455,6 +455,7 @@ class Chat:
         cancel: threading.Event | None = None,
         *,
         recall: str = "",
+        response_instruction: str = "",
     ) -> Iterator[str]:
         """发送一轮用户输入,流式产出回答 token,并把本轮记入历史。
 
@@ -464,14 +465,25 @@ class Chat:
         - 不进 self.messages：避免随 MAX_HISTORY 滚动污染长上下文
         - 不变 KV cache 稳定前缀：只重算末尾两条
 
+        `response_instruction` 是 Agency 针对本轮的表达策略，同样只进入本次
+        request，不写入 `self.messages`。
+
         走主 LLM（LLM_URL），纯 OpenAI Chat Completions 协议，
         不附带任何专属 header。
         """
         self.last_stop_reason = None
         self.messages.append({"role": "user", "content": text})
         messages = self.messages
-        if recall:
-            messages = [*self.messages[:-1], {"role": "system", "content": recall}, self.messages[-1]]
+        temporary_context = [item for item in (recall, response_instruction) if item]
+        if temporary_context:
+            messages = [
+                *self.messages[:-1],
+                *(
+                    {"role": "system", "content": item}
+                    for item in temporary_context
+                ),
+                self.messages[-1],
+            ]
         payload = {
             "model": self.model,
             "messages": messages,
@@ -497,6 +509,7 @@ class Chat:
             message_count=len(messages),
             prompt_chars=sum(len(str(item.get("content", ""))) for item in messages),
             recall=bool(recall),
+            response_mode=bool(response_instruction),
         )
         try:
             with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
@@ -582,5 +595,17 @@ class Chat:
         else:
             self.messages.pop()  # 在首 token 前被取消，本轮不进历史
         # 裁剪历史:system + 最近 MAX_HISTORY 轮(每轮 2 条)
+        if len(self.messages) > 1 + config.MAX_HISTORY * 2:
+            self.messages = [self.messages[0]] + self.messages[-config.MAX_HISTORY * 2:]
+
+    def record_silence(self, text: str) -> None:
+        """把主动沉默作为真实对话结果记入短期上下文，但不发送 LLM 请求。"""
+        self.last_stop_reason = "intentional_silence"
+        self.messages.extend(
+            (
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": "……"},
+            )
+        )
         if len(self.messages) > 1 + config.MAX_HISTORY * 2:
             self.messages = [self.messages[0]] + self.messages[-config.MAX_HISTORY * 2:]

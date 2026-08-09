@@ -28,6 +28,8 @@ _recall_provider: Callable[[str], str] | None = None
 # Voice perception：cli.py 把 VoiceStateService.submit 绑到这里；
 # 每次 ASR final 后提交 PCM，不阻塞主对话。
 _voice_submit_provider: Callable[[bytes], int | None] | None = None
+# Agency：每轮在 Memory / LLM 之前决定回应方式；本地常数时间，不走网络。
+_response_policy_provider: Callable[[str], object] | None = None
 
 
 def set_emotion_instruct_provider(
@@ -53,6 +55,14 @@ def set_voice_submit_provider(
     """cli.py 在 VoiceStateService 启动后调用；None 表示关闭声音感知。"""
     global _voice_submit_provider
     _voice_submit_provider = provider
+
+
+def set_response_policy_provider(
+    provider: Callable[[str], object] | None,
+) -> None:
+    """注册 Agency ResponsePolicy；None 表示保持传统的有问必答。"""
+    global _response_policy_provider
+    _response_policy_provider = provider
 
 
 def _current_tts_instruct() -> str:
@@ -89,6 +99,20 @@ def _current_voice_ref(pcm: bytes | None) -> int | None:
         observability.exception(
             "voice_state.submit.error",
             "声音感知任务提交失败",
+        )
+        return None
+
+
+def _current_response_decision(user_text: str):
+    provider = _response_policy_provider
+    if provider is None:
+        return None
+    try:
+        return provider(user_text)
+    except Exception:
+        observability.exception(
+            "agency.policy.error",
+            "Response Policy 决策失败，已降级为正常回答",
         )
         return None
 
@@ -296,6 +320,7 @@ def _print_answer(
     on_token: Callable[[str], None] | None = None,
     *,
     recall: str = "",
+    response_instruction: str = "",
     on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
     """流式打印 LLM 回答；给了 speaker 就按语义段送入 TTS 流水线。
@@ -335,7 +360,12 @@ def _print_answer(
         assert speaker is not None
         speaker.say(segment)
 
-    for token in chat.ask_stream(text, cancel, recall=recall):
+    stream_options = {"recall": recall}
+    # 兼容测试替身和第三方 Chat adapter：只有 Agency 真正给出本轮指令时
+    # 才使用新增参数；传统 ANSWER 路径的调用形状保持不变。
+    if response_instruction:
+        stream_options["response_instruction"] = response_instruction
+    for token in chat.ask_stream(text, cancel, **stream_options):
         terminal.answer_chunk(token)
         parts.append(token)
         if on_token is not None:
@@ -361,6 +391,20 @@ def _answer_impl(
     on_speech_queued: Callable[[str], None] | None = None,
 ) -> str:
     cancel = cancel or threading.Event()
+    policy_started_at = time.perf_counter()
+    decision = _current_response_decision(text)
+    response_instruction = getattr(decision, "instruction", "") if decision else ""
+    mode = getattr(getattr(decision, "mode", None), "value", "answer")
+    observability.event(
+        "agency.policy.decision",
+        duration_ms=observability.elapsed_ms(policy_started_at),
+        mode=mode,
+        reason=getattr(decision, "reason", "disabled") if decision else "disabled",
+    )
+    if mode == "silence":
+        chat.record_silence(text)
+        terminal.intentional_silence()
+        return ""
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
     # Provider 未注册时（emotion 关闭）回退到 config.MLX_TTS_INSTRUCT。
     instruct = _current_tts_instruct()
@@ -381,11 +425,13 @@ def _answer_impl(
         ) as speaker:
             answer = _print_answer(
                 chat, text, speaker, cancel, on_token, recall=recall,
+                response_instruction=response_instruction,
                 on_speech_queued=on_speech_queued,
             )
     else:
         answer = _print_answer(
             chat, text, cancel=cancel, on_token=on_token, recall=recall,
+            response_instruction=response_instruction,
             on_speech_queued=on_speech_queued,
         )
         if config.TTS_ENABLED and answer and not cancel.is_set():

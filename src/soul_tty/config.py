@@ -253,6 +253,29 @@ SOUL_TTY_STATE_DIR = Path(
 ).expanduser()
 
 # ---------------------------------------------------------------------------
+# Agency：Serena 的持续 Need 与每轮 Response Policy。
+# 决策完全在本地内存完成，不增加主 LLM 往返；状态写盘走后台线程。
+# Silence 只允许发生在低风险闲聊，并有最小轮数、连续沉默上限等护栏。
+# ---------------------------------------------------------------------------
+AGENCY_ENABLED = os.environ.get("AGENCY_ENABLED", "1") not in (
+    "0", "false", "False",
+)
+AGENCY_STATE_PATH = Path(
+    os.environ.get(
+        "AGENCY_STATE_PATH",
+        str(SOUL_TTY_STATE_DIR / "agency" / "serena.json"),
+    )
+).expanduser()
+AGENCY_SILENCE_RATE = float(os.environ.get("AGENCY_SILENCE_RATE", "0.10"))
+AGENCY_CHANGE_TOPIC_RATE = float(
+    os.environ.get("AGENCY_CHANGE_TOPIC_RATE", "0.08")
+)
+AGENCY_ASK_RATE = float(os.environ.get("AGENCY_ASK_RATE", "0.12"))
+AGENCY_MIN_TURNS_BEFORE_SILENCE = int(
+    os.environ.get("AGENCY_MIN_TURNS_BEFORE_SILENCE", "6")
+)
+
+# ---------------------------------------------------------------------------
 # 结构化运行日志。默认写用户状态目录，不向 Rich/Kitty 交互终端输出。
 # JSONL 每条自动携带 session_id / turn_id，文件按大小轮转。
 # ---------------------------------------------------------------------------

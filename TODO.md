@@ -19,3 +19,13 @@
 - [ ] 保证打断链路异常时自动退回稳定的半双工模式。
 
 以上两项当前只记录设计方向，不属于本次亲密成长旁路的实现范围。
+
+## Agency 后续阶段
+
+- [x] ResponsePolicy MVP：ANSWER / SHORT_REPLY / SILENCE / CHANGE_TOPIC / ASK。
+- [x] NeedState 骨架：交流、陪伴、独处与社交能量分离，跨启动延续。
+- [ ] OpenLoop Memory：为未完成事件补充状态、情绪权重、回访概率和 resolved 流程。
+- [ ] Spontaneous Recall：相关性、重要度、未完成性、冷却和随机性共同评分；命中也不保证表达。
+- [ ] InnerThread：保存 Serena 自己尚未说完的念头，并在启动时做克制的 continuity update。
+- [ ] Initiative / Attention：只在合适的空闲窗口主动开口，不抢占用户输入和实时主链路。
+- [ ] Agency 安全边界：持续回归内疚、威胁、占有、惩罚与依赖诱导类表达。
