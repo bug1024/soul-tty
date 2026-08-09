@@ -1472,13 +1472,16 @@ def _splash_panel(
     details = Text()
     if show_details:
         # 状态
-        details.append('当前状态\n', style="bold " + sec)
-        details.append(f"想聊天程度 {desire_to_talk}%  ", style="bold")
-        details.append(f"精力状态 {energy_level}%", style="bold")
+        details.append('◈ 当前状态\n', style="bold " + sec)
+        details.append("想聊天程度 ", style=dim)
+        details.append(f"{desire_to_talk}%", style="bold")
+        details.append("  ", style=dim)
+        details.append("精力状态 ", style=dim)
+        details.append(f"{energy_level}%", style="bold")
         details.append("\n\n")
 
         # 情绪
-        details.append('情绪\n', style="bold " + sec)
+        details.append('◌ 情绪\n', style="bold " + sec)
         if emotion_vector is not None:
             parts = []
             for dk in ("happiness", "calmness", "curiosity", "stress", "energy"):
@@ -1501,14 +1504,14 @@ def _splash_panel(
         details.append("\n\n")
 
         # 关系
-        details.append('关系\n', style="bold " + sec)
+        details.append('♡ 关系\n', style="bold " + sec)
         details.append(_RELATIONSHIP_LEVEL_ZH.get(relationship_tier, relationship_tier), style="bold " + primary)
         if relationship_interaction_count > 0:
             details.append(f"  共同经历 {relationship_interaction_count} 件", style=dim)
         details.append("\n\n")
 
         # 记忆
-        details.append('记忆\n', style="bold " + sec)
+        details.append('◆ 记忆\n', style="bold " + sec)
         if memory_count > 0:
             details.append(f"长期记忆 {memory_count} 条", style="bold")
             if recent_memory:
@@ -1518,7 +1521,7 @@ def _splash_panel(
         details.append("\n\n")
 
         # 感知
-        details.append('感知\n', style="bold " + sec)
+        details.append('♪ 感知\n', style="bold " + sec)
         if voice_emotion:
             details.append(_VOICE_EMOTION_LABELS.get(voice_emotion, voice_emotion), style=dim)
         else:
@@ -1531,7 +1534,7 @@ def _splash_panel(
         details.append("\n\n")
 
         # 内在状态
-        details.append('内在状态\n', style="bold " + sec)
+        details.append('◎ 内在状态\n', style="bold " + sec)
         details.append(current_tendency, style="bold")
         if unfinished_topics > 0:
             details.append(f"  未完成话题 {unfinished_topics} 个", style=dim)
