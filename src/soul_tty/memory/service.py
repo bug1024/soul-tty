@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import math
+import threading
+from dataclasses import dataclass
 
 from .. import config
 from .models import (
@@ -39,10 +41,22 @@ def _bigram_overlap(a: str, b: str) -> float:
     return len(a_grams & b_grams) / min(len(a_grams), len(b_grams))
 
 
+@dataclass(frozen=True)
+class MemoryPresence:
+    """供 Presence Panel 使用的克制摘要，不暴露存储实现。"""
+
+    count: int = 0
+    experience_count: int = 0
+    recent_recall: str = ""
+    latest_id: int | None = None
+
+
 class MemoryService:
     def __init__(self, path) -> None:
         self._store = MemoryStore(path)
         self.available = self._store.available
+        self._presence_lock = threading.RLock()
+        self._recent_recall = ""
 
     # --- 写入 -------------------------------------------------------
 
@@ -185,7 +199,36 @@ class MemoryService:
         if not rows:
             return ""
         found = search(query, rows)
-        return render_recall(found) if found else ""
+        if not found:
+            return ""
+        with self._presence_lock:
+            self._recent_recall = found[0].content
+        return render_recall(found)
+
+    def presence(self, *, persona_id: str = "") -> MemoryPresence:
+        """返回当前人格可见的长期记忆摘要。
+
+        全局画像/偏好与当前人格的共同经历合并计数；“最近想起”只来自本次
+        会话真实发生过的 recall，不拿“最近写入”冒充“最近想起”。
+        """
+        if not self.available:
+            return MemoryPresence()
+        global_rows = self._store.list(scope=SCOPE_GLOBAL)
+        experiences = self._store.list(
+            scope=SCOPE_PERSONA,
+            persona_id=persona_id,
+            types=(TYPE_EXPERIENCE,),
+        )
+        rows = [*global_rows, *experiences]
+        latest_id = max((row.id for row in rows), default=None)
+        with self._presence_lock:
+            recent_recall = self._recent_recall
+        return MemoryPresence(
+            count=len(rows),
+            experience_count=len(experiences),
+            recent_recall=recent_recall,
+            latest_id=latest_id,
+        )
 
     # --- 管理 -------------------------------------------------------
 

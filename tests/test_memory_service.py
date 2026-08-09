@@ -210,6 +210,33 @@ class RecallTests(ServiceBaseTest):
         # 只命中 serena 自己的那一条
         self.assertEqual(text.count("Soul-TTY 项目"), 1)
 
+    def test_presence_counts_only_visible_memories_and_real_recall(self):
+        self.service.remember({
+            "type": TYPE_PROFILE,
+            "content": "用户是工程师",
+            "importance": 0.9,
+        })
+        self.service.remember({
+            "type": TYPE_EXPERIENCE,
+            "content": "用户完成了 Soul-TTY 状态页设计",
+            "importance": 0.9,
+        }, persona_id="serena")
+        self.service.remember({
+            "type": TYPE_EXPERIENCE,
+            "content": "和其他人格完成了另一个项目",
+            "importance": 0.9,
+        }, persona_id="coder")
+
+        before = self.service.presence(persona_id="serena")
+        self.assertEqual(before.count, 2)
+        self.assertEqual(before.experience_count, 1)
+        self.assertEqual(before.recent_recall, "")
+
+        self.service.recall("你还记得 Soul-TTY 吗", persona_id="serena")
+        after = self.service.presence(persona_id="serena")
+        self.assertIn("状态页设计", after.recent_recall)
+        self.assertIsNotNone(after.latest_id)
+
 
 class CorruptedStoreTests(unittest.TestCase):
     """Store 不可用时 Service 全程静默降级。"""
@@ -227,6 +254,7 @@ class CorruptedStoreTests(unittest.TestCase):
             self.assertEqual(service.remember_many([]), 0)
             self.assertEqual(service.render_resident_context(), "")
             self.assertEqual(service.recall("你还记得吗"), "")
+            self.assertEqual(service.presence().count, 0)
 
 
 if __name__ == "__main__":

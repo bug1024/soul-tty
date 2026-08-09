@@ -232,6 +232,10 @@ def _main() -> None:
     relationship_state = None
     relationship_service = None
     agency_service = None
+    memory_service = None
+    terminal.configure_agency()
+    terminal.configure_memory()
+    terminal.configure_reflection()
 
     # VoiceStateService：异步声音感知，独立于 REFLECTION_ENABLED。
     # UI 更新走回调，Reflection 消费走 voice_service.get_indexed()。
@@ -314,6 +318,7 @@ def _main() -> None:
                 content = str(inner_thread.get("content", "")).strip()
                 if content:
                     agency_service.add_thought(content)
+                    terminal.update_agency(agency_service.state)
             if emotion_service is None:
                 return
             emotion_delta = payload.get("emotion_delta") or {}
@@ -336,6 +341,7 @@ def _main() -> None:
             on_relationship_update,
             on_evaluation_result,
         )
+        terminal.configure_reflection(relationship_service)
         relationship_state = relationship_service.state
 
         # 初始 Bond Context 注入 system prompt
@@ -347,12 +353,16 @@ def _main() -> None:
 
         # 把 Memory 接入同一条反思旁路。共享 idle 窗口、独立推理：
         # 关系评估后串行调用一次 memory_extractor，buffer 与 queue 解耦。
-        memory_service = None
         if config.MEMORY_ENABLED:
             from .memory.extractor import extract_from_turns
             from .memory.service import MemoryService
 
             memory_service = MemoryService(config.MEMORY_DB_PATH)
+            terminal.configure_memory(
+                memory_service.presence(persona_id=persona.id)
+                if memory_service.available
+                else None
+            )
 
             def memory_extractor(turns):
                 return extract_from_turns(
@@ -376,6 +386,9 @@ def _main() -> None:
                 )
                 if conversation_active is not None:
                     conversation_active.update_system_prompt(prompt.refresh())
+                terminal.update_memory(
+                    memory_service.presence(persona_id=persona.id)
+                )
 
             relationship_service.memory_extractor = memory_extractor
             relationship_service.on_memory_updated = on_memory_updated
@@ -388,11 +401,15 @@ def _main() -> None:
                 prompt.refresh()
 
             # 主对话每轮走 service.recall，按需注入临时 recall 段
-            conversation.set_recall_provider(
-                lambda user_text, _pid=persona.id: memory_service.recall(
-                    user_text, persona_id=_pid
-                )
-            )
+            def recall_for_conversation(user_text: str, _pid=persona.id) -> str:
+                recalled = memory_service.recall(user_text, persona_id=_pid)
+                if recalled:
+                    terminal.update_memory(
+                        memory_service.presence(persona_id=_pid)
+                    )
+                return recalled
+
+            conversation.set_recall_provider(recall_for_conversation)
 
         initial_mood = (
             emotion_service.snapshot().mood
@@ -449,6 +466,8 @@ def _main() -> None:
             agency_service = None
 
         if agency_service is not None:
+            terminal.configure_agency(agency_service.state)
+
             def decide_response(user_text: str):
                 current_mood = (
                     emotion_service.snapshot().mood
@@ -460,11 +479,13 @@ def _main() -> None:
                     if relationship_service is not None
                     else ""
                 )
-                return agency_service.decide(
+                decision = agency_service.decide(
                     user_text,
                     mood=current_mood,
                     relationship_level=relationship_level,
                 )
+                terminal.update_agency(agency_service.state)
+                return decision
 
             conversation.set_response_policy_provider(decide_response)
 

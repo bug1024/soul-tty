@@ -186,7 +186,7 @@ uv run soul-tty --file /path/to/16k-mono.wav
 |---|---|
 | 直接说话 | 开始一轮语音对话 |
 | `0` | 循环切换 Serena 的套装与陪伴模式 |
-| `Tab` | 展开或收起情绪、羁绊与运行详情 |
+| `Tab` | 在欢迎区、Serena 状态页和开发详情之间循环切换 |
 | `Ctrl+C` | 安全退出 |
 | `soul-tty memory` | 查看和管理长期记忆 |
 | `soul-tty relationship` | 查看当前人格的亲密阶段、数值和近期关系事件 |

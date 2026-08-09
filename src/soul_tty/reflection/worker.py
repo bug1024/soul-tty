@@ -159,6 +159,14 @@ class ReflectionWorker:
         with self._lock:
             self._last_activity = time.monotonic()
 
+    def diagnostics(self) -> dict[str, int]:
+        """供只读开发界面查看积压量，不暴露队列或记忆内容。"""
+        with self._lock:
+            return {
+                "queue_size": self.queue.qsize(),
+                "memory_buffer_size": len(self._memory_buffer),
+            }
+
     def _wait_for_idle(self) -> bool:
         while not self._stop.is_set():
             with self._lock:

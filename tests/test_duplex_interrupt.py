@@ -69,6 +69,34 @@ def test_spawn_answer_runs_in_background():
     assert state.done.is_set()
 
 
+def test_full_duplex_returns_to_listening_only_after_playback_drains(monkeypatch):
+    from soul_tty import conversation
+    from soul_tty.ui import terminal
+
+    events = []
+
+    class _AudioIO:
+        def wait_playback_drained(self, timeout: float):
+            events.append(("drained", timeout))
+            return True
+
+    monkeypatch.setattr(
+        terminal,
+        "listening",
+        lambda *args, **kwargs: events.append(("listening", None)),
+    )
+    conversation._spawn_answer(
+        _FakeChat(["你好"]),
+        "hello",
+        audio_io=_AudioIO(),
+    )
+    state = conversation._current_answer_state()
+    assert state is not None
+    state.done.wait(timeout=2.0)
+
+    assert events == [("drained", 15.0), ("listening", None)]
+
+
 def test_current_answer_state_cancel_sets_event():
     """调用 cancel.set() 必须让 _answer 走 cancel 路径。"""
     from soul_tty import conversation

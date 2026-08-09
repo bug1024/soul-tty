@@ -1170,12 +1170,20 @@ def _spawn_answer(
                         )
                 if floor is not None:
                     floor.agent_end()
-                state.done.set()
+                restore_listening = False
                 with _active_answer_lock:
                     global _active_answer_state
                     # 只清掉自己;防止被新 answer 覆盖后误清
                     if _active_answer_state is state:
                         _active_answer_state = None
+                        restore_listening = not state.cancel.is_set()
+                # full-duplex 没有外层 finally 帮它恢复 UI；必须等真正播放
+                # 排空后再切回聆听。被打断或已被新回答替代时绝不能抢状态。
+                try:
+                    if restore_listening:
+                        terminal.listening()
+                finally:
+                    state.done.set()
 
     threading.Thread(target=_run, name="soul-tty-duplex-answer", daemon=True).start()
 

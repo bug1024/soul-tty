@@ -1,12 +1,15 @@
 import io
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from rich.cells import cell_len
 from rich.console import Console
 
 from soul_tty.personas import load_persona
 from soul_tty.presence import LaunchContext
+from soul_tty.agency import AgencyState
+from soul_tty.memory.service import MemoryPresence
 from soul_tty.ui import terminal
 
 
@@ -14,10 +17,13 @@ class TerminalUITests(unittest.TestCase):
     def tearDown(self):
         terminal._dashboard = None
         terminal._relationship_profile = None
+        terminal._agency_profile = None
+        terminal._memory_profile = None
+        terminal._reflection_service = None
         terminal._launch_context = LaunchContext()
         terminal._outfit_greeting_generator = None
 
-    def test_splash_has_emotion_status_and_lightweight_technical_layers(self):
+    def test_splash_keeps_the_lightweight_local_technical_signature(self):
         output = io.StringIO()
         console = Console(
             file=output,
@@ -43,6 +49,7 @@ class TerminalUITests(unittest.TestCase):
             "SERENA",
             "早上好，今天也请多关照。",
             "◉ 正在聆听",
+            "直接说话即可",
             "0 换装",
             "LOCAL · Qwen3.5-9B · 文字模式 · Sherpa-ONNX",
         )
@@ -50,6 +57,8 @@ class TerminalUITests(unittest.TestCase):
             self.assertTrue(any(text in line for line in lines), text)
         self.assertFalse(any("人格：" in line for line in lines))
         self.assertFalse(any("sherpa-onnx ·" in line for line in lines))
+        self.assertNotIn("72%", output.getvalue())
+        self.assertNotIn("65%", output.getvalue())
 
     def test_greeting_fallback_tracks_the_local_time_period(self):
         self.assertEqual(terminal.day_period(8), "早上")
@@ -176,6 +185,71 @@ class TerminalUITests(unittest.TestCase):
 
         self.assertTrue(all(panel.height == 17 for panel in panels))
 
+    def test_wide_presence_panel_keeps_every_section_inside_avatar_height(self):
+        output = io.StringIO()
+        console = Console(file=output, width=180, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        avatar = terminal.Text("\n".join(" " * 26 for _ in range(13)))
+        with patch.object(terminal, "_console", console):
+            panel = terminal._splash_panel(
+                persona,
+                runtime,
+                3,
+                avatar,
+                show_details=True,
+                relationship_tier="companion",
+                agency_state=AgencyState(
+                    desire_to_talk=0.72,
+                    social_energy=0.65,
+                    unresolved_thoughts=("还想聊聊界面",),
+                ),
+                memory_presence=MemoryPresence(
+                    count=12,
+                    experience_count=3,
+                    recent_recall="用户正在开发 Soul-TTY",
+                    latest_id=18,
+                ),
+            )
+            console.print(panel)
+
+        rendered = output.getvalue()
+        self.assertEqual(panel.height, 17)
+        for section in ("当前状态", "情绪", "关系", "记忆", "感知", "内在状态"):
+            self.assertIn(section, rendered)
+
+    def test_developer_panel_replaces_presence_panel_and_stays_compact(self):
+        output = io.StringIO()
+        console = Console(file=output, width=180, force_terminal=False)
+        persona = load_persona("serena")
+        runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
+        avatar = terminal.Text("\n".join(" " * 26 for _ in range(13)))
+        reflection = SimpleNamespace(
+            diagnostics=lambda: {"queue_size": 2, "memory_buffer_size": 4}
+        )
+        with patch.object(terminal, "_console", console):
+            panel = terminal._splash_panel(
+                persona,
+                runtime,
+                3,
+                avatar,
+                show_details=True,
+                dev_mode=True,
+                agency_state=AgencyState(),
+                memory_presence=MemoryPresence(count=3, latest_id=9),
+                reflection_service=reflection,
+            )
+            console.print(panel)
+
+        rendered = output.getvalue()
+        self.assertEqual(panel.height, 17)
+        self.assertIn("开发详情", rendered)
+        self.assertIn("运行组件", rendered)
+        self.assertIn("Sherpa-ONNX", rendered)
+        self.assertIn("队列 2", rendered)
+        self.assertIn("记忆缓冲 4", rendered)
+        self.assertNotIn("当前状态", rendered)
+
     def test_expanded_technical_profile_uses_one_shared_colon_column(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)
@@ -211,7 +285,7 @@ class TerminalUITests(unittest.TestCase):
         self.assertIn("亲近", output.getvalue())
         self.assertNotIn("47", output.getvalue())
 
-    def test_splash_reveals_exact_score_and_emotion_dimensions_in_details(self):
+    def test_presence_panel_uses_real_agency_memory_and_emotion_data(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)
         persona = load_persona("serena")
@@ -237,8 +311,17 @@ class TerminalUITests(unittest.TestCase):
                     emotion_mood="excited",
                     emotion_intensity=0.75,
                     emotion_vector=vector,
-                    relationship_interaction_count=8,
-                    relationship_recent_events=("共同玩笑",),
+                    agency_state=AgencyState(
+                        desire_to_talk=0.72,
+                        social_energy=0.65,
+                        unresolved_thoughts=("还想聊聊界面",),
+                    ),
+                    memory_presence=MemoryPresence(
+                        count=12,
+                        experience_count=3,
+                        recent_recall="用户正在开发 Soul-TTY",
+                        latest_id=18,
+                    ),
                 )
             )
 
@@ -250,8 +333,12 @@ class TerminalUITests(unittest.TestCase):
         self.assertIn("好奇 71", rendered)
         self.assertIn("压力 18", rendered)
         self.assertIn("活力 74", rendered)
-        # 亲密进度：互动次数 + 上次事件
-        self.assertIn("共同经历 8 件", rendered)
+        self.assertIn("想聊天程度 72%", rendered)
+        self.assertIn("精力状态 65%", rendered)
+        self.assertIn("共同经历 3 件", rendered)
+        self.assertIn("长期记忆 12 条", rendered)
+        self.assertIn("最近想起", rendered)
+        self.assertIn("未完成话题 1 个", rendered)
         self.assertNotIn("人格：Serena", rendered)
         # Tab 详情模式下不再展开技术栈
         self.assertNotIn("人格：Serena", rendered)
@@ -309,6 +396,16 @@ class TerminalUITests(unittest.TestCase):
 
         after_clear = output.getvalue().rsplit("\033[2K", 1)[-1]
         self.assertTrue(after_clear.startswith("  │ SERENA\n  你好"))
+
+    def test_answer_end_does_not_close_mouth_before_tts_finishes(self):
+        dashboard = Mock()
+        dashboard.answer_index = None
+        with patch.object(terminal, "_dashboard", dashboard):
+            terminal._answer_pending = False
+            terminal.answer_end()
+
+        dashboard.set_state.assert_not_called()
+        dashboard.refresh.assert_called_once()
 
     def test_dialogue_roles_use_distinct_accents_and_neutral_body_text(self):
         output = io.StringIO()
@@ -629,7 +726,7 @@ class TerminalUITests(unittest.TestCase):
         )
         self.assertEqual(memory_flags[-2:], [False, True])
 
-    def test_dashboard_details_toggle_is_explicit_and_reversible(self):
+    def test_tab_cycles_welcome_presence_developer_and_back(self):
         output = io.StringIO()
         console = Console(file=output, width=120, force_terminal=False)
         persona = load_persona("serena")
@@ -641,10 +738,19 @@ class TerminalUITests(unittest.TestCase):
             dashboard = terminal.Dashboard(persona, runtime)
             dashboard.live.update = lambda *args, **kwargs: None
             self.assertFalse(dashboard.show_details)
+            self.assertFalse(dashboard.dev_mode)
+
             dashboard.toggle_details()
             self.assertTrue(dashboard.show_details)
+            self.assertFalse(dashboard.dev_mode)
+
+            dashboard.toggle_details()
+            self.assertTrue(dashboard.show_details)
+            self.assertTrue(dashboard.dev_mode)
+
             dashboard.toggle_details()
             self.assertFalse(dashboard.show_details)
+            self.assertFalse(dashboard.dev_mode)
 
     def test_dashboard_scrolls_conversation_inside_fixed_viewport(self):
         output = io.StringIO()
@@ -738,12 +844,12 @@ class TerminalUITests(unittest.TestCase):
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         cases = [
-            ("stranger", "初识"),
-            ("acquaintance", "相熟"),
-            ("familiar", "熟悉"),
-            ("companion", "亲近"),
-            ("close", "默契"),
-            ("bonded", "挚友"),
+            ("stranger", "初识阶段"),
+            ("acquaintance", "相识阶段"),
+            ("familiar", "熟悉阶段"),
+            ("companion", "信任阶段"),
+            ("close", "默契阶段"),
+            ("bonded", "深度连接"),
         ]
         for english, chinese in cases:
             output = io.StringIO()
