@@ -43,6 +43,24 @@ class ConversationPolicyTests(unittest.TestCase):
         spoken = "西湖位于杭州，是一处著名景区。"
         self.assertFalse(_is_probable_echo("等一下，换个话题", spoken))
 
+    def test_private_mode_keeps_stable_persona_tts_instruction(self):
+        with (
+            patch.object(config, "MLX_TTS_INSTRUCT", "清晰低柔的安全指令"),
+            patch.object(
+                main_module,
+                "_emotion_instruct_provider",
+                lambda: "用兴奋激动的语气说",
+            ),
+        ):
+            self.assertEqual(
+                main_module._current_tts_instruct(private=True),
+                "清晰低柔的安全指令",
+            )
+            self.assertEqual(
+                main_module._current_tts_instruct(),
+                "用兴奋激动的语气说",
+            )
+
 
 class SemanticSpeechBufferTests(unittest.TestCase):
     def test_merges_too_short_opening_with_next_complete_sentence(self):
@@ -447,6 +465,12 @@ class MLXTTSClientTests(unittest.TestCase):
     def setUp(self):
         RecordingPCMClient.requests = []
         RecordingPCMClient.created = 0
+        # 本组测试用 4 字节假 PCM 验证请求/规范化，不承担提前 EOS 行为测试。
+        self._early_eos_retries = config.MLX_TTS_EARLY_EOS_RETRIES
+        config.MLX_TTS_EARLY_EOS_RETRIES = 0
+
+    def tearDown(self):
+        config.MLX_TTS_EARLY_EOS_RETRIES = self._early_eos_retries
 
     @patch("soul_tty.audio.tts.httpx.Client", RecordingPCMClient)
     def test_sends_builtin_voice_stream_request_and_aligns_pcm(self):

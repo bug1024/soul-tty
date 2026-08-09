@@ -33,8 +33,8 @@ def _main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["personas", "outfits", "memory"],
-        help="列出可用人格、当前人格的头像套装，或管理 Memory",
+        choices=["personas", "outfits", "memory", "relationship"],
+        help="列出人格/头像套装，或管理 Memory 与亲密状态",
     )
     parser.add_argument(
         "--persona",
@@ -81,6 +81,19 @@ def _main() -> None:
         from .memory.cli import run_memory
 
         rc = run_memory(args.subargs)
+        raise SystemExit(rc)
+
+    if args.command == "relationship":
+        from .reflection.cli import run_relationship
+
+        try:
+            relationship_persona = load_persona(args.persona)
+        except (RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
+        rc = run_relationship(
+            args.subargs,
+            persona_id=relationship_persona.id,
+        )
         raise SystemExit(rc)
 
     try:

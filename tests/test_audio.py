@@ -44,7 +44,10 @@ def _make_fake_client(captured: list[dict]):
 
         def stream(self, method, url, json):
             captured.append(json)
-            return _make_streaming_response([b"\x00\x00"] * 4)
+            # 两秒有效 PCM，超过提前 EOS 保护阈值，避免通用 payload 测试
+            # 因模拟数据过短而触发重试。
+            pcm = (1000).to_bytes(2, "little", signed=True) * 48000
+            return _make_streaming_response([pcm])
 
     return FakeClient
 
@@ -94,6 +97,84 @@ def test_synthesize_mlx_segment_omits_instruct_when_both_empty(monkeypatch):
 
     list(tts.synthesize_mlx_stream("你好。"))
     assert "instruct" not in captured[0]
+
+
+def test_synthesize_mlx_segment_retries_premature_eos_without_playing_it(
+    monkeypatch,
+):
+    """明显过短的第一次结果不能外放，应降随机性重试并只返回第二次。"""
+    from src.soul_tty import config
+    from src.soul_tty.audio import tts
+
+    short = (1000).to_bytes(2, "little", signed=True) * 2400   # 0.1s
+    valid = (1000).to_bytes(2, "little", signed=True) * 24000  # 1.0s
+    responses = iter((short, valid))
+    payloads: list[dict] = []
+
+    class FakeClient:
+        def stream(self, method, url, json):
+            payloads.append(dict(json))
+            return _make_streaming_response([next(responses)])
+
+    monkeypatch.setattr(config, "MLX_TTS_VOICE", "Serena")
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_MIN_S", 0.6)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_S_PER_CHAR", 0.01)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_MAX_S", 1.0)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_RETRIES", 1)
+
+    result = b"".join(
+        tts._synthesize_mlx_segment(
+            "这是一句不会提前结束的话。",
+            None,
+            FakeClient(),
+        )
+    )
+
+    assert result == valid
+    assert len(payloads) == 2
+    assert payloads[1]["temperature"] == payloads[0]["temperature"]
+    assert "instruct" not in payloads[1]
+
+
+def test_synthesize_mlx_segment_splits_bad_compound_sentence_on_retry(monkeypatch):
+    """带逗号的坏组合应拆开重试，不能再次请求同一条确定性坏输入。"""
+    from src.soul_tty import config
+    from src.soul_tty.audio import tts
+
+    short = (1000).to_bytes(2, "little", signed=True) * 2400
+    valid_a = (1000).to_bytes(2, "little", signed=True) * 24000
+    valid_b = (1000).to_bytes(2, "little", signed=True) * 24000
+    responses = iter((short, valid_a, valid_b))
+    payloads: list[dict] = []
+
+    class FakeClient:
+        def stream(self, method, url, json):
+            payloads.append(dict(json))
+            return _make_streaming_response([next(responses)])
+
+    monkeypatch.setattr(config, "MLX_TTS_VOICE", "Serena")
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_MIN_S", 0.6)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_S_PER_CHAR", 0.01)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_MAX_S", 1.0)
+    monkeypatch.setattr(config, "MLX_TTS_EARLY_EOS_RETRIES", 1)
+
+    result = b"".join(
+        tts._synthesize_mlx_segment(
+            "现在，闭上眼睛，告诉我你最想去哪里？",
+            None,
+            FakeClient(),
+            instruct="用低柔语气说",
+        )
+    )
+
+    assert result == valid_a + valid_b
+    assert [p["input"] for p in payloads] == [
+        "现在，闭上眼睛，告诉我你最想去哪里？",
+        "现在，闭上眼睛。",
+        "告诉我你最想去哪里？",
+    ]
+    assert "instruct" in payloads[0]
+    assert all("instruct" not in p for p in payloads[1:])
 
 
 def test_streaming_speaker_locks_instruct_at_construction(monkeypatch):
@@ -328,4 +409,3 @@ def test_config_exposes_tts_playback_gain():
 
     assert hasattr(config, "TTS_PLAYBACK_GAIN")
     assert config.TTS_PLAYBACK_GAIN == 1.0
-

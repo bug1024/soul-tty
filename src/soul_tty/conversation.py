@@ -82,7 +82,11 @@ def set_memory_persistence_allowed(allowed: bool) -> None:
     _memory_persistence_allowed = bool(allowed)
 
 
-def _current_tts_instruct() -> str:
+def _current_tts_instruct(*, private: bool = False) -> str:
+    if private:
+        # 秘密套装的声学指令经过稳定性验证；不要让 excited 等会话情绪
+        # 覆盖成高张力指令，否则 Qwen3-TTS 容易退化为拉长气声或持续音。
+        return config.MLX_TTS_INSTRUCT
     provider = _emotion_instruct_provider
     if provider is None:
         return ""
@@ -436,7 +440,7 @@ def _answer_impl(
         return ""
     # 一段回答内锁定同一份 TTS 指令；中途换 mood 不影响本句。
     # Provider 未注册时（emotion 关闭）回退到 config.MLX_TTS_INSTRUCT。
-    instruct = _current_tts_instruct()
+    instruct = _current_tts_instruct(private=not memory_allowed)
     # 本轮检索到的相关记忆；临时插入，不进 system prompt / 不进 history。
     recall_started_at = time.perf_counter()
     recall = _current_recall(text)

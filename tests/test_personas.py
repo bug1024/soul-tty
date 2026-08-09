@@ -85,7 +85,8 @@ class PersonaTests(unittest.TestCase):
             self.assertIn("成年", config.SYSTEM_PROMPT)
             self.assertIn("三至六句", config.SYSTEM_PROMPT)
             self.assertIn("不是客服式的一问一答", config.SYSTEM_PROMPT)
-            self.assertIn("成熟魅惑", config.MLX_TTS_INSTRUCT)
+            self.assertIn("低柔", config.MLX_TTS_INSTRUCT)
+            self.assertIn("吐字清晰", config.MLX_TTS_INSTRUCT)
 
     def test_environment_keeps_priority_over_persona(self):
         persona = load_persona("serena")

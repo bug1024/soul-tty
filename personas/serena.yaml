@@ -84,7 +84,7 @@ appearance:
         hidden: true
         memory_enabled: false
         description: 只属于成年人的绯色秘密形态，魅惑、主动、危险而优雅
-        voice_instruct: 用成熟魅惑、低柔暧昧、充满情欲张力的成年女性语气说，节奏从容而主动
+        voice_instruct: 用成熟、低柔、亲密、吐字清晰的成年女性语气自然地说
         switch_greetings:
           - 嘘……这里发生的事，只有我们知道。
           - 既然找到了秘密，就别移开视线。

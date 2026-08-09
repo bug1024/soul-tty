@@ -299,6 +299,25 @@ def _complete_mlx_segment(text: str) -> str:
     return text
 
 
+def _split_premature_eos_segment(text: str) -> list[str]:
+    """把提前 EOS 的复句拆成两个完整请求，保留原文且绕开坏组合。"""
+    text = _normalize_mlx_text(text)
+    cuts = [index + 1 for index, char in enumerate(text) if char in "，,、；;"]
+    candidates: list[tuple[int, int]] = []
+    total = len(_SPEAKABLE.findall(text))
+    for cut in cuts:
+        left_chars = len(_SPEAKABLE.findall(text[:cut]))
+        right_chars = total - left_chars
+        if left_chars >= 4 and right_chars >= 4:
+            candidates.append((cut, abs(left_chars - right_chars)))
+    if not candidates:
+        return []
+    cut = min(candidates, key=lambda item: item[1])[0]
+    left = text[:cut].strip()
+    right = text[cut:].strip()
+    return [part for part in (left, right) if part]
+
+
 def _fade_out_pcm(pcm: bytes, duration_ms: int = 60) -> bytes:
     """给被硬上限截断的最后一块 PCM 做短淡出，避免波形突变爆音。"""
     usable = len(pcm) - len(pcm) % 2
@@ -406,6 +425,8 @@ def _synthesize_mlx_segment(
     client: httpx.Client,
     *,
     instruct: str = "",
+    _allow_split_recovery: bool = True,
+    _omit_instruct: bool = False,
 ) -> Iterator[bytes]:
     """合成一个完整句，并为随机采样退化设置硬上限。
 
@@ -444,35 +465,108 @@ def _synthesize_mlx_segment(
     if config.MLX_TTS_VOICE:
         payload["voice"] = config.MLX_TTS_VOICE
         effective = _resolve_instruct(instruct)
-        if effective:
+        if effective and not _omit_instruct:
             payload["instruct"] = effective
     else:
         raise RuntimeError("MLX_TTS_VOICE 不能为空；音色克隆后端已移除")
-    started_at = time.perf_counter()
-    audio_bytes = 0
-    try:
-        with client.stream(
-            "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
-        ) as resp:
-            resp.raise_for_status()
-            aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
-            for pcm in _trim_trailing_silence(aligned, max_audio_s):
-                audio_bytes += len(pcm)
-                yield pcm
-    finally:
-        audio_s = audio_bytes / (config.TTS_SAMPLE_RATE * 2)
-        capped = audio_s >= max_audio_s - 0.02
-        observability.event(
-            "tts.segment_synthesis.complete",
-            level=logging.WARNING if capped else logging.INFO,
-            duration_ms=observability.elapsed_ms(started_at),
-            input_chars=char_count,
-            audio_s=round(audio_s, 3),
-            max_audio_s=round(max_audio_s, 3),
-            max_tokens=max_tokens,
-            capped=capped,
-            cancelled=bool(cancel is not None and cancel.is_set()),
-        )
+    bytes_per_second = config.TTS_SAMPLE_RATE * 2
+    early_eos_floor_s = min(
+        config.MLX_TTS_EARLY_EOS_MAX_S,
+        max(
+            config.MLX_TTS_EARLY_EOS_MIN_S,
+            char_count * config.MLX_TTS_EARLY_EOS_S_PER_CHAR,
+        ),
+    )
+    max_attempts = max(1, config.MLX_TTS_EARLY_EOS_RETRIES + 1)
+
+    for attempt in range(1, max_attempts + 1):
+        started_at = time.perf_counter()
+        audio_bytes = 0
+        held: list[bytes] = []
+        released = False
+        # 重试时只对这个失败片段撤掉 instruct，采样参数保持音色默认值。
+        # Qwen3-TTS 存在确定性的「文本 × instruct」提前 EOS 组合；原样请求
+        # 即使重复多次也会停在同一位置，而内置 Serena 音色的自然语气通常
+        # 能完整读完。其余正常片段仍保留本轮情绪指令。
+        payload["temperature"] = config.MLX_TTS_TEMPERATURE
+        if attempt > 1:
+            payload.pop("instruct", None)
+        try:
+            with client.stream(
+                "POST", f"{config.MLX_TTS_URL}/v1/audio/speech", json=payload
+            ) as resp:
+                resp.raise_for_status()
+                aligned = _aligned_pcm(resp.iter_bytes(chunk_size=8192), cancel)
+                for pcm in _trim_trailing_silence(aligned, max_audio_s):
+                    audio_bytes += len(pcm)
+                    if released:
+                        yield pcm
+                        continue
+                    held.append(pcm)
+                    if audio_bytes / bytes_per_second >= early_eos_floor_s:
+                        released = True
+                        yield from held
+                        held.clear()
+        finally:
+            audio_s = audio_bytes / bytes_per_second
+            capped = audio_s >= max_audio_s - 0.02
+            cancelled = bool(cancel is not None and cancel.is_set())
+            premature_eos = (
+                not cancelled and audio_s < early_eos_floor_s - 0.02
+            )
+            observability.event(
+                "tts.segment_synthesis.complete",
+                level=(
+                    logging.WARNING
+                    if capped or premature_eos
+                    else logging.INFO
+                ),
+                duration_ms=observability.elapsed_ms(started_at),
+                input_chars=char_count,
+                audio_s=round(audio_s, 3),
+                min_audio_s=round(early_eos_floor_s, 3),
+                max_audio_s=round(max_audio_s, 3),
+                max_tokens=max_tokens,
+                attempt=attempt,
+                capped=capped,
+                premature_eos=premature_eos,
+                cancelled=cancelled,
+            )
+
+        if premature_eos and attempt < max_attempts:
+            retry_parts = (
+                _split_premature_eos_segment(text)
+                if _allow_split_recovery
+                else []
+            )
+            observability.event(
+                "tts.segment_synthesis.retry",
+                level=logging.WARNING,
+                input_chars=char_count,
+                audio_s=round(audio_s, 3),
+                min_audio_s=round(early_eos_floor_s, 3),
+                next_attempt=attempt + 1,
+                reason="premature_eos",
+                strategy="split_without_instruct" if retry_parts else "without_instruct",
+            )
+            if retry_parts:
+                for part in retry_parts:
+                    yield from _synthesize_mlx_segment(
+                        part,
+                        cancel,
+                        client,
+                        instruct="",
+                        _allow_split_recovery=False,
+                        _omit_instruct=True,
+                    )
+                return
+            continue
+
+        # 两次都过短时仍保留最后一次结果；这比整句静音更可诊断，也避免
+        # 无界重试阻塞主对话。正常结果早已在达到 floor 后流式释放。
+        if held and not cancelled:
+            yield from held
+        return
 
 
 def synthesize_mlx_stream(

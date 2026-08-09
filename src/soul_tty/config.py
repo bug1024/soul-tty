@@ -416,7 +416,21 @@ MLX_TTS_AUDIO_S_PER_CHAR = float(
 )
 MLX_TTS_MIN_AUDIO_S = float(os.environ.get("MLX_TTS_MIN_AUDIO_S", "2"))
 MLX_TTS_AUDIO_PADDING_S = float(
-    os.environ.get("MLX_TTS_AUDIO_PADDING_S", "1.5")
+    os.environ.get("MLX_TTS_AUDIO_PADDING_S", "2.5")
+)
+# Qwen3-TTS 偶发会在句子尚未说完时提前输出 EOS。先暂存一小段 PCM，
+# 若总时长明显不足则丢弃并重试一次，避免把残句直接送到扬声器。
+MLX_TTS_EARLY_EOS_MIN_S = float(
+    os.environ.get("MLX_TTS_EARLY_EOS_MIN_S", "0.6")
+)
+MLX_TTS_EARLY_EOS_S_PER_CHAR = float(
+    os.environ.get("MLX_TTS_EARLY_EOS_S_PER_CHAR", "0.07")
+)
+MLX_TTS_EARLY_EOS_MAX_S = float(
+    os.environ.get("MLX_TTS_EARLY_EOS_MAX_S", "2.2")
+)
+MLX_TTS_EARLY_EOS_RETRIES = int(
+    os.environ.get("MLX_TTS_EARLY_EOS_RETRIES", "1")
 )
 TTS_SAMPLE_RATE = int(os.environ.get("TTS_SAMPLE_RATE", "24000"))
 # 线性播放增益：commit 02 引入。1.0 = 不变（默认与历史一致）；
