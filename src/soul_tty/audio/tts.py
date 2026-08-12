@@ -18,6 +18,7 @@ import numpy as np
 import sounddevice as sd
 
 from .. import config, observability
+from ..network import client_options
 
 _SENTINEL = object()
 _MLX_SENTENCE = re.compile(r".+?(?:[。！？!?；;\n]+|$)", re.DOTALL)
@@ -584,7 +585,9 @@ def synthesize_mlx_stream(
     if not segments:
         return
     # 一轮播报内复用本地 HTTP 连接，同时保留逐句模型请求和异常隔离。
-    with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+    with httpx.Client(
+        **client_options(config.MLX_TTS_URL, config.REQUEST_TIMEOUT)
+    ) as client:
         for segment in segments:
             if cancel is not None and cancel.is_set():
                 return
@@ -603,7 +606,9 @@ def synthesize_mlx_semantic_segment(
     segment = _complete_mlx_segment(text)
     if not segment or not _SPEAKABLE.search(segment):
         return
-    with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+    with httpx.Client(
+        **client_options(config.MLX_TTS_URL, config.REQUEST_TIMEOUT)
+    ) as client:
         yield from _synthesize_mlx_segment(
             segment,
             cancel,

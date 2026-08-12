@@ -19,6 +19,7 @@ from collections.abc import Iterator
 import httpx
 
 from .. import config, observability
+from ..network import client_options
 
 _SENTENCE_END = re.compile(r"[。！？!?\n]")
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
@@ -45,7 +46,7 @@ def pick_model(url: str, configured: str = "") -> str:
     """
     if configured:
         return configured
-    with httpx.Client(timeout=10) as client:
+    with httpx.Client(**client_options(url, 10)) as client:
         resp = client.get(f"{url}/v1/models")
         resp.raise_for_status()
     models = resp.json().get("data", [])
@@ -136,7 +137,7 @@ def extract_memories(
         "chat_template_kwargs": {"enable_thinking": False},
     }
     aux_url = config._resolve_aux_url() if not config.MEMORY_LLM_URL else config.MEMORY_LLM_URL
-    with httpx.Client(timeout=config.MEMORY_LLM_TIMEOUT) as client:
+    with httpx.Client(**client_options(aux_url, config.MEMORY_LLM_TIMEOUT)) as client:
         response = client.post(
             f"{aux_url}/v1/chat/completions",
             json=payload,
@@ -226,9 +227,10 @@ def generate_greeting(
         "max_tokens": 32,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+    aux_url = config._resolve_aux_url()
+    with httpx.Client(**client_options(aux_url, config.LLM_GREETING_TIMEOUT)) as client:
         response = client.post(
-            f"{config._resolve_aux_url()}/v1/chat/completions",
+            f"{aux_url}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -282,9 +284,10 @@ def generate_outfit_greeting(
         "max_tokens": 32,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+    aux_url = config._resolve_aux_url()
+    with httpx.Client(**client_options(aux_url, config.LLM_GREETING_TIMEOUT)) as client:
         response = client.post(
-            f"{config._resolve_aux_url()}/v1/chat/completions",
+            f"{aux_url}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -334,9 +337,10 @@ def generate_idle_emotion(
         "max_tokens": 32,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    with httpx.Client(timeout=config.LLM_GREETING_TIMEOUT) as client:
+    aux_url = config._resolve_aux_url()
+    with httpx.Client(**client_options(aux_url, config.LLM_GREETING_TIMEOUT)) as client:
         response = client.post(
-            f"{config._resolve_aux_url()}/v1/chat/completions",
+            f"{aux_url}/v1/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -438,7 +442,9 @@ def evaluate_relationship(
         "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    with httpx.Client(timeout=config.RELATIONSHIP_LLM_TIMEOUT) as client:
+    with httpx.Client(
+        **client_options(config.RELATIONSHIP_LLM_URL, config.RELATIONSHIP_LLM_TIMEOUT)
+    ) as client:
         response = client.post(
             f"{config.RELATIONSHIP_LLM_URL}/v1/chat/completions",
             json=payload,
@@ -544,7 +550,9 @@ class Chat:
             response_mode=bool(response_instruction),
         )
         try:
-            with httpx.Client(timeout=config.REQUEST_TIMEOUT) as client:
+            with httpx.Client(
+                **client_options(endpoint, config.REQUEST_TIMEOUT)
+            ) as client:
                 with client.stream(
                     "POST",
                     f"{endpoint}/v1/chat/completions",
