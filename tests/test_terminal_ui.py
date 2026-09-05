@@ -152,7 +152,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_uses_configured_launch_context_without_waiting_for_llm(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         terminal.configure_relationship(90, "灵魂共鸣", "calm")
@@ -165,7 +165,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_idle_emotion_appears_and_voice_activity_restores_greeting(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -201,7 +201,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_idle_llm_result_is_discarded_if_user_speaks_while_generating(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -229,7 +229,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_wide_splash_has_a_fixed_seventeen_row_height(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         avatar = terminal.Text("\n".join(" " * 26 for _ in range(13)))
@@ -315,7 +315,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_expanded_technical_profile_uses_one_shared_colon_column(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         with patch.object(terminal, "_console", console):
@@ -339,7 +339,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_splash_hides_exact_relationship_score_by_default(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         with patch.object(terminal, "_console", console):
@@ -359,7 +359,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_presence_panel_uses_real_agency_memory_and_emotion_data(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         from soul_tty.emotion.state import EmotionVector
@@ -418,7 +418,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_relationship_voice_waits_until_dashboard_returns_to_listening(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -500,7 +500,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_loads_and_switches_all_avatar_states(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         calls = []
@@ -536,7 +536,7 @@ class TerminalUITests(unittest.TestCase):
     def test_interruption_final_updates_one_existing_user_message(self):
         """partial 打断与 FINAL 应合并为一条，而不是在对话区重复显示。"""
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -555,7 +555,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_paints_native_avatar_in_reserved_card_area(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -584,7 +584,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_uses_cached_static_frames_for_speaking_state(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -617,7 +617,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_preloads_two_clean_static_mouth_frames_on_start(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -647,7 +647,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_speaking_hides_the_previous_state_before_first_mouth_frame(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
 
@@ -666,7 +666,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_mouth_only_changes_when_pcm_level_crosses_the_threshold(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         with (
@@ -731,7 +731,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_zero_cycles_mode_and_loads_only_its_unique_frames(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         paths = []
@@ -766,7 +766,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_secret_sequence_mode_is_hidden_and_disables_memory(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         memory_flags = []
@@ -800,7 +800,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_tab_cycles_welcome_presence_developer_and_back(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         with (
@@ -826,7 +826,7 @@ class TerminalUITests(unittest.TestCase):
 
     def test_dashboard_scrolls_conversation_inside_fixed_viewport(self):
         output = io.StringIO()
-        console = Console(file=output, width=120, force_terminal=False)
+        console = Console(file=output, width=120, height=40, force_terminal=False)
         persona = load_persona("serena")
         runtime = terminal.RuntimeDetails(model="Qwen3.5-9B.gguf", tts="MLX")
         with patch.object(terminal, "_console", console):
@@ -925,7 +925,7 @@ class TerminalUITests(unittest.TestCase):
         ]
         for english, chinese in cases:
             output = io.StringIO()
-            console = Console(file=output, width=120, force_terminal=False)
+            console = Console(file=output, width=120, height=40, force_terminal=False)
             with patch.object(terminal, "_console", console):
                 console.print(
                     terminal._splash_panel(

@@ -225,6 +225,37 @@ class RepeatingClient(FakeClient):
 
 
 class ChatCancellationTests(unittest.TestCase):
+    def test_thinking_is_disabled_and_reasoning_is_not_spoken(self):
+        class ReasoningResponse(FakeResponse):
+            def iter_lines(self):
+                for delta in (
+                    {"content": None, "reasoning_content": "内部推理"},
+                    {"content": "你好。", "reasoning_content": "更多推理"},
+                ):
+                    yield "data: " + __import__("json").dumps(
+                        {"choices": [{"delta": delta}]}
+                    )
+                yield "data: [DONE]"
+
+        class ReasoningClient(FakeClient):
+            def stream(self, method, url, **kwargs):
+                self_test.assertEqual(
+                    kwargs["json"]["chat_template_kwargs"],
+                    {"enable_thinking": False},
+                )
+                return ReasoningResponse()
+
+        self_test = self
+        for private in (False, True):
+            with self.subTest(private=private), patch(
+                "soul_tty.clients.llm.httpx.Client", ReasoningClient
+            ):
+                chat = Chat("test")
+                self.assertEqual("".join(chat.ask_stream("你好", private=private)), "你好。")
+                history = chat._private_messages if private else chat.messages
+                self.assertNotIn("内部推理", str(history))
+
+
     @patch("soul_tty.clients.llm.httpx.Client", FakeClient)
     def test_cancel_before_first_token_rolls_back_user_message(self):
         chat = Chat("test")

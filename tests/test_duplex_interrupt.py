@@ -34,6 +34,8 @@ def _reset_active_answer(monkeypatch):
 
     monkeypatch.setattr(conversation, "_active_answer_state", None)
     monkeypatch.setattr(conversation, "_active_chat", None)
+    # 此处验证线程编排；真实 TTS 服务/声卡延迟由音频测试独立覆盖。
+    monkeypatch.setattr(conversation.config, "TTS_ENABLED", False)
     # 屏蔽 terminal:避免 _answer 内部调 terminal.answer_start() 等抛
     # "终端 UI 尚未配置人格"。
     monkeypatch.setattr(terminal, "answer_start", lambda: None)

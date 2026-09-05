@@ -526,6 +526,7 @@ class Chat:
             "model": request_model,
             "messages": messages,
             "stream": True,
+            "chat_template_kwargs": {"enable_thinking": False},
             "temperature": config.LLM_TEMPERATURE,
             "top_p": config.LLM_TOP_P,
             "max_tokens": config.LLM_MAX_TOKENS,
@@ -583,9 +584,9 @@ class Chat:
                             delta = json.loads(data)["choices"][0]["delta"]
                         except Exception:
                             continue
-                        # delta 可能是 content/reasoning_content 或直接字符串
+                        # 只播报正式回答；服务端即使返回 reasoning 也不能进入字幕或历史。
                         if isinstance(delta, dict):
-                            token = delta.get("content") or delta.get("reasoning_content") or ""
+                            token = delta.get("content") or ""
                         else:
                             token = delta if isinstance(delta, str) else ""
                         if not token:

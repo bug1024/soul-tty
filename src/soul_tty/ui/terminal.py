@@ -405,7 +405,10 @@ class Dashboard:
         self.dev_mode = False
         self.mouth_frame = 1
         self._native_frames_ready = False
+        self._native_visible = False
         self._lock = threading.RLock()
+        self._refresh_timer: threading.Timer | None = None
+        self._closed = False
         now = time.monotonic()
         self._last_voice_activity = now
         self._next_idle_emotion_at = now + config.IDLE_EMOTION_AFTER_S
@@ -660,10 +663,25 @@ class Dashboard:
             reflection_service=self.reflection_service,
         )
 
-        body_width = min(110, max(44, _console.width - 4))
+        body_width = min(110, max(1, _console.width - 4))
+        if _console.height < 32 or _console.width < 60:
+            # 小窗口优先保留实时字幕与对话，避免头像把正文挤出屏幕。
+            summary = Text(self.persona.display_name, style="bold")
+            summary.append(f"  · {'安静陪伴' if self._idle_emotion_active else _STATE_LABELS[self.state]}\n")
+            summary.append(self.partial_text or self.presence_hint or self.greeting)
+            if self.show_details:
+                summary.append(
+                    f"\n{_MOOD_LABELS.get(self.emotion_mood, self.emotion_mood)}"
+                    f" · {_RELATIONSHIP_LEVEL_ZH.get(self.relationship_level, '初识阶段')}"
+                )
+            header = Panel(
+                summary, width=body_width, height=min(7, max(3, _console.height // 3)),
+                padding=(0, 1), border_style=self.persona.appearance.primary_color,
+                subtitle="0 换装 · Tab 状态 · Ctrl+C 退出",
+            )
         header_height = header.height or 20
-        body_height = max(7, _console.height - header_height - 1)
-        content_width = max(20, body_width - 6)
+        body_height = max(3, _console.height - header_height - 1)
+        content_width = max(1, body_width - 6)
         content_rows = max(1, body_height - 4)
         transcript = self._transcript_view(content_width, content_rows)
         history_hint = ""
@@ -803,7 +821,8 @@ class Dashboard:
         if not config.AVATAR_LIP_SYNC_ENABLED:
             return
         with self._lock:
-            if self.state != "speaking" or not self._native_frames_ready:
+            if (self.state != "speaking" or not self._native_frames_ready
+                    or _console.width < 82 or _console.height < 32):
                 return
             # 迟滞避免临界音量下抖动；较高开口阈值让自然语音的强弱
             # 真正形成张合，而不是一有声音就整句停在半开帧。
@@ -823,10 +842,11 @@ class Dashboard:
             )
 
     def _paint_native(self) -> None:
-        if _console.width < 82:
+        if _console.width < 82 or _console.height < 32:
             return
         if self.state == "speaking" and self._native_frames_ready:
             if self._start_mouth_animation():
+                self._native_visible = True
                 return
         # 非 Kitty 终端保持闭嘴完整帧，避免高频整图重传造成闪烁。
         render = self._active_avatar()
@@ -834,6 +854,7 @@ class Dashboard:
             return
         # Panel: border(1) + top padding(1) => row 3;
         # border(1) + left padding(4) + table optical padding(1) => column 7.
+        self._native_visible = True
         avatar_ui.write_native_at(
             render,
             _console.file,
@@ -841,8 +862,32 @@ class Dashboard:
             column=_AVATAR_COLUMN,
         )
 
+    def request_refresh(self) -> None:
+        """合并流式文字/识别更新；尾帧也会刷新，不依赖下一个 token。"""
+        with self._lock:
+            if self._closed or self._refresh_timer is not None:
+                return
+
+            def flush() -> None:
+                with self._lock:
+                    if self._refresh_timer is timer and not self._closed:
+                        self.refresh()
+
+            timer = threading.Timer(1 / 30, flush)
+            timer.daemon = True
+            self._refresh_timer = timer
+            timer.start()
+
     def refresh(self, *, paint_avatar: bool = False) -> None:
         with self._lock:
+            if self._closed:
+                return
+            if self._refresh_timer is not None:
+                self._refresh_timer.cancel()
+                self._refresh_timer = None
+            if self._native_visible and (_console.width < 82 or _console.height < 32):
+                avatar_ui.hide_native_avatar(_console.file)
+                self._native_visible = False
             self.live.update(self.render(), refresh=True)
             if paint_avatar:
                 self._paint_native()
@@ -1139,10 +1184,16 @@ class Dashboard:
                 memory_presence=self.memory_presence,
             )
 
-    def update(self, index: int, text: str) -> None:
-        role, _ = self.messages[index]
-        self.messages[index] = (role, text)
-        self.refresh()
+    def update(self, index: int, text: str, *, deferred: bool = False) -> None:
+        with self._lock:
+            role, previous = self.messages[index]
+            if previous == text:
+                return
+            self.messages[index] = (role, text)
+            if deferred:
+                self.request_refresh()
+            else:
+                self.refresh()
 
     def stop(self) -> None:
         self._idle_emotion_stop.set()
@@ -1150,6 +1201,10 @@ class Dashboard:
             self._outfit_greeting_timer.cancel()
         self.input.stop()
         with self._lock:
+            self._closed = True
+            if self._refresh_timer is not None:
+                self._refresh_timer.cancel()
+                self._refresh_timer = None
             if self._native_frames_ready:
                 self._stop_mouth_animation()
             self.live.stop()
@@ -2062,8 +2117,9 @@ def partial(text: str) -> None:
         if text:
             _dashboard.mark_voice_activity(refresh=False)
         with _dashboard._lock:
-            _dashboard.partial_text = text
-            _dashboard.refresh()
+            if _dashboard.partial_text != text:
+                _dashboard.partial_text = text
+                _dashboard.request_refresh()
         return
     if sys.stdout.isatty():
         secondary = _current().appearance.secondary_color
@@ -2129,7 +2185,7 @@ def answer_chunk(text: str) -> None:
             old = ""
             _answer_pending = False
         _answer_has_content = True
-        _dashboard.update(_dashboard.answer_index, old + text)
+        _dashboard.update(_dashboard.answer_index, old + text, deferred=True)
         return
     if _answer_pending:
         persona = _current()

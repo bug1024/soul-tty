@@ -142,7 +142,10 @@ class PlaybackLevelMeter:
                 pass
 
 
-def _write_metered_pcm(stream, pcm: bytes, meter: PlaybackLevelMeter) -> None:
+def _write_metered_pcm(
+    stream, pcm: bytes, meter: PlaybackLevelMeter,
+    cancel: threading.Event | None = None,
+) -> None:
     """按接近口型刷新周期的小窗播放，避免一个 HTTP 大块只更新一次。
 
     增益在这里一次性应用：先 clip 再 cast 回 int16，避免溢出爆音；
@@ -156,6 +159,8 @@ def _write_metered_pcm(stream, pcm: bytes, meter: PlaybackLevelMeter) -> None:
     frame_bytes = samples_per_frame * 2
     gain = get_playback_gain()
     for offset in range(0, len(pcm), frame_bytes):
+        if cancel is not None and cancel.is_set():
+            break
         frame = pcm[offset : offset + frame_bytes]
         if not frame:
             continue
@@ -706,7 +711,7 @@ def speak(
                             duration_ms=observability.elapsed_ms(started_at),
                             pcm_bytes=len(pcm),
                         )
-                    _write_metered_pcm(stream, pcm, meter)
+                    _write_metered_pcm(stream, pcm, meter, cancel)
     finally:
         if timeline is not None:
             timeline.finish(
@@ -765,6 +770,7 @@ class StreamingSpeaker:
         audio_io=None,
     ):
         self._cancel = cancel or threading.Event()
+        self._playback_failed = threading.Event()
         self._on_audio_level = on_audio_level
         self._instruct = instruct
         self._turn_id = observability.current_turn_id()
@@ -797,7 +803,7 @@ class StreamingSpeaker:
         return False
 
     def say(self, sentence: str):
-        if not self._cancel.is_set():
+        if not self._cancel.is_set() and not self._playback_failed.is_set():
             self._sent_q.put(sentence)
 
     @staticmethod
@@ -806,7 +812,7 @@ class StreamingSpeaker:
             q.queue.clear()
 
     def _put_audio(self, item: bytes | object) -> bool:
-        while not self._cancel.is_set():
+        while not self._cancel.is_set() and not self._playback_failed.is_set():
             try:
                 self._audio_q.put(item, timeout=0.1)
                 return True
@@ -847,16 +853,16 @@ class StreamingSpeaker:
                     if not self._cancel.is_set():
                         observability.exception("tts.synthesis.error", "TTS 合成失败")
                         print(f"(TTS 合成失败: {e})")
-                if self._cancel.is_set():
+                if self._cancel.is_set() or self._playback_failed.is_set():
                     break
-            if self._cancel.is_set():
+            if self._cancel.is_set() or self._playback_failed.is_set():
                 self._drain(self._audio_q)
                 try:
                     self._audio_q.put_nowait(_SENTINEL)
                 except queue.Full:
                     pass
             else:
-                self._audio_q.put(_SENTINEL)
+                self._put_audio(_SENTINEL)
             observability.event(
                 "tts.synthesis.complete",
                 duration_ms=observability.elapsed_ms(pipeline_started_at),
@@ -885,7 +891,10 @@ class StreamingSpeaker:
                 # 这样 macos_voice 后端 AVAudioEngine 能拿到 playback
                 # reference,voice-processing 才能完整 echo cancellation。
                 while not self._cancel.is_set():
-                    pcm = self._audio_q.get()
+                    try:
+                        pcm = self._audio_q.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
                     if pcm is _SENTINEL:
                         break
                     if pcm:
@@ -901,6 +910,7 @@ class StreamingSpeaker:
                         except Exception as e:
                             if not self._cancel.is_set():
                                 print(f"(TTS 播放失败: {e})")
+                            self._playback_failed.set()
                             break
                 if not self._cancel.is_set():
                     self._audio_io.wait_playback_drained(timeout=15.0)
@@ -911,21 +921,27 @@ class StreamingSpeaker:
                     samplerate=config.TTS_SAMPLE_RATE, dtype="int16", channels=1
                 ) as stream:
                     while not self._cancel.is_set():
-                        pcm = self._audio_q.get()
+                        try:
+                            pcm = self._audio_q.get(timeout=0.05)
+                        except queue.Empty:
+                            continue
                         if pcm is _SENTINEL:
                             break
                         if pcm:
                             if not first_audio_seen:
                                 first_audio_seen = True
                                 observability.event("audio.playback_start")
-                            _write_metered_pcm(stream, pcm, meter)
+                            _write_metered_pcm(stream, pcm, meter, self._cancel)
         except Exception as e:
             if not self._cancel.is_set():
                 observability.exception("tts.playback.error", "TTS 播放失败")
                 print(f"(TTS 播放失败: {e})")
+            self._playback_failed.set()
         finally:
             if timeline is not None:
-                timeline.finish(interrupted=self._cancel.is_set())
+                timeline.finish(
+                    interrupted=self._cancel.is_set() or self._playback_failed.is_set()
+                )
             meter.close()
             observability.event(
                 "audio.playback_complete",
