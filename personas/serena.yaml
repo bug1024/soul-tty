@@ -83,7 +83,7 @@ appearance:
         speaking_closed: ../assets/avatars/serena/work/idle.png
         speaking_half: ../assets/avatars/serena/work/speaking.png
         speaking_open: ../assets/avatars/serena/work/speaking.png
-      secret-18:
+      secret-18: &secret_18_outfit
         label: 绯夜秘仪
         mode: secret_18
         hidden: true
@@ -100,3 +100,59 @@ appearance:
         speaking_closed: ../assets/avatars/serena/secret-18/idle.png
         speaking_half: ../assets/avatars/serena/secret-18/speaking.png
         speaking_open: ../assets/avatars/serena/secret-18/speaking.png
+      secret-18-velvet:
+        <<: *secret_18_outfit
+        label: 紫夜绸光
+        description: 成熟女性的露肩紫缎晚礼服，紫晶颈饰，目光自信而妩媚
+        switch_greetings:
+          - 换一抹紫色，今晚想听你多说一点。
+          - 这套新衣服，你觉得怎么样？
+        idle: ../assets/avatars/serena/secret-18-velvet/idle.png
+        listening: ../assets/avatars/serena/secret-18-velvet/idle.png
+        thinking: ../assets/avatars/serena/secret-18-velvet/idle.png
+        speaking: ../assets/avatars/serena/secret-18-velvet/speaking.png
+        speaking_closed: ../assets/avatars/serena/secret-18-velvet/idle.png
+        speaking_half: ../assets/avatars/serena/secret-18-velvet/speaking.png
+        speaking_open: ../assets/avatars/serena/secret-18-velvet/speaking.png
+      secret-18-mist:
+        <<: *secret_18_outfit
+        label: 烟紫薄雾
+        description: 烟紫色轻纱披肩叠着丝绸内搭，银梅暗纹与月光石点缀，轻盈含蓄
+        switch_greetings:
+          - 这层轻纱，像把月色披在了肩上。
+          - 今晚换一点轻盈的，陪你慢慢聊。
+        idle: ../assets/avatars/serena/secret-18-mist/idle.png
+        listening: ../assets/avatars/serena/secret-18-mist/idle.png
+        thinking: ../assets/avatars/serena/secret-18-mist/idle.png
+        speaking: ../assets/avatars/serena/secret-18-mist/speaking.png
+        speaking_closed: ../assets/avatars/serena/secret-18-mist/idle.png
+        speaking_half: ../assets/avatars/serena/secret-18-mist/speaking.png
+        speaking_open: ../assets/avatars/serena/secret-18-mist/speaking.png
+      secret-18-moon:
+        <<: *secret_18_outfit
+        label: 月蚀银纱
+        description: 露肩露背的月银色垂褶晚装，轻纱飘带与新月胸针，线条简洁如雕塑
+        switch_greetings:
+          - 这次把月光穿在身上了。
+          - 少一点装饰，换一种心情。
+        idle: ../assets/avatars/serena/secret-18-moon/idle.png
+        listening: ../assets/avatars/serena/secret-18-moon/idle.png
+        thinking: ../assets/avatars/serena/secret-18-moon/idle.png
+        speaking: ../assets/avatars/serena/secret-18-moon/speaking.png
+        speaking_closed: ../assets/avatars/serena/secret-18-moon/idle.png
+        speaking_half: ../assets/avatars/serena/secret-18-moon/speaking.png
+        speaking_open: ../assets/avatars/serena/secret-18-moon/speaking.png
+      secret-18-statue:
+        <<: *secret_18_outfit
+        label: 月下雕像
+        description: 象牙白丝绸内衬叠着肩臂半透明薄纱，银叶别针与雕塑式垂褶，安静如月光
+        switch_greetings:
+          - 像不像从月光里走出来的？
+          - 今晚换成象牙白，安静陪你一会儿。
+        idle: ../assets/avatars/serena/secret-18-statue/idle.png
+        listening: ../assets/avatars/serena/secret-18-statue/idle.png
+        thinking: ../assets/avatars/serena/secret-18-statue/idle.png
+        speaking: ../assets/avatars/serena/secret-18-statue/speaking.png
+        speaking_closed: ../assets/avatars/serena/secret-18-statue/idle.png
+        speaking_half: ../assets/avatars/serena/secret-18-statue/speaking.png
+        speaking_open: ../assets/avatars/serena/secret-18-statue/speaking.png

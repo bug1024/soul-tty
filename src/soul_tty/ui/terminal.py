@@ -199,11 +199,13 @@ class TerminalInput:
         on_toggle_details=None,
         on_cycle_mode=None,
         on_secret_mode=None,
+        on_cycle_secret_outfit=None,
     ) -> None:
         self.on_scroll = on_scroll
         self.on_toggle_details = on_toggle_details
         self.on_cycle_mode = on_cycle_mode
         self.on_secret_mode = on_secret_mode
+        self.on_cycle_secret_outfit = on_cycle_secret_outfit
         self.fd: int | None = None
         self.original = None
         self.closed = threading.Event()
@@ -248,6 +250,11 @@ class TerminalInput:
         return plain.count(b"0")
 
     @classmethod
+    def secret_outfit_toggles(cls, data: bytes) -> int:
+        """裸 9 切换秘密装扮；鼠标坐标和 CSI 参数不参与匹配。"""
+        return cls._CSI_EVENT.sub(b"", data).count(b"9")
+
+    @classmethod
     def secret_toggles(
         cls,
         data: bytes,
@@ -273,6 +280,23 @@ class TerminalInput:
             return data[:start], suffix
         return data, b""
 
+    def _dispatch_keys(self, data: bytes) -> None:
+        """按实际输入顺序处理快捷键，支持同一读取批次内的 18 → 9。"""
+        if self._secret_pending and time.monotonic() - self._secret_pending_at > 1.5:
+            self._secret_pending = b""
+        for key in self._CSI_EVENT.sub(b"", data):
+            if key == ord("8") and self._secret_pending == b"1":
+                if self.on_secret_mode is not None:
+                    self.on_secret_mode()
+            elif key == ord("9") and self.on_cycle_secret_outfit is not None:
+                self.on_cycle_secret_outfit()
+            elif key == ord("0") and self.on_cycle_mode is not None:
+                self.on_cycle_mode()
+            elif key == ord("\t") and self.on_toggle_details is not None:
+                self.on_toggle_details()
+            self._secret_pending = b"1" if key == ord("1") else b""
+            self._secret_pending_at = time.monotonic() if self._secret_pending else 0.0
+
     def _read(self) -> None:
         assert self.fd is not None
         while not self.closed.is_set():
@@ -284,27 +308,7 @@ class TerminalInput:
                 data, self._pending_input = self.split_incomplete_escape(chunk)
                 for direction in self.navigation(data):
                     self.on_scroll(direction)
-                if self.on_toggle_details is not None:
-                    for _ in range(self.detail_toggles(data)):
-                        self.on_toggle_details()
-                if self.on_cycle_mode is not None:
-                    for _ in range(self.outfit_toggles(data)):
-                        self.on_cycle_mode()
-                if self.on_secret_mode is not None:
-                    if (
-                        self._secret_pending
-                        and time.monotonic() - self._secret_pending_at > 1.5
-                    ):
-                        self._secret_pending = b""
-                    toggles, self._secret_pending = self.secret_toggles(
-                        data,
-                        self._secret_pending,
-                    )
-                    self._secret_pending_at = (
-                        time.monotonic() if self._secret_pending else 0.0
-                    )
-                    for _ in range(toggles):
-                        self.on_secret_mode()
+                self._dispatch_keys(data)
             except OSError:
                 return
 
@@ -323,6 +327,16 @@ class TerminalInput:
         except (OSError, termios.error):
             pass
         self.fd = None
+
+
+def _controls_hint(persona: Persona, *, compact: bool = False) -> str:
+    avatar = persona.appearance.avatar
+    if avatar is not None and avatar.outfit.hidden and avatar.outfit.mode == "secret_18":
+        return f"{avatar.outfit.label} · 9 换装 · 0 返回 · Tab 状态 · Ctrl+C 退出"
+    return (
+        "0 换装 · Tab 状态 · Ctrl+C 退出" if compact
+        else "直接说话 · 0 换装 · Tab 状态/开发 · Ctrl+C 退出"
+    )
 
 
 class Dashboard:
@@ -427,6 +441,7 @@ class Dashboard:
             self.toggle_details,
             self.cycle_mode,
             self.toggle_secret_mode,
+            self.cycle_secret_outfit,
         )
         configured_renderer = os.environ.get(
             "SOUL_TTY_AVATAR_RENDERER",
@@ -624,6 +639,21 @@ class Dashboard:
         if target:
             self._switch_outfit(target)
 
+    def cycle_secret_outfit(self) -> None:
+        """9 只轮换当前秘密模式的外观，保留模式和公开套装返回点。"""
+        with self._lock:
+            avatar = self.persona.appearance.avatar
+            if avatar is None or not avatar.outfit.hidden or avatar.outfit.mode != "secret_18":
+                return
+            outfits = [
+                outfit.id for outfit in avatar.outfits
+                if outfit.hidden and outfit.mode == "secret_18"
+            ]
+            if len(outfits) < 2:
+                return
+            target = outfits[(outfits.index(avatar.selected_outfit) + 1) % len(outfits)]
+            self._switch_outfit(target)
+
     def cycle_outfit(self) -> None:
         """兼容旧调用名称；换装现在同时切换对应行为模式。"""
         self.cycle_mode()
@@ -677,7 +707,7 @@ class Dashboard:
             header = Panel(
                 summary, width=body_width, height=min(7, max(3, _console.height // 3)),
                 padding=(0, 1), border_style=self.persona.appearance.primary_color,
-                subtitle="0 换装 · Tab 状态 · Ctrl+C 退出",
+                subtitle=Text(_controls_hint(self.persona, compact=True)),
             )
         header_height = header.height or 20
         body_height = max(3, _console.height - header_height - 1)
@@ -2007,7 +2037,7 @@ def _splash_panel(
         content,
         border_style=primary,
         padding=(1, 4),
-        subtitle="[dim]直接说话 · 0 换装 · Tab 状态/开发 · Ctrl+C 退出[/dim]",
+        subtitle=Text(_controls_hint(persona), style="dim"),
         width=panel_width,
         height=panel_height,
     )

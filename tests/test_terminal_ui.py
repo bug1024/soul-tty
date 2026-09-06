@@ -798,6 +798,93 @@ class TerminalUITests(unittest.TestCase):
         )
         self.assertEqual(memory_flags[-2:], [False, True])
 
+    def test_nine_only_cycles_secret_outfits_and_preserves_return_point(self):
+        console = Console(file=io.StringIO(), width=120, height=40)
+        persona = load_persona("serena").wearing("work")
+        chat = Mock()
+        with (
+            patch.object(terminal, "_console", console),
+            patch.object(terminal.avatar_ui, "render_avatar",
+                         return_value=terminal.avatar_ui.AvatarRender(mode="off")),
+            patch.object(terminal.conversation, "_active_chat", chat),
+            patch.object(terminal.conversation, "set_memory_persistence_allowed") as memory,
+            patch.object(terminal.config, "SYSTEM_PROMPT", ""),
+        ):
+            dashboard = terminal.Dashboard(persona, terminal.RuntimeDetails("local", "MLX"))
+            dashboard.live = Mock()
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "work")
+            dashboard.toggle_secret_mode()
+            original_prompt = terminal.config.SYSTEM_PROMPT
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "secret-18-velvet")
+            self.assertEqual(terminal.config.SYSTEM_PROMPT, original_prompt)
+            self.assertEqual(dashboard.mode, "secret_18")
+            memory.assert_called_with(False)
+            chat.clear_private_history.assert_not_called()
+            self.assertIn("9 换装", terminal._controls_hint(dashboard.persona))
+            self.assertIn("紫夜绸光", terminal._controls_hint(dashboard.persona))
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "secret-18-mist")
+            self.assertEqual(terminal.config.SYSTEM_PROMPT, original_prompt)
+            memory.assert_called_with(False)
+            chat.clear_private_history.assert_not_called()
+            self.assertIn("烟紫薄雾", terminal._controls_hint(dashboard.persona))
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "secret-18-moon")
+            self.assertEqual(terminal.config.SYSTEM_PROMPT, original_prompt)
+            memory.assert_called_with(False)
+            chat.clear_private_history.assert_not_called()
+            self.assertIn("月蚀银纱", terminal._controls_hint(dashboard.persona))
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "secret-18-statue")
+            self.assertEqual(terminal.config.SYSTEM_PROMPT, original_prompt)
+            memory.assert_called_with(False)
+            chat.clear_private_history.assert_not_called()
+            self.assertIn("月下雕像", terminal._controls_hint(dashboard.persona))
+            dashboard.cycle_secret_outfit()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "secret-18")
+            dashboard.cycle_secret_outfit()
+            dashboard.toggle_secret_mode()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "work")
+            self.assertNotIn("9 换装", terminal._controls_hint(dashboard.persona))
+            dashboard.toggle_secret_mode()
+            dashboard.cycle_secret_outfit()
+            dashboard.cycle_mode()
+            self.assertEqual(dashboard.persona.appearance.avatar.selected_outfit, "work")
+            dashboard.stop()
+
+    def test_secret_shortcuts_dispatch_in_order_across_read_batches(self):
+        events = []
+        handler = terminal.TerminalInput(
+            lambda _: None,
+            on_cycle_mode=lambda: events.append("public"),
+            on_secret_mode=lambda: events.append("secret"),
+            on_cycle_secret_outfit=lambda: events.append("outfit"),
+        )
+        handler._dispatch_keys(b"18990")
+        self.assertEqual(events, ["secret", "outfit", "outfit", "public"])
+        events.clear()
+        handler._dispatch_keys(b"1")
+        handler._dispatch_keys(b"\x1b[<64;9;19M89")
+        self.assertEqual(events, ["secret", "outfit"])
+        events.clear()
+        handler._dispatch_keys(b"1")
+        handler._secret_pending_at -= 2
+        handler._dispatch_keys(b"8")
+        self.assertEqual(events, [])
+
+    def test_nine_ignores_mouse_coordinates_and_split_escape_sequences(self):
+        self.assertEqual(terminal.TerminalInput.secret_outfit_toggles(b"99"), 2)
+        self.assertEqual(
+            terminal.TerminalInput.secret_outfit_toggles(b"\x1b[<64;9;19M\x1b[29~"), 0,
+        )
+        data, pending = terminal.TerminalInput.split_incomplete_escape(b"\x1b[<64;9")
+        self.assertEqual(terminal.TerminalInput.secret_outfit_toggles(data), 0)
+        data, pending = terminal.TerminalInput.split_incomplete_escape(pending + b";19M9")
+        self.assertEqual(terminal.TerminalInput.secret_outfit_toggles(data), 1)
+        self.assertFalse(pending)
+
     def test_tab_cycles_welcome_presence_developer_and_back(self):
         output = io.StringIO()
         console = Console(file=output, width=120, height=40, force_terminal=False)

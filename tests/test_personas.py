@@ -31,7 +31,7 @@ class PersonaTests(unittest.TestCase):
         persona = load_persona("serena")
         self.assertEqual(
             [outfit.id for outfit in persona.appearance.avatar.outfits],
-            ["default", "late-night", "work", "secret-18"],
+            ["default", "late-night", "work", "secret-18", "secret-18-velvet", "secret-18-mist", "secret-18-moon", "secret-18-statue"],
         )
 
         work = persona.wearing("work")
@@ -47,6 +47,19 @@ class PersonaTests(unittest.TestCase):
         self.assertTrue(secret.appearance.avatar.outfit.hidden)
         self.assertFalse(secret.appearance.avatar.outfit.memory_enabled)
         self.assertIn("/secret-18/", secret.appearance.avatar.for_state("idle"))
+
+    def test_secret_outfits_share_behavior_and_have_complete_assets(self):
+        avatar = load_persona("serena").appearance.avatar
+        original = avatar.wearing("secret-18").outfit
+        for outfit_id in ("secret-18-velvet", "secret-18-mist", "secret-18-moon", "secret-18-statue"):
+            with self.subTest(outfit=outfit_id):
+                alternate = avatar.wearing(outfit_id).outfit
+                self.assertEqual(alternate.mode, original.mode)
+                self.assertEqual(alternate.voice_instruct, original.voice_instruct)
+                self.assertEqual(alternate.memory_enabled, original.memory_enabled)
+                self.assertTrue(alternate.hidden)
+                for state in ("idle", "listening", "thinking", "speaking", "speaking_closed", "speaking_half"):
+                    self.assertTrue(Path(alternate.for_state(state)).is_file())
 
     def test_rejects_unknown_outfit(self):
         with self.assertRaisesRegex(
